@@ -628,7 +628,7 @@ def _header_end(lines: Sequence[str]) -> int:
     return len(lines)
 
 
-def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, replace_tools: bool = False) -> Tuple[str, List[str]]:
+def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, replace_tools: bool = False, filename: str = "") -> Tuple[str, List[str], List[Issue]]:
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     had_trailing = lines and lines[-1] == ""
@@ -641,6 +641,9 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
         header = [line for line in header if not (_parse_msg(line) and re.match(r"^T\d+$", _parse_msg(line)[0], re.I))]
     fields = info.fields(program)
     changes: List[str] = []
+    # FR-04.2.4: repeated keys keep the first record but must surface as
+    # warnings so the GUI validation table and report warning counts show them.
+    issues: List[Issue] = []
     seen: Dict[str, int] = {}
     semicolon = any(l.rstrip().endswith(";") for l in header if _parse_msg(l))
     if not semicolon and not any(_parse_msg(l) for l in header):
@@ -654,6 +657,14 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
         if upper in fields or re.match(r"^T\d+$", upper):
             if upper in seen:
                 changes.append(f"重复头部字段 {key}（第 {idx + 1} 行）")
+                issues.append(Issue(
+                    filename,
+                    idx + 1,
+                    line.strip(),
+                    "duplicate-msg-field",
+                    "warning",
+                    f"MSG 字段 {key} 出现多次，已保留第一条有效记录，请确认是否合并或删除重复项",
+                ))
             else:
                 seen[upper] = idx
             if upper in fields:
@@ -698,7 +709,7 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
     result_lines = header + body
     if had_trailing:
         result_lines.append("")
-    return newline.join(result_lines), changes
+    return newline.join(result_lines), changes, issues
 
 
 def _find_body_start(text: str) -> int:
@@ -999,14 +1010,15 @@ def reprocess_file(f: FilePlan, info: ProgramInfo, config: Config, *, tools: Seq
         return
     effective = program_defaults(f.original_text, info)
     effective.tools = list(tools or ())
-    f.output_text, f.changes = apply_header(f.original_text, f.program, effective, config, replace_tools=True)
+    f.output_text, f.changes, header_issues = apply_header(f.original_text, f.program, effective, config, replace_tools=True, filename=f.source)
     f.output_text, tool_changed, tool_note = add_initial_tool_change(f.output_text, effective.tools, config)
     if tool_changed:
         f.changes.append(tool_note)
     f.output_text, m03_changed, m03_note = add_m03(f.output_text, config)
     if m03_changed:
         f.changes.append(m03_note)
-    f.stats, f.issues = analyze_program(f.output_text, f.source, f.program, effective, config)
+    f.stats, validation_issues = analyze_program(f.output_text, f.source, f.program, effective, config)
+    f.issues = header_issues + validation_issues
 
 
 def _parallel_apply(items, function, workers: int):
@@ -1084,7 +1096,7 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                     # With no current APT, fall back to saved special-tool
                     # values (passed as tool_overrides), then MPF rows.
                     effective_info.tools = list(tool_overrides.get(f.program, [])) or extract_tools(f.original_text)
-                new, changes = apply_header(f.original_text, f.program, effective_info, config, replace_tools=replace_tools)
+                new, changes, header_issues = apply_header(f.original_text, f.program, effective_info, config, replace_tools=replace_tools, filename=f.source)
                 new, tool_changed, tool_note = add_initial_tool_change(new, effective_info.tools, config)
                 if tool_changed:
                     changes.append(tool_note)
@@ -1094,6 +1106,7 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                 f.output_text, f.changes = new, changes
                 f.stats, validation_issues = analyze_program(new, f.source, f.program, info, config)
                 f.target = str(directory / (f.program + ".MPF"))
+                f.issues.extend(header_issues)
                 f.issues.extend(validation_issues)
                 if Path(f.source).name != Path(f.target).name:
                     f.changes.append(f"重命名为 {Path(f.target).name}")

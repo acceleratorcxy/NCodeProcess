@@ -295,7 +295,7 @@ class CoreTests(unittest.TestCase):
         text = 'MSG("PROGRAM:P")\nMSG("DRAWING NUMBER:D")\nMSG("PART VERSION:V")\nN1S100M03\nN2M30\n'
         cfg = Config(g00_level="allow")
         info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE", [ToolInfo(1, "8", "", "钻头")])
-        out, _ = apply_header(text, "P", info, cfg, replace_tools=True)
+        out, _, _ = apply_header(text, "P", info, cfg, replace_tools=True)
         lines = out.splitlines()
         tool_index = next(i for i, line in enumerate(lines) if 'MSG("T1:' in line)
         body_index = next(i for i, line in enumerate(lines) if line.startswith("N1"))
@@ -316,7 +316,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(defaults.nc_machine, "CUSTOM_MACHINE")
         self.assertEqual(defaults.control_system, "CUSTOM_CONTROL")
         self.assertEqual(defaults.date, "OLD_DATE")
-        out, _changes = apply_header(text, "OLD_PROGRAM", defaults, Config(overwrite_fields=True), replace_tools=False)
+        out, _changes, _issues = apply_header(text, "OLD_PROGRAM", defaults, Config(overwrite_fields=True), replace_tools=False)
         fields = extract_header_fields(out)
         self.assertEqual(fields["PROGRAM"], "OLD_PROGRAM")
         self.assertEqual(fields["NC MACHINE"], "CUSTOM_MACHINE")
@@ -443,6 +443,52 @@ class CoreTests(unittest.TestCase):
         zero = [issue for issue in issues if issue.kind == "feed-zero"]
         self.assertEqual(len(zero), 1)
         self.assertEqual(zero[0].severity, "error")
+
+    def test_duplicate_msg_field_is_reported_as_warning(self):
+        # FR-04.2.4: when the same MSG key appears more than once, the first
+        # record is kept and every duplicate must surface as a warning in the
+        # issue list (visible in the GUI validation table and counted in the
+        # report), not only as a textual change note.
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(
+            'MSG("PROGRAM:P")\n'
+            'MSG("PROGRAM:OTHER")\n'
+            'N1G1X10S100M03\n'
+            'N2M30\n'
+            '%\n',
+            encoding="utf-8",
+        )
+        cfg = Config(g00_level="allow")
+        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        mpf = next(f for f in plan.files if f.kind == "mpf")
+        duplicate = [issue for issue in mpf.issues if issue.kind == "duplicate-msg-field"]
+        self.assertEqual(len(duplicate), 1)
+        self.assertEqual(duplicate[0].severity, "warning")
+        self.assertIn("PROGRAM", duplicate[0].suggestion)
+        # The first occurrence is kept; the later duplicate is not applied.
+        self.assertEqual(extract_header_fields(mpf.output_text)["PROGRAM"], "P")
+        report = process_plan(plan, str(root), cfg)
+        self.assertEqual(report.warnings, 1)
+
+    def test_duplicate_tool_msg_field_detected_when_rows_not_replaced(self):
+        # FR-04.2.4 duplicate detection also covers repeated tool MSG rows.
+        # When the caller does not replace tools (no APT / no override), the
+        # repeated Tn rows stay in the file and must be reported as warnings.
+        text = (
+            'MSG("PROGRAM:P")\n'
+            'MSG("T1:DIA=10")\n'
+            'MSG("T1:DIA=12")\n'
+            'N1S100M03\n'
+            'N2M30\n'
+        )
+        out, changes, issues = apply_header(
+            text, "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), Config(g00_level="allow")
+        )
+        duplicates = [issue for issue in issues if issue.kind == "duplicate-msg-field"]
+        self.assertEqual(len(duplicates), 1)
+        self.assertEqual(duplicates[0].severity, "warning")
+        self.assertIn("T1", duplicates[0].suggestion)
+        self.assertTrue(any("重复头部字段 T1" in change for change in changes))
 
 
 if __name__ == "__main__":
