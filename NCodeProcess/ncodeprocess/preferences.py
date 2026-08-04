@@ -95,16 +95,21 @@ def save_all(values: Dict[str, str], key: str = KEY) -> None:
 
 
 def clear_all(key: str = KEY) -> None:
-    """删除注册表中的全部值（编制/审核与程序设置一起清除）。"""
+    """删除注册表中的全部值（编制/审核与程序设置一起清除）。
+
+    默认键同时清除遗留键（如旧版 NCPostProcess）中的对应值，
+    避免清除后旧值在下次启动时经兼容读取“复活”。
+    """
     if sys.platform != "win32":
         return
     import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as registry_key:
-            for name in REGISTRY_KEYS:
-                try:
-                    winreg.DeleteValue(registry_key, name)
-                except FileNotFoundError:
-                    pass
-    except OSError:
-        pass
+    for key_path in _registry_paths(key):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as registry_key:
+                for name in REGISTRY_KEYS:
+                    try:
+                        winreg.DeleteValue(registry_key, name)
+                    except FileNotFoundError:
+                        pass
+        except OSError:
+            continue
