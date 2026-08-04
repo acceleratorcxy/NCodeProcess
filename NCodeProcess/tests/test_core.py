@@ -490,6 +490,55 @@ class CoreTests(unittest.TestCase):
         self.assertIn("T1", duplicates[0].suggestion)
         self.assertTrue(any("重复头部字段 T1" in change for change in changes))
 
+    def test_forced_encoding_reads_gb18030_file(self):
+        root = self.make_dir()
+        path = root / "x_P.MPF"
+        path.write_bytes('MSG("PROGRAM:P")\nN1X1S100M03\nN2M30\n'.encode("gb18030"))
+        plan = build_plan(scan_directory(str(root), Config(encoding="gb18030")),
+                          ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                          Config(encoding="gb18030"))
+        self.assertEqual(next(f for f in plan.files if f.kind == "mpf").program, "P")
+
+    def test_delete_extensions_config_filters_cleanup_plan(self):
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text("N1S100M03\nN2M30\n", encoding="utf-8")
+        (root / "a.LOG").write_text("log", encoding="utf-8")
+        (root / "b.MOAPTIndexes").write_text("idx", encoding="utf-8")
+        result = scan_directory(str(root), Config(delete_extensions={".log"}))
+        kinds = {f.kind for f in result.files}
+        self.assertIn("intermediate", kinds)
+        sources = [f.source for f in result.files if f.kind == "intermediate"]
+        self.assertEqual(sources, ["a.LOG"])
+        self.assertNotIn("b.MOAPTIndexes", [f.source for f in result.files])
+
+    def test_end_marker_check_can_be_disabled(self):
+        text = "MSG(\"PROGRAM:P\")\nN1S100M03\n"
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", require_end_marker=False))
+        self.assertFalse(any(i.kind == "end-marker" for i in issues))
+
+    def test_m06_requirement_can_be_enabled(self):
+        text = "MSG(\"PROGRAM:P\")\nN1T1\nN2S100M03\nN3M30\n"
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", require_m06=True))
+        self.assertTrue(any(i.kind == "tool-change" and i.severity == "error" for i in issues))
+
+    def test_spindle_speed_requirement_can_be_enabled(self):
+        text = "MSG(\"PROGRAM:P\")\nN1G1X1\nN2M30\n"
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", require_spindle_speed=True, auto_m03=False))
+        self.assertTrue(any(i.kind == "spindle-speed" and i.severity == "error" for i in issues))
+
+    def test_allowed_name_pattern_controls_program_extraction(self):
+        root = self.make_dir()
+        path = root / "程序_P.MPF"
+        path.write_text('MSG("PROGRAM:P")\nN1S100M03\nN2M30\n', encoding="utf-8")
+        strict = Config(allowed_name_pattern=r"^[A-Za-z0-9]+$")
+        plan = build_plan(scan_directory(str(root), strict), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), strict)
+        mpf = next(f for f in plan.files if f.kind == "mpf")
+        self.assertEqual(mpf.program, "P")
+        self.assertEqual(Path(mpf.target).name, "P.MPF")
+
 
 if __name__ == "__main__":
     unittest.main()
