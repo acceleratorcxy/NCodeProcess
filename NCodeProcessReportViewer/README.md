@@ -2,10 +2,14 @@
 
 `NCodeProcessReportViewer.exe` 是独立的 JSON 报告查看程序，不会修改 NC 程序或报告内容。
 
-## 用户手册
+## 项目文档
 
-- [NC 处理报告查看器用户手册（Word）](docs/NCodeProcessReportViewer-用户手册.docx)
-- [NC 处理报告查看器用户手册（Markdown）](docs/NCodeProcessReportViewer-用户手册.md)
+- [需求文档](docs/NCodeProcessReportViewer-需求文档.md)（含实施状态总览）
+- [用户手册](docs/NCodeProcessReportViewer-用户手册.md)（另有 Word/PDF 版）
+- [发布说明](docs/NCodeProcessReportViewer-发布说明.md)
+- [审查与待办](docs/NCodeProcessReportViewer-审查与待办.md)
+- [程序理解与操作记录](docs/NCodeProcessReportViewer-程序理解与操作记录.md)
+- [测试指南](docs/NCodeProcessReportViewer-测试指南.md)
 
 ## 使用方法
 
