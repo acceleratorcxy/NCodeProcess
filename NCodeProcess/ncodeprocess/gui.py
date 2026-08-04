@@ -34,6 +34,7 @@ from .preferences import (
     clear_all,
     load_all,
     save_all,
+    storage_backend,
 )
 
 
@@ -950,8 +951,11 @@ class App(ttk.Frame):
         self.info_vars["date"].set(format_nc_date())
 
     def save_fields(self):
-        save_all({"bianzhi": self.info_vars["bianzhi"].get().strip(), "shenhe": self.info_vars["shenhe"].get().strip()}, self.settings_registry_key)
-        self.status.set("编制和审核/校对已保存到当前 Windows 用户设置。")
+        backend, location = save_all({"bianzhi": self.info_vars["bianzhi"].get().strip(), "shenhe": self.info_vars["shenhe"].get().strip()}, self.settings_registry_key)
+        if backend == "registry":
+            self.status.set("编制和审核/校对已保存到当前 Windows 用户设置（注册表）。")
+        else:
+            self.status.set(f"编制和审核/校对已保存到设置文件：{location}")
 
     def load_special_tools(self):
         source_path = self.special_tools_path
@@ -1127,10 +1131,15 @@ class App(ttk.Frame):
         self.scan()
 
     def _clear_registry_settings(self):
-        """删除注册表中的全部值（含编制/审核）并回到默认值。"""
+        """删除全部持久化的设置值（含编制/审核）并回到默认值。"""
+        backend, location = storage_backend(self.settings_registry_key)
+        if backend == "registry":
+            question = "将删除 HKCU\\Software\\NCodeProcess 下的全部程序设置值（含编制/审核），确定？"
+        else:
+            question = f"将删除设置文件 {location} 中的全部程序设置值（含编制/审核），确定？"
         if not messagebox.askyesno(
-            "清除注册表",
-            "将删除 HKCU\\Software\\NCodeProcess 下的全部程序设置值（含编制/审核），确定？",
+            "清除设置",
+            question,
             parent=self.settings_window,
         ):
             return

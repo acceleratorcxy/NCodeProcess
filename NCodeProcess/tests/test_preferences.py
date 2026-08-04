@@ -1,7 +1,12 @@
+import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from ncodeprocess.preferences import REGISTRY_DEFAULTS, clear_all, load_all, save_all
+import ncodeprocess.preferences as preferences_module
+from ncodeprocess.preferences import REGISTRY_DEFAULTS, clear_all, load_all, save_all, storage_backend
 
 # 使用独立的测试键，避免污染真实的 HKCU\Software\NCodeProcess。
 TEST_KEY = r"Software\NCodeProcess_UnitTests"
@@ -51,7 +56,6 @@ class PreferencesTests(unittest.TestCase):
     def test_clear_all_also_removes_legacy_key_values(self):
         # 旧版 NCPostProcess 键中的值必须随"清除注册表"一并删除，
         # 否则清除后下次启动旧值会复活。用补丁把当前键/遗留键指向测试键。
-        from unittest.mock import patch
         with patch("ncodeprocess.preferences.KEY", TEST_KEY), \
              patch("ncodeprocess.preferences.LEGACY_KEYS", (TEST_KEY + "_Legacy",)):
             save_all({"bianzhi": "旧值"}, TEST_KEY + "_Legacy")
@@ -59,6 +63,85 @@ class PreferencesTests(unittest.TestCase):
             clear_all(TEST_KEY)
             self.assertEqual(load_all(TEST_KEY), {})
             self.assertEqual(load_all(TEST_KEY + "_Legacy"), {})
+
+
+FILE_TEST_KEY = r"Software\NCodeProcess_UnitTests_File"
+
+
+class FileBackendPreferencesTests(unittest.TestCase):
+    """注册表不可写时回退到设置文件的后备存储测试（与平台无关）。"""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory(prefix="ncodeprocess-prefs-")
+        self.addCleanup(self._temp.cleanup)
+        root = Path(self._temp.name)
+        self.appdata_dir = root / "appdata"
+        self.home_dir = root / "home"
+        # 指向隔离的临时目录，避免读写真实的 %APPDATA% 与用户主目录。
+        self._env_patch = patch.dict(os.environ, {"APPDATA": str(self.appdata_dir)})
+        self._env_patch.start()
+        self.addCleanup(self._env_patch.stop)
+        self._home_patch = patch.object(preferences_module.Path, "home", return_value=self.home_dir)
+        self._home_patch.start()
+        self.addCleanup(self._home_patch.stop)
+
+    def tearDown(self):
+        clear_all(FILE_TEST_KEY)
+
+    @property
+    def appdata_file(self):
+        return self.appdata_dir / "NCodeProcess" / "NCodeProcess_UnitTests_File.json"
+
+    @property
+    def home_file(self):
+        return self.home_dir / "NCodeProcess_UnitTests_File.json"
+
+    @staticmethod
+    def _unwritable_registry():
+        return patch.object(preferences_module, "_registry_write_works", return_value=False)
+
+    def test_save_falls_back_to_appdata_file_when_registry_unwritable(self):
+        with self._unwritable_registry():
+            backend, location = save_all({"encoding": "gb18030", "bianzhi": "张工"}, FILE_TEST_KEY)
+        self.assertEqual(backend, "file")
+        self.assertEqual(location, str(self.appdata_file))
+        self.assertEqual(load_all(FILE_TEST_KEY), {"encoding": "gb18030", "bianzhi": "张工"})
+
+    def test_save_all_keeps_other_values_in_file(self):
+        with self._unwritable_registry():
+            save_all({"encoding": "gb18030"}, FILE_TEST_KEY)
+            save_all({"require_m06": "1"}, FILE_TEST_KEY)
+        self.assertEqual(load_all(FILE_TEST_KEY)["encoding"], "gb18030")
+        self.assertEqual(load_all(FILE_TEST_KEY)["require_m06"], "1")
+
+    def test_clear_all_removes_file_settings(self):
+        with self._unwritable_registry():
+            save_all({"encoding": "gb18030"}, FILE_TEST_KEY)
+        clear_all(FILE_TEST_KEY)
+        self.assertEqual(load_all(FILE_TEST_KEY), {})
+
+    def test_save_falls_back_to_home_when_appdata_unusable(self):
+        # 让 %APPDATA% 指向一个普通文件，使 APPDATA 目录创建失败 → 回退用户主目录。
+        blocker = Path(self._temp.name) / "appdata_blocker"
+        blocker.write_text("occupied", encoding="utf-8")
+        with patch.dict(os.environ, {"APPDATA": str(blocker)}):
+            with self._unwritable_registry():
+                backend, location = save_all({"encoding": "gb18030"}, FILE_TEST_KEY)
+        self.assertEqual(backend, "file")
+        self.assertEqual(location, str(self.home_file))
+        self.assertEqual(load_all(FILE_TEST_KEY)["encoding"], "gb18030")
+
+    def test_storage_backend_reports_file_when_registry_unwritable(self):
+        with self._unwritable_registry():
+            backend, location = storage_backend(FILE_TEST_KEY)
+        self.assertEqual(backend, "file")
+        self.assertEqual(location, str(self.appdata_file))
+
+    def test_storage_backend_reports_registry_when_writable(self):
+        with patch.object(preferences_module, "_registry_write_works", return_value=True):
+            backend, location = storage_backend(FILE_TEST_KEY)
+        self.assertEqual(backend, "registry")
+        self.assertIsNone(location)
 
 
 if __name__ == "__main__":
