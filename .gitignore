@@ -26,6 +26,11 @@ Publish/
 # ── 运行时生成数据 ──────────────────────────────────────
 NCodeProcessData/
 
+# ── 样例数据与测试部署目录（不入库） ────────────────────
+NCodeProcess/样例文件/
+NCodeProcess/测试/
+NCodeProcessReportViewer/样例文件/
+
 # ── 临时文件 ────────────────────────────────────────────
 _smoke/
 _pub1/
