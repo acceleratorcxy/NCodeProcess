@@ -29,6 +29,9 @@ NCodeProcessData/
 # ── 已归档历史文档（本地保留，不入库不跟踪） ────────────
 NCodeProcess/docs/archive/
 
+# ── 打包测试流程文档（仅本地维护，不入库不跟踪） ────────
+NCodeProcess/docs/NCodeProcess-更改测试打包提交流程.md
+
 # ── 样例数据与测试部署目录（不入库） ────────────────────
 NCodeProcess/样例文件/
 NCodeProcess/测试/

@@ -70,7 +70,7 @@ scan_directory(目录, Config) → build_plan(scan, ProgramInfo, Config)
 - **线程安全**：GUI 界面刷新通过 `self.after()` 回到主线程；启动延后回调在窗口销毁时安全取消。
 - **GUI 测试隔离**：`test_gui._build_app` 固定使用 `TEST_SETTINGS_KEY` 创建 App，避免本机真实注册表残留设置污染默认值断言。
 - **打包**：`build_portable.ps1` 每次生成临时 16 位 AES 键注入 PyInstaller 加密 PYZ；产出 `dist\NCodeProcess.exe`、`NCodeProcess-Package\`、`NCodeProcess-Windows7-Portable.zip` 及 `SHA256SUMS.txt`。
-- **推送**：直连 GitHub 常失败，可用 `git -c http.proxy=http://127.0.0.1:7890 push origin master` 单次注入代理（详见 `docs/更改测试打包提交流程.md`）。
+- **推送**：直连 GitHub 常失败，可用 `git -c http.proxy=http://127.0.0.1:7890 push origin master` 单次注入代理（详见 `docs/NCodeProcess-更改测试打包提交流程.md`）。
 
 ---
 
@@ -151,7 +151,7 @@ d3ac9ca feat(core): M03 补写位置策略可配置（after-s/standalone），ad
 - **设计规格**：`docs/archive/superpowers/specs/`（同上，仅本地保留）
 - **发布说明**：`docs/NCodeProcess-发布说明.md`
 - **审查与待办**：`docs/NCodeProcess-审查与待办.md`
-- **流程文档**：`docs/更改测试打包提交流程.md`（本地维护，未入库）
+- **流程文档**：`docs/NCodeProcess-更改测试打包提交流程.md`（仅本地维护，不入库，2026-08-05 起在 `.gitignore` 中）
 - **测试基线**：会话起始 132 项 → 当前 **170 项**，全量通过（conda python38）
 
 ---
@@ -162,5 +162,5 @@ d3ac9ca feat(core): M03 补写位置策略可配置（after-s/standalone），ad
 2. **机床行程检查**：按用户决定暂不实施；如后续需要可单独规划（`Config.machine_limits` + 越程校验 + 未配置时 info 提示）。
 3. **辅助指令顺序规则按机床配置**：当前为全局规则集，不区分机床。
 4. **版本号**：当前 `__version__` 仍 1.0.0，正式发版前建议提升并同步 `VERSION.txt`/`version_info.txt`。
-5. **流程文档入库**：`docs/更改测试打包提交流程.md` 按用户决定仅本地维护、不入库（如需团队共享可重新评估）。
+5. **流程文档入库**：`docs/NCodeProcess-更改测试打包提交流程.md` 按用户决定仅本地维护、不入库（已在 `.gitignore` 中；如需团队共享可重新评估）。
 6. **审查与待办**：详见 `docs/NCodeProcess-审查与待办.md`（线程安全、子窗口适配、备份/只读预检等未处理项）。
