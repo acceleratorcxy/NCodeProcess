@@ -33,25 +33,25 @@
 
 ## 二、新增/变更明细
 
-### 1. 必填 MSG 字段可配置（提交 `56ca278`）
+### 1. 必填 MSG 字段可配置（提交 `e1af69f`）
 - `Config.required_fields`（默认全键）；`validate_program` 与 `apply_header` 按配置判断；GUI 4 个可勾选项（编制/审核/图号/版次），程序/机床/控制系统固定必填。
 
-### 2. M03 补写位置策略（提交 `d3ac9ca`）
+### 2. M03 补写位置策略（提交 `28029c5`）
 - `Config.m03_position`（`after-s` 默认 / `standalone`）；standalone 在第一条切削/运动指令（G1/G2/G3 或 X/Y/Z）前插入独立 M03 行，无运动指令时回退首条指令行前。
 
-### 3. F/S 上下限校验（提交 `f7c6481`）
+### 3. F/S 上下限校验（提交 `327da7c`）
 - `Config.feed_min/max`、`spindle_min/max`（None 不检查）；越界报 `feed-range`/`spindle-range`（error）；GUI 4 个可留空输入框（负数拦截）。
 
-### 4. 辅助指令顺序校验（提交 `0693a51`）
+### 4. 辅助指令顺序校验（提交 `75b6b74`）
 - `Config.aux_checks`（core 默认空集；GUI 默认全开）；规则：`m03-before-motion`（error）、`m05-before-end`/`m08-before-cut`/`m09-before-end`（warning）；**仅当相关指令都出现且顺序错误时报告，M09 未出现不提示**。
 
-### 5. 换行强制策略（提交 `6cea51e`）
+### 5. 换行强制策略（提交 `01b9de4`）
 - `Config.newline`（`auto` 默认 / `crlf` / `lf`）；`_effective_newline` 统一 `apply_header`/`add_initial_tool_change`/`add_m03` 三处换行选择，强制策略下输出归一。
 
-### 6. 设置对话框两页布局重构（提交 `215e04c`）
+### 6. 设置对话框两页布局重构（提交 `71756fb`）
 - `ttk.Notebook` 两页：基本设置（编码/扩展名/允许字符/APTSOURCE/主程序扩展名/输出扩展名）与校验规则（结束标记/M06/S、G00 级别、必填字段、M03 策略、F/S 上下限、换行、辅助顺序）；对话框宽 ≤640、高 ≤500。
 
-### 7. 界面布局优化（提交 `7ecb17f`、`9e0a994`）
+### 7. 界面布局优化（提交 `6224090`、`3146557`）
 - 必填字段 4 勾选项等间距；G00 级别移入设置校验规则页（主窗口移除）；自定义刀具类型在程序信息区独立成行；F/S 上下限「输入框 ~ 输入框」改入独立子容器紧凑排列。
 
 ## 三、新增配置项一览（Config → GUI）
@@ -86,14 +86,14 @@
 
 | 提交 | 内容 |
 |---|---|
-| `56ca278` | feat(core): 必填 MSG 字段可配置（required_fields），validate/apply_header 跟随 |
-| `d3ac9ca` | feat(core): M03 补写位置策略可配置（after-s/standalone），add_m03 按策略插值 |
-| `f7c6481` | feat(core): F/S 上下限校验（feed/spindle_min/max），validate_program 越界报 error |
-| `0693a51` | feat(core): 辅助指令顺序校验（aux_checks），M03/M05/M08/M09 顺序规则 |
-| `6cea51e` | feat(core): 换行强制策略（auto/crlf/lf），输出按策略归一 |
-| `215e04c` | refactor(gui): 程序设置对话框改为分组两页布局并锁定 Batch 2 控件 |
-| `7ecb17f` | refactor(gui): 必填字段等间距排版、G00 级别移入设置、自定义刀具类型独立成行 |
-| `9e0a994` | refactor(gui): F/S 上下限输入框与~改为独立子容器紧凑排列 |
+| `e1af69f` | feat(core): 必填 MSG 字段可配置（required_fields），validate/apply_header 跟随 |
+| `28029c5` | feat(core): M03 补写位置策略可配置（after-s/standalone），add_m03 按策略插值 |
+| `327da7c` | feat(core): F/S 上下限校验（feed/spindle_min/max），validate_program 越界报 error |
+| `75b6b74` | feat(core): 辅助指令顺序校验（aux_checks），M03/M05/M08/M09 顺序规则 |
+| `01b9de4` | feat(core): 换行强制策略（auto/crlf/lf），输出按策略归一 |
+| `71756fb` | refactor(gui): 程序设置对话框改为分组两页布局并锁定 Batch 2 控件 |
+| `6224090` | refactor(gui): 必填字段等间距排版、G00 级别移入设置、自定义刀具类型独立成行 |
+| `3146557` | refactor(gui): F/S 上下限输入框与~改为独立子容器紧凑排列 |
 
 ## 七、已知限制与后续建议
 

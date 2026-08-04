@@ -97,16 +97,16 @@ scan_directory(目录, Config) → build_plan(scan, ProgramInfo, Config)
 
 | # | 改动 | 说明 | 提交 |
 |---|---|---|---|
-| 1 | 设置文件后备存储 | 注册表不可写时回退 `%APPDATA%\NCodeProcess\settings.json`，再回退用户主目录；双后端 | `9eccb41` |
-| 2 | Task A：必填 MSG 字段可配置 | `Config.required_fields`；validate/apply_header 跟随；GUI 4 个可勾选项（程序/机床/控制系统固定必填） | `56ca278` |
-| 3 | Task B：M03 补写位置策略 | `m03_position`（after-s/standalone）；standalone 在首条切削/运动指令前插独立行 | `d3ac9ca` |
-| 4 | Task C：F/S 上下限 | `feed/spindle_min·max`；越界报 `feed-range`/`spindle-range`（error） | `f7c6481` |
-| 5 | Task E：换行强制策略 | `newline`（auto/crlf/lf）；`_effective_newline` 统一三处拼接点，输出按策略归一 | `6cea51e` |
-| 6 | Task D：辅助指令顺序校验 | `aux_checks`（M03/M05/M08/M09 四条，规则经用户确认）；M03 规则为 error，其余 warning；M09 未出现不提示 | `0693a51` |
-| 7 | Task F：设置对话框两页重构 | `ttk.Notebook` 两页（基本设置/校验规则） | `215e04c` |
-| 8 | 布局优化 | 必填字段等间距；G00 级别移入设置校验规则页；自定义刀具类型独立成行；修复 `_build_app` 真实注册表污染 | `7ecb17f` |
-| 9 | F/S 上下限间距修复 | 「输入框 ~ 输入框」改入每行独立子容器 pack 紧凑排列 | `9e0a994` |
-| 10 | 文档归档 | Batch 2 计划、Release Note、本操作记录、流程文档维护 | `3c50468` 等 |
+| 1 | 设置文件后备存储 | 注册表不可写时回退 `%APPDATA%\NCodeProcess\settings.json`，再回退用户主目录；双后端 | `9ffe5d3` |
+| 2 | Task A：必填 MSG 字段可配置 | `Config.required_fields`；validate/apply_header 跟随；GUI 4 个可勾选项（程序/机床/控制系统固定必填） | `e1af69f` |
+| 3 | Task B：M03 补写位置策略 | `m03_position`（after-s/standalone）；standalone 在首条切削/运动指令前插独立行 | `28029c5` |
+| 4 | Task C：F/S 上下限 | `feed/spindle_min·max`；越界报 `feed-range`/`spindle-range`（error） | `327da7c` |
+| 5 | Task E：换行强制策略 | `newline`（auto/crlf/lf）；`_effective_newline` 统一三处拼接点，输出按策略归一 | `01b9de4` |
+| 6 | Task D：辅助指令顺序校验 | `aux_checks`（M03/M05/M08/M09 四条，规则经用户确认）；M03 规则为 error，其余 warning；M09 未出现不提示 | `75b6b74` |
+| 7 | Task F：设置对话框两页重构 | `ttk.Notebook` 两页（基本设置/校验规则） | `71756fb` |
+| 8 | 布局优化 | 必填字段等间距；G00 级别移入设置校验规则页；自定义刀具类型独立成行；修复 `_build_app` 真实注册表污染 | `6224090` |
+| 9 | F/S 上下限间距修复 | 「输入框 ~ 输入框」改入每行独立子容器 pack 紧凑排列 | `3146557` |
+| 10 | 文档归档 | Batch 2 计划、Release Note、本操作记录、流程文档维护 | `f992574` 等 |
 
 **关键决策**
 - **机床行程 X/Y/Z 检查不实施**：需求 7.3 该条按用户决定排除在 Batch 2 之外。
@@ -122,27 +122,32 @@ scan_directory(目录, Config) → build_plan(scan, ProgramInfo, Config)
 | 2026-08-04 19:43–20:06 | `b04076…`/`bec88f…`/`2a9c81…`/`bafd54…` | +M03 注释修复 / +M03 升级 error / +手动编辑 / +编辑页行号 |
 | 2026-08-04 之后 | `aca8cb4d…`/`5fd3752d…`/`fc2595f7…` | +对比功能 / +独立滚动、标题 / +悬停提示 |
 | 2026-08-05 00:00 前后 | `0ac50327…` | Batch 2 全部功能 + 两页重构 + 计划/Release Note 归档 |
-| 2026-08-05 00:13 后 | `ce9b2b42…` | + 布局优化（7ecb17f） |
-| 2026-08-05 00:20 后 | `eb7264ed…` | + F/S 上下限间距修复（9e0a994） |
+| 2026-08-05 00:13 后 | `ce9b2b42…` | + 布局优化（6224090） |
+| 2026-08-05 00:20 后 | `eb7264ed…` | + F/S 上下限间距修复（3146557） |
 
 每次打包后校验 EXE 哈希与 `SHA256SUMS.txt` 一致，并同步 `Publish\` 5 个目标（exe / 便携包 / Package 目录 / 无md发布 zip / 最终发布 zip）。
 
 ### 2.4 提交记录（截至 2026-08-05）
 
 ```
-090887d chore(git): 归档文档仅本地保留，从 git 移除跟踪
-a44f497 docs: 整理 docs 文件夹，归档已完成计划并合并审查与记录文档
-9e0a994 refactor(gui): F/S 上下限输入框与~改为独立子容器紧凑排列
-7ecb17f refactor(gui): 必填字段等间距排版、G00 级别移入设置、自定义刀具类型独立成行
-3c50468 docs: 归档 Batch 2 实施计划与发布说明
-215e04c refactor(gui): 程序设置对话框改为分组两页布局并锁定 Batch 2 控件
-0693a51 feat(core): 辅助指令顺序校验（aux_checks），M03/M05/M08/M09 顺序规则
-6cea51e feat(core): 换行强制策略（auto/crlf/lf），输出按策略归一
-f7c6481 feat(core): F/S 上下限校验（feed/spindle_min/max），validate_program 越界报 error
-d3ac9ca feat(core): M03 补写位置策略可配置（after-s/standalone），add_m03 按策略插值
-56ca278 feat(core): 必填 MSG 字段可配置（required_fields），validate/apply_header 跟随
-9eccb41 feat(prefs): 注册表不可写时回退到设置文件保存设置
-（更早提交见 `git log`）
+3bcd84a docs: 操作记录中代理地址通用化为占位符
+4b35160 docs: 流程文档改名对齐命名格式并保持仅本地维护
+77ecec2 docs: 需求文档升级 V1.1 并同步发布说明引用
+ebecd78 docs: 完善需求文档并移入 docs 目录，纳入同步维护
+a3d3015 docs: 完善流程文档并同步发布说明/审查与待办/操作记录
+449826c chore(git): 归档文档仅本地保留，从 git 移除跟踪
+01834c3 docs: 整理 docs 文件夹，归档已完成计划并合并审查与记录文档
+3146557 refactor(gui): F/S 上下限输入框与~改为独立子容器紧凑排列
+6224090 refactor(gui): 必填字段等间距排版、G00 级别移入设置、自定义刀具类型独立成行
+f992574 docs: 归档 Batch 2 实施计划与发布说明
+71756fb refactor(gui): 程序设置对话框改为分组两页布局并锁定 Batch 2 控件
+75b6b74 feat(core): 辅助指令顺序校验（aux_checks），M03/M05/M08/M09 顺序规则
+01b9de4 feat(core): 换行强制策略（auto/crlf/lf），输出按策略归一
+327da7c feat(core): F/S 上下限校验（feed/spindle_min/max），validate_program 越界报 error
+28029c5 feat(core): M03 补写位置策略可配置（after-s/standalone），add_m03 按策略插值
+e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/apply_header 跟随
+9ffe5d3 feat(prefs): 注册表不可写时回退到设置文件保存设置
+（更早提交见 `git log`；注：2026-08-05 隐私清洗重写历史后全部提交哈希已变更，上表为当前哈希）
 ```
 
 ### 2.5 配套工作
@@ -153,6 +158,16 @@ d3ac9ca feat(core): M03 补写位置策略可配置（after-s/standalone），ad
 - **审查与待办**：`docs/NCodeProcess-审查与待办.md`
 - **流程文档**：`docs/NCodeProcess-更改测试打包提交流程.md`（仅本地维护，不入库，2026-08-05 起在 `.gitignore` 中）
 - **测试基线**：会话起始 132 项 → 当前 **170 项**，全量通过（conda python38）
+
+### 2.6 隐私清洗（2026-08-05）
+
+- **起因**：例行检查入库文件时发现：操作记录含本机代理地址 `http://127.0.0.1:7890`；git 历史提交的作者/提交者邮箱为个人邮箱 `cxyhhh@icloud.com`。
+- **处理**：
+  1. 操作记录代理地址改为占位符 `http://<代理地址>`，实际地址仅保留在本地流程文档（提交 `3bcd84a`）。
+  2. README 示例路径 `D:\CATIA\输出目录` 经用户确认保留（纯示例，无个人信息）。
+  3. 重写全部历史邮箱 `cxyhhh@icloud.com` → `noreply@example.com`：`git filter-branch --env-filter` → 删除 `refs/original` 备份 → `reflog expire --expire=now --all` → `gc --prune=now` → `push --force-with-lease` 覆盖远程。
+- **影响**：历史提交哈希全部改变（本文档及发布说明中的哈希已同步更新为当前值）；旧哈希引用失效；远程已强制推送，其他克隆需重新同步。
+- **约定**：后续提交前按流程文档「提交前隐私审核」检查入库内容，本机路径/用户名/邮箱/代理地址等一律通用化后再提交。
 
 ---
 
