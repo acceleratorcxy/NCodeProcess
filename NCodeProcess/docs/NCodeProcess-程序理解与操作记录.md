@@ -130,6 +130,7 @@ scan_directory(目录, Config) → build_plan(scan, ProgramInfo, Config)
 ### 2.4 提交记录（截至 2026-08-05）
 
 ```
+35aa1ec chore(git): 删除 .superpowers 运行时目录并禁止入库
 3bcd84a docs: 操作记录中代理地址通用化为占位符
 4b35160 docs: 流程文档改名对齐命名格式并保持仅本地维护
 77ecec2 docs: 需求文档升级 V1.1 并同步发布说明引用
@@ -169,6 +170,12 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
   3. 重写全部历史邮箱 `cxyhhh@icloud.com` → `noreply@example.com`：`git filter-branch --env-filter` → 删除 `refs/original` 备份 → `reflog expire --expire=now --all` → `gc --prune=now` → `push --force-with-lease` 覆盖远程。
 - **影响**：历史提交哈希全部改变（本文档及发布说明中的哈希已同步更新为当前值）；旧哈希引用失效；远程已强制推送，其他克隆需重新同步。
 - **约定**：后续提交前按流程文档「提交前隐私审核」检查入库内容，本机路径/用户名/邮箱/代理地址等一律通用化后再提交。
+
+### 2.7 运行时目录清理（2026-08-05）
+
+- **删除**：`NCodeProcess/.superpowers/brainstorm/win7-layout-20260804/`（superpowers 头脑风暴会话临时内容：布局选项/待确认 HTML、服务状态文件），git 与本地一并删除（提交 `35aa1ec`）。
+- **禁止入库**：`NCodeProcess/.gitignore` 新增 `.superpowers/` 规则；后续 superpowers 等运行时会话数据、临时状态文件一律不纳入版本管理。
+- **约定**：提交前用 `git status` 确认无运行时/临时生成目录混入（见本地流程文档「运行时/临时目录不入库」）。
 
 ---
 
