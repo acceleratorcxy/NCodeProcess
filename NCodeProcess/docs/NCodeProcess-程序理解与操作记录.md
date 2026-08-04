@@ -114,7 +114,7 @@ scan_directory(目录, Config) → build_plan(scan, ProgramInfo, Config)
 - **自定义刀具类型不放 tool_frame**：实测放底部刀具信息区会使主窗口最低高度超限（reqheight 696>668，破坏 1286×668 最低布局锁定），最终放回程序信息区腾出的行。
 - **GUI 测试注册表隔离**：本机真实 `HKCU\Software\NCodeProcess` 残留 EXE 运行保存的 `require_m06=1`/`require_spindle_speed=1` 曾导致默认值断言失败；`_build_app` 改用 `TEST_SETTINGS_KEY`。
 
-### 2.3 打包与同步记录（conda python38）
+### 2.3 打包与同步记录（conda Python 3.8 环境）
 
 | 时间 | EXE SHA256（前缀） | 内容 |
 |---|---|---|
@@ -159,15 +159,15 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 - **审查与待办**：`docs/NCodeProcess-审查与待办.md`
 - **测试指南**：`docs/NCodeProcess-测试指南.md`（测试架构、基线、隔离约定与添加测试的做法）
 - **流程文档**：`docs/NCodeProcess-更改测试打包提交流程.md`（仅本地维护，不入库，2026-08-05 起在 `.gitignore` 中）
-- **测试基线**：会话起始 132 项 → Batch 2 后 170 项 → 2026-08-05 合并精简后 **159 项**（覆盖不变），全量通过（conda python38）
+- **测试基线**：会话起始 132 项 → Batch 2 后 170 项 → 2026-08-05 合并精简后 **159 项**（覆盖不变），全量通过（conda Python 3.8 环境）
 
 ### 2.6 隐私清洗（2026-08-05）
 
-- **起因**：例行检查入库文件时发现：操作记录含本机代理地址 `http://127.0.0.1:7890`；git 历史提交的作者/提交者邮箱为个人邮箱 `cxyhhh@icloud.com`。
+- **起因**：例行检查入库文件时发现：操作记录含本机代理地址；git 历史提交的作者/提交者邮箱为个人邮箱。
 - **处理**：
   1. 操作记录代理地址改为占位符 `http://<代理地址>`，实际地址仅保留在本地流程文档（提交 `3bcd84a`）。
   2. README 示例路径 `D:\CATIA\输出目录` 经用户确认保留（纯示例，无个人信息）。
-  3. 重写全部历史邮箱 `cxyhhh@icloud.com` → `noreply@example.com`：`git filter-branch --env-filter` → 删除 `refs/original` 备份 → `reflog expire --expire=now --all` → `gc --prune=now` → `push --force-with-lease` 覆盖远程。
+  3. 重写全部历史邮箱（个人邮箱 → 通用邮箱 `noreply@example.com`）：`git filter-branch --env-filter` → 删除 `refs/original` 备份 → `reflog expire --expire=now --all` → `gc --prune=now` → `push --force-with-lease` 覆盖远程。
 - **影响**：历史提交哈希全部改变（本文档及发布说明中的哈希已同步更新为当前值）；旧哈希引用失效；远程已强制推送，其他克隆需重新同步。
 - **约定**：后续提交前按流程文档「提交前隐私审核」检查入库内容，本机路径/用户名/邮箱/代理地址等一律通用化后再提交。
 

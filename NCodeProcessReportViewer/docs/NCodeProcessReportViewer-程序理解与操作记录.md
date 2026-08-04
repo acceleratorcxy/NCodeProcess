@@ -19,7 +19,7 @@ NCodeProcessReportViewer/
 │  ├─ __init__.py      # 入口（main）
 │  └─ viewer.py        # 纯逻辑函数 + ReportViewer(Tkinter) 界面类
 ├─ tests/              # test_report_viewer.py（6 项）
-├─ build_portable.ps1  # 打包脚本（conda python38）
+├─ build_portable.ps1  # 打包脚本（conda Python 3.8 环境）
 └─ docs/               # 需求文档、发布说明、审查与待办、用户手册、操作记录、测试指南
 ```
 

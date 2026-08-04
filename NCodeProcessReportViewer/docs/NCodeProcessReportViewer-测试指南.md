@@ -1,7 +1,7 @@
 # NCodeProcessReportViewer 测试指南
 
 > 用途：说明查看器当前测试情况（架构、基线、覆盖、已知噪音）与新增/维护测试的做法。
-> 适用范围：本机 Windows + conda `python38` 环境；目标平台 Windows 7，**必须使用 Python 3.8 跑测试**。
+> 适用范围：本机 Windows + conda `Python 3.8 环境` 环境；目标平台 Windows 7，**必须使用 Python 3.8 跑测试**。
 
 > **维护说明**：本文件纳入版本管理，随测试变化持续维护；测试数量、结构、运行命令变化后同步更新本文件，并同步 `NCodeProcessReportViewer-程序理解与操作记录.md`、`NCodeProcessReportViewer-发布说明.md`、`NCodeProcessReportViewer-需求文档.md`。
 
@@ -9,15 +9,15 @@
 
 ## 一、测试架构总览
 
-- **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `python38`）。
+- **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `Python 3.8 环境`）。
 - **目录**：`tests/`，模块 `tests/test_report_viewer.py`。
 - **当前基线**：**6 项全部通过**（约 0.4 秒）。
 - **运行命令**（cwd 为 `NCodeProcessReportViewer` 目录）：
 
 | 场景 | 命令 |
 |---|---|
-| 全量测试 | `D:\anaconda3\envs\python38\python.exe -m unittest discover -s tests -v` |
-| 单用例 | `D:\anaconda3\envs\python38\python.exe -m unittest tests.test_report_viewer.ReportViewerTests -v` |
+| 全量测试 | `conda run -n <Python 3.8 环境名> python -m unittest discover -s tests -v` |
+| 单用例 | `conda run -n <Python 3.8 环境名> python -m unittest tests.test_report_viewer.ReportViewerTests -v` |
 
 ## 二、测试类与覆盖范围
 

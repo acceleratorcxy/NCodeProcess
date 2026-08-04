@@ -51,7 +51,7 @@
 - 使用 Python 3.8 和 PyInstaller 5.13.2 打包。
 - 提供单文件 `NCodeProcessReportViewer.exe` 和便携 ZIP。
 
-> 实施状态：✅ **已实现**。`build_portable.ps1`（`-CondaEnvironment python38`）产出单文件 EXE、便携目录与 ZIP；发布构建启用随机密钥字节码加密、`-OO` 优化、运行时反调试、调试模块裁剪与 SHA-256 完整性记录（详见 `SECURITY.md`）。
+> 实施状态：✅ **已实现**。`build_portable.ps1`（`-CondaEnvironment <Python 3.8 环境名>`）产出单文件 EXE、便携目录与 ZIP；发布构建启用随机密钥字节码加密、`-OO` 优化、运行时反调试、调试模块裁剪与 SHA-256 完整性记录（详见 `SECURITY.md`）。
 
 ---
 

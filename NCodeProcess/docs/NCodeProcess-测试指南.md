@@ -1,7 +1,7 @@
 # NCodeProcess 测试指南
 
 > 用途：说明当前测试情况（架构、基线、覆盖、已知噪音）与新增/维护测试的做法，供后续开发按此执行。
-> 适用范围：本机 Windows + conda `python38` 环境；目标平台 Windows 7，**必须使用 Python 3.8 跑测试**（系统 Python 3.11 的验证不能代表 3.8 兼容性）。
+> 适用范围：本机 Windows + conda `Python 3.8 环境` 环境；目标平台 Windows 7，**必须使用 Python 3.8 跑测试**（系统 Python 3.11 的验证不能代表 3.8 兼容性）。
 
 > **维护说明**：本文件纳入版本管理，随测试变化持续维护。测试数量、模块结构、运行命令或约定变化后，应同步更新本文件，并同步 `NCodeProcess-程序理解与操作记录.md`、`NCodeProcess-发布说明.md`、`NCodeProcess-需求文档.md`（第 15 节）及本地流程文档 `NCodeProcess-更改测试打包提交流程.md` 中的测试基线。
 
@@ -9,16 +9,16 @@
 
 ## 一、测试架构总览
 
-- **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `python38`，3.8.19）。
+- **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `Python 3.8 环境`，3.8.19）。
 - **目录**：`tests/`（与 `ncodeprocess/` 同级），模块划分与源码分层一一对应。
 - **当前基线**：**159 项全部通过**（2026-08-05 测试代码合并精简后；精简前 170 项，覆盖范围不变，仅合并重复用例），全量运行约 30 秒。
 - **运行命令**（cwd 为 `NCodeProcess` 项目目录）：
 
 | 场景 | 命令 |
 |---|---|
-| 全量测试 | `D:\anaconda3\envs\python38\python.exe -m unittest discover -s tests -v` |
-| 单模块 | `D:\anaconda3\envs\python38\python.exe -m unittest tests.test_core -v` |
-| 单用例 | `D:\anaconda3\envs\python38\python.exe -m unittest tests.test_gui.LayoutWidgetTests.test_keep_table_uses_compact_profile_without_default_horizontal_overflow -v` |
+| 全量测试 | `conda run -n <Python 3.8 环境名> python -m unittest discover -s tests -v` |
+| 单模块 | `conda run -n <Python 3.8 环境名> python -m unittest tests.test_core -v` |
+| 单用例 | `conda run -n <Python 3.8 环境名> python -m unittest tests.test_gui.LayoutWidgetTests.test_keep_table_uses_compact_profile_without_default_horizontal_overflow -v` |
 
 ## 二、测试模块与覆盖范围
 

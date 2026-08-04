@@ -34,12 +34,12 @@
 
 ## 三、测试与验证
 
-- 测试基线：**6 项全部通过**（conda python38 / Python 3.8.19，约 0.4 秒），覆盖文件发现、报告加载校验、汇总/问题/统计行生成、窗口几何、表格无横向溢出。
+- 测试基线：**6 项全部通过**（conda Python 3.8 / 3.8.19，约 0.4 秒），覆盖文件发现、报告加载校验、汇总/问题/统计行生成、窗口几何、表格无横向溢出。
 - 详见 `NCodeProcessReportViewer-测试指南.md`。
 
 ## 四、发布形态
 
-- `build_portable.ps1`（`-CondaEnvironment python38`）产出单文件 `NCodeProcessReportViewer.exe`、便携目录与 ZIP。
+- `build_portable.ps1`（`-CondaEnvironment <Python 3.8 环境名>`）产出单文件 `NCodeProcessReportViewer.exe`、便携目录与 ZIP。
 - 发布构建：随机密钥字节码加密、`-OO` 优化、运行时反调试、调试模块裁剪、临时构建痕迹清理、SHA-256 完整性记录（详见 `SECURITY.md`）。
 
 ## 五、已知限制与后续建议

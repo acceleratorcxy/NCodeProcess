@@ -14,15 +14,15 @@
 ## 构建
 
 ```powershell
-conda run -n python38 python -m pip install -r requirements-build.txt
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1 -CondaEnvironment python38
+conda run -n <Python 3.8 环境名> python -m pip install -r requirements-build.txt
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1 -CondaEnvironment <Python 3.8 环境名>
 ```
 
 如已有代码签名证书，可使用当前用户证书库中的证书指纹签名：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1 `
-  -CondaEnvironment python38 `
+  -CondaEnvironment <Python 3.8 环境名> `
   -SigningCertificateThumbprint "证书指纹" `
   -TimestampServer "http://timestamp.digicert.com"
 ```
