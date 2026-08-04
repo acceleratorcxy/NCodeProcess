@@ -986,6 +986,43 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
+    def test_config_injects_all_new_settings(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.encoding_var.set("gb18030")
+            app.delete_extensions_var.set(".log")
+            app.allowed_name_pattern_var.set(r"^[A-Za-z0-9]+$")
+            app.aptsource_dir_var.set("archive")
+            app.require_end_marker_var.set(False)
+            app.require_m06_var.set(True)
+            app.require_spindle_speed_var.set(True)
+            config = app.config()
+            self.assertEqual(config.encoding, "gb18030")
+            self.assertEqual(config.delete_extensions, {".log"})
+            self.assertEqual(config.allowed_name_pattern, r"^[A-Za-z0-9]+$")
+            self.assertEqual(config.aptsource_dir, "archive")
+            self.assertFalse(config.require_end_marker)
+            self.assertTrue(config.require_m06)
+            self.assertTrue(config.require_spindle_speed)
+        finally:
+            root.destroy()
+
+    def test_finish_scan_applies_configured_name_pattern(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.allowed_name_pattern_var.set(r"^[A-Za-z0-9]+$")
+            plan = FilePlan("程序_x.MPF", "mpf", None, None, "keep")
+            result = ScanResult("root", [plan])
+            with patch("ncodeprocess.gui.simpledialog.askstring", return_value="程序名"):
+                app.finish_scan(result)
+            self.assertIsNone(plan.program)  # 中文名被收紧后的模式拒绝
+            plan.issues = []
+            with patch("ncodeprocess.gui.simpledialog.askstring", return_value="PROG1"):
+                app.finish_scan(result)
+            self.assertEqual(plan.program, "PROG1")
+        finally:
+            root.destroy()
+
 
 class StartupCallbackTests(unittest.TestCase):
     def test_destroy_cancels_startup_callbacks_before_replacing_root(self):

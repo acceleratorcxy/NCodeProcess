@@ -1115,7 +1115,8 @@ class App(ttk.Frame):
         changed = False
         for f in unresolved:
             value = simpledialog.askstring("确认程序名", "无法确定程序名：" + f.source, parent=self.master)
-            if value and re.match(r"^[A-Za-z0-9_\u4e00-\u9fff-]+$", value.strip()):
+            pattern = self.allowed_name_pattern_var.get().strip()
+            if value and re.match(pattern, value.strip()):
                 f.program = value.strip()
                 f.issues = [i for i in f.issues if i.kind != "program-name"]
                 changed = True
