@@ -1120,13 +1120,17 @@ class App(ttk.Frame):
         ttk.Label(rules, text="紧贴 S 数值后 / 独立行").grid(row=6, column=2, sticky="w", padx=(6, 0))
 
         ttk.Label(rules, text="F 上下限").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        ttk.Entry(rules, textvariable=self.feed_min_var, width=8).grid(row=7, column=1, sticky="w", pady=(6, 3))
-        ttk.Label(rules, text="~").grid(row=7, column=2, sticky="w", pady=(6, 3))
-        ttk.Entry(rules, textvariable=self.feed_max_var, width=8).grid(row=7, column=3, sticky="w", pady=(6, 3))
+        feed_frame = ttk.Frame(rules)
+        feed_frame.grid(row=7, column=1, columnspan=3, sticky="w", pady=(6, 3))
+        ttk.Entry(feed_frame, textvariable=self.feed_min_var, width=8).pack(side="left")
+        ttk.Label(feed_frame, text="~").pack(side="left", padx=4)
+        ttk.Entry(feed_frame, textvariable=self.feed_max_var, width=8).pack(side="left")
         ttk.Label(rules, text="S 上下限").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        ttk.Entry(rules, textvariable=self.spindle_min_var, width=8).grid(row=8, column=1, sticky="w", pady=(6, 3))
-        ttk.Label(rules, text="~").grid(row=8, column=2, sticky="w", pady=(6, 3))
-        ttk.Entry(rules, textvariable=self.spindle_max_var, width=8).grid(row=8, column=3, sticky="w", pady=(6, 3))
+        spindle_frame = ttk.Frame(rules)
+        spindle_frame.grid(row=8, column=1, columnspan=3, sticky="w", pady=(6, 3))
+        ttk.Entry(spindle_frame, textvariable=self.spindle_min_var, width=8).pack(side="left")
+        ttk.Label(spindle_frame, text="~").pack(side="left", padx=4)
+        ttk.Entry(spindle_frame, textvariable=self.spindle_max_var, width=8).pack(side="left")
         ttk.Label(rules, text="留空 = 不检查").grid(row=9, column=1, columnspan=3, sticky="w", pady=(0, 3))
 
         newline_combo = ttk.Combobox(rules, textvariable=self.newline_var, state="readonly", width=14,

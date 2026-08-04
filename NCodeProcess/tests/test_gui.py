@@ -1367,6 +1367,46 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
+    def test_feed_spindle_limit_rows_have_tight_consistent_spacing(self):
+        # F/S 上下限的「输入框 ~ 输入框」位于各自独立子容器内紧凑排列：
+        # 不与共享网格列对齐导致大间距，且相邻间隙一致且很小。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            rules = app.settings_pages[1]
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            limit_vars = {
+                str(app.feed_min_var), str(app.feed_max_var),
+                str(app.spindle_min_var), str(app.spindle_max_var),
+            }
+            limit_entries = [
+                widget for widget in descendants(rules)
+                if widget.winfo_class() == "TEntry"
+                and str(widget.cget("textvariable")) in limit_vars
+            ]
+            self.assertEqual(len(limit_entries), 4)
+            # 两行（F / S）各自独立容器，而非全部挂在共享网格的 rules 上。
+            frames = {widget.master for widget in limit_entries}
+            self.assertEqual(len(frames), 2)
+            root.update()
+            for frame in frames:
+                children = frame.winfo_children()
+                self.assertGreaterEqual(len(children), 3)
+                positions = [widget.winfo_x() for widget in children]
+                gaps = [
+                    positions[i + 1] - (positions[i] + children[i].winfo_width())
+                    for i in range(len(children) - 1)
+                ]
+                self.assertEqual(len(set(gaps)), 1)  # 相邻间隙一致
+                self.assertLessEqual(gaps[0], 6)     # 间隙足够小（紧凑）
+        finally:
+            root.destroy()
+
 
 class StartupCallbackTests(unittest.TestCase):
     def test_destroy_cancels_startup_callbacks_before_replacing_root(self):
