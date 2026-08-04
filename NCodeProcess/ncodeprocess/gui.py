@@ -550,15 +550,17 @@ class App(ttk.Frame):
         self.master.minsize(min_width, min_height)
 
     def _build(self):
-        top = ttk.LabelFrame(self, text="自动扫描目录")
+        top = ttk.LabelFrame(self, text="程序运行配置")
         top.pack(fill="x")
         ttk.Label(top, text="扫描应用程序所在目录：").pack(side="left", padx=(8, 2), pady=6)
         ttk.Label(top, text=str(self.workdir)).pack(side="left", padx=2, pady=6)
         self.settings_button = ttk.Button(top, text="程序设置…", command=lambda: self.open_settings())
-        self.settings_button.pack(side="left", padx=8)
         self.recursive = tk.BooleanVar(value=False)
-        ttk.Checkbutton(top, text="包含子目录", variable=self.recursive).pack(side="right", padx=5)
         self.save_aptsource = tk.BooleanVar(value=False)
+        # 右侧控件按 pack 逆序显示为：[重新扫描目录][保存 APTSOURCE][包含子目录][程序设置…]
+        self.settings_button.pack(side="right", padx=5)
+        self.recursive_checkbox = ttk.Checkbutton(top, text="包含子目录", variable=self.recursive)
+        self.recursive_checkbox.pack(side="right", padx=5)
         ttk.Checkbutton(top, text="保存 APTSOURCE（按时间归档）", variable=self.save_aptsource, command=self.scan).pack(side="right", padx=8)
         ttk.Button(top, text="重新扫描目录", command=self.scan).pack(side="right", padx=5)
 

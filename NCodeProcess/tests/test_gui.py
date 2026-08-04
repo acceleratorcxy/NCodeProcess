@@ -940,6 +940,26 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
+    def test_settings_button_right_of_recursive_and_frame_title(self):
+        # "程序设置…"按钮位于"包含子目录"复选框右侧，顶部栏更名为"程序运行配置"。
+        root, app = self._build_app(1286, 668)
+        try:
+            def x_relative_to_root(widget):
+                x = 0
+                current = widget
+                while current is not root:
+                    x += current.winfo_x()
+                    current = current.master
+                return x
+
+            self.assertGreater(
+                x_relative_to_root(app.settings_button),
+                x_relative_to_root(app.recursive_checkbox),
+            )
+            self.assertEqual(app.settings_button.master.cget("text"), "程序运行配置")
+        finally:
+            root.destroy()
+
     def test_settings_dialog_opens_and_confirm_applies(self):
         root, app = self._build_app(1286, 668)
         try:
