@@ -12,10 +12,14 @@
 
 升级自旧版时，程序仍会读取旧 `NCPostProcessData/special_tools.json` 和旧注册表偏好项；新增配置与报告统一写入 `NCodeProcessData`，报告文件名统一为 `ncodeprocess-report-*.json`。
 
-## 用户手册
+## 项目文档
 
-- [NC 程序后处理工具用户手册（Word）](docs/NCodeProcess-用户手册.docx)
-- [NC 程序后处理工具用户手册（Markdown）](docs/NCodeProcess-用户手册.md)
+- [需求文档](docs/NCodeProcess-需求文档.md)（V1.1，含实施状态总览与待确认事项）
+- [用户手册](docs/NCodeProcess-用户手册.md)（另有 Word/PDF 版）
+- [发布说明](docs/NCodeProcess-发布说明.md)
+- [审查与待办](docs/NCodeProcess-审查与待办.md)
+- [程序理解与操作记录](docs/NCodeProcess-程序理解与操作记录.md)
+- [测试指南](docs/NCodeProcess-测试指南.md)
 
 ## 界面与显示支持
 
@@ -54,6 +58,10 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 - 读取/补全 MSG 头部，HASS 的 `%` 起始行始终保留在第一行；刀具信息支持自动识别和人工编辑。
 - 检查正文 M03，按首个 S 指令补写；统计 F/S/X/Y/Z；报告语法、G00、程序结束标记、刀具换刀等问题。
 
+## 程序设置
+
+「程序设置…」对话框分两页：**基本设置**（编码、待删除扩展名、允许字符、APTSOURCE 子目录、主程序扩展名、输出扩展名）与**校验规则**（结束标记/M06/S 检查开关，G00 级别：错误/警告/允许，必填 MSG 字段：编制/审核/图号/版次可勾选、程序/机床/控制系统固定必填，M03 补写位置：贴 S 后/独立行，F/S 上下限，换行策略：自动/CRLF/LF，辅助指令顺序：M03/M05/M08/M09）。Batch 1 设置持久化到注册表/设置文件（注册表不可写时回退）；Batch 2 新增配置按需求约定仅本次运行生效。
+
 ## 便携打包
 
 在 Windows 上准备名为 `python38` 的 Anaconda Python 3.8 环境，并安装 PyInstaller 5.13.2 后运行：
@@ -74,8 +82,10 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 
 ## 验证
 
-```text
-python -m unittest discover -v
+测试必须使用 conda `python38` 环境（程序目标 Windows 7，系统 Python 3.11 的验证不代表 3.8 兼容性）：
+
+```powershell
+conda run -n python38 python -m unittest discover -s tests -v
 ```
 
-仓库内的 V5-2500B 和 HASS 样例已用副本做过完整批量处理验证，原始样例不会被测试流程修改。
+当前测试基线 **159 项全部通过**（架构、隔离约定与添加测试的做法详见 [测试指南](docs/NCodeProcess-测试指南.md)）。仓库内的 V5-2500B 和 HASS 样例已用副本做过完整批量处理验证，原始样例不会被测试流程修改。

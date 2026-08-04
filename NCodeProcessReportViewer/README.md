@@ -1,6 +1,8 @@
 # NC 处理报告查看器
 
-`NCodeProcessReportViewer.exe` 是独立的 JSON 报告查看程序，不会修改 NC 程序或报告内容。
+当前发布版本：1.0.0。
+
+`NCodeProcessReportViewer.exe` 是独立的 JSON 报告查看程序，用于查看 [NCodeProcess](https://github.com/acceleratorcxy/NCodeProcess) 生成的 `ncodeprocess-report-*.json` 处理报告；只读，不会修改 NC 程序或报告内容。
 
 ## 项目文档
 
@@ -29,6 +31,10 @@
 - 完整原始 JSON 内容。
 
 界面中的长表格和文本区域均支持横向、纵向滚动。
+
+## 界面
+
+默认窗口约 1290×720（最小 1160×640），按屏幕尺寸自适应；左栏为报告列表与逐文件明细，右栏为五个页签（概览与可视化 / 参数统计 / 校验问题 / 修改与差异 / 原始 JSON）。选中报告或文件后立即刷新相关页面，不重复读取文件。
 
 ## 测试与打包
 
