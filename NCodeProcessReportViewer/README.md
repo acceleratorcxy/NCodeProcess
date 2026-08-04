@@ -39,8 +39,11 @@
 ## 测试与打包
 
 ```powershell
-conda run -n python38 python -m unittest discover -s tests -v
-.\build_portable.ps1 -CondaEnvironment python38
+# 测试（在 Python 3.8 环境中运行）
+python -m unittest discover -s tests -v
+
+# 打包（默认使用脚本配置的 Python 3.8 环境）
+.\build_portable.ps1
 ```
 
 发布文件位于 `dist`，包括单文件 EXE、便携目录和 ZIP 压缩包。

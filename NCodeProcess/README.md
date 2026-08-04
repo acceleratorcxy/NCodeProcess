@@ -60,11 +60,11 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 
 ## 程序设置
 
-「程序设置…」对话框分两页：**基本设置**（编码、待删除扩展名、允许字符、APTSOURCE 子目录、主程序扩展名、输出扩展名）与**校验规则**（结束标记/M06/S 检查开关，G00 级别：错误/警告/允许，必填 MSG 字段：编制/审核/图号/版次可勾选、程序/机床/控制系统固定必填，M03 补写位置：贴 S 后/独立行，F/S 上下限，换行策略：自动/CRLF/LF，辅助指令顺序：M03/M05/M08/M09）。Batch 1 设置持久化到注册表/设置文件（注册表不可写时回退）；Batch 2 新增配置按需求约定仅本次运行生效。
+「程序设置…」对话框分两页：**基本设置**（编码、待删除扩展名、允许字符、APTSOURCE 子目录、主程序扩展名、输出扩展名）与**校验规则**（结束标记/M06/S 检查开关，G00 级别：错误/警告/允许，必填 MSG 字段：编制/审核/图号/版次可勾选、程序/机床/控制系统固定必填，M03 补写位置：贴 S 后/独立行，F/S 上下限，换行策略：自动/CRLF/LF，辅助指令顺序：M03/M05/M08/M09）。
 
 ## 便携打包
 
-在 Windows 上准备名为 `python38` 的 Anaconda Python 3.8 环境，并安装 PyInstaller 5.13.2 后运行：
+在 Windows 上准备 Python 3.8 环境，并安装 PyInstaller 后运行：
 
 ```powershell
 .\build_portable.ps1
@@ -82,10 +82,8 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 
 ## 验证
 
-测试必须使用 conda `python38` 环境（程序目标 Windows 7，系统 Python 3.11 的验证不代表 3.8 兼容性）：
+在 Python 3.8 环境中运行：
 
 ```powershell
-conda run -n python38 python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
-
-当前测试基线 **159 项全部通过**（架构、隔离约定与添加测试的做法详见 [测试指南](docs/NCodeProcess-测试指南.md)）。仓库内的 V5-2500B 和 HASS 样例已用副本做过完整批量处理验证，原始样例不会被测试流程修改。
