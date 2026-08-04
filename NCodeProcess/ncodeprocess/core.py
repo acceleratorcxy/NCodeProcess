@@ -78,6 +78,11 @@ class Config:
     required_fields: List[str] = field(default_factory=lambda: [key for key, _label, _required in FIELD_ORDER])
     # M03 补写位置策略：after-s（紧贴首个 S 数值后，默认）/ standalone（独立行）。
     m03_position: str = "after-s"
+    # F/S 数值上下限（None = 不检查）；越界按 error 上报。
+    feed_min: Optional[float] = None
+    feed_max: Optional[float] = None
+    spindle_min: Optional[float] = None
+    spindle_max: Optional[float] = None
 
 
 @dataclass
@@ -944,9 +949,17 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                 feed_values.append((i, raw_value, value, raw_line))
                 if value == 0:
                     issues.append(Issue(filename, i, raw_line, "feed-zero", "error", "发现 F0：进给为零，属于严重异常，请立即修正"))
+                if config.feed_min is not None and value < config.feed_min:
+                    issues.append(Issue(filename, i, raw_line, "feed-range", "error", f"F 值 {raw_value} 低于下限 {config.feed_min:g}"))
+                if config.feed_max is not None and value > config.feed_max:
+                    issues.append(Issue(filename, i, raw_line, "feed-range", "error", f"F 值 {raw_value} 超过上限 {config.feed_max:g}"))
             else:
                 spindle_values.append((i, raw_value, value, raw_line))
                 has_s = True
+                if config.spindle_min is not None and value < config.spindle_min:
+                    issues.append(Issue(filename, i, raw_line, "spindle-range", "error", f"S 值 {raw_value} 低于下限 {config.spindle_min:g}"))
+                if config.spindle_max is not None and value > config.spindle_max:
+                    issues.append(Issue(filename, i, raw_line, "spindle-range", "error", f"S 值 {raw_value} 超过上限 {config.spindle_max:g}"))
             if value < 0:
                 issues.append(Issue(filename, i, raw_line, "negative-parameter", "error", f"{key} 不得为负数"))
         if not has_m03 and "M" in upper_code and M03_RE.search(code):

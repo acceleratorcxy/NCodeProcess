@@ -618,6 +618,33 @@ class CoreTests(unittest.TestCase):
         self.assertIn("M03\nN1S1000", out)
         self.assertNotIn("S1000M03", out)
 
+    def test_feed_below_min_is_error(self):
+        text = '%\nMSG("PROGRAM:P")\nN1G1X10F3S1000M03\nN2M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", feed_min=100.0))
+        self.assertTrue(any(i.kind == "feed-range" and i.severity == "error" for i in issues))
+
+    def test_feed_above_max_is_error(self):
+        text = '%\nMSG("PROGRAM:P")\nN1G1X10F30000S1000M03\nN2M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", feed_max=20000.0))
+        self.assertTrue(any(i.kind == "feed-range" and i.severity == "error" for i in issues))
+
+    def test_spindle_limits_check_both_ends(self):
+        text = '%\nMSG("PROGRAM:P")\nN1G1X10F100S5000M03\nN2M30\n%\n'
+        info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+        below = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow", spindle_min=6000.0))
+        self.assertTrue(any(i.kind == "spindle-range" and i.severity == "error" for i in below))
+        above = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow", spindle_max=4000.0))
+        self.assertTrue(any(i.kind == "spindle-range" and i.severity == "error" for i in above))
+
+    def test_limits_none_do_not_report(self):
+        # 未配置上下限（None）时不产生范围类问题，锁定默认行为。
+        text = '%\nMSG("PROGRAM:P")\nN1G1X10F3S5000M03\nN2M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow"))
+        self.assertFalse(any(i.kind in ("feed-range", "spindle-range") for i in issues))
+
 
 if __name__ == "__main__":
     unittest.main()

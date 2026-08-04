@@ -605,6 +605,11 @@ class App(ttk.Frame):
         self.required_part_var = tk.BooleanVar(value=True)
         # M03 补写位置策略（Batch 2，仅本次运行生效）：after-s / standalone。
         self.m03_position_var = tk.StringVar(value="after-s")
+        # F/S 上下限（Batch 2，仅本次运行生效）：留空 = 不检查。
+        self.feed_min_var = tk.StringVar(value="")
+        self.feed_max_var = tk.StringVar(value="")
+        self.spindle_min_var = tk.StringVar(value="")
+        self.spindle_max_var = tk.StringVar(value="")
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
@@ -1032,6 +1037,10 @@ class App(ttk.Frame):
             "required_drawing": self.required_drawing_var.get(),
             "required_part": self.required_part_var.get(),
             "m03_position": self.m03_position_var.get(),
+            "feed_min": self.feed_min_var.get(),
+            "feed_max": self.feed_max_var.get(),
+            "spindle_min": self.spindle_min_var.get(),
+            "spindle_max": self.spindle_max_var.get(),
         }
         win = tk.Toplevel(self.master)
         win.title("程序设置")
@@ -1089,6 +1098,16 @@ class App(ttk.Frame):
         labeled(12, "M03 补写位置", m03_combo)
         ttk.Label(body, text="紧贴 S 数值后 / 独立行").grid(row=12, column=2, sticky="w", padx=(6, 0))
 
+        ttk.Label(body, text="F 上下限").grid(row=13, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Entry(body, textvariable=self.feed_min_var, width=8).grid(row=13, column=1, sticky="w", pady=(6, 3))
+        ttk.Label(body, text="~").grid(row=13, column=2, sticky="w", pady=(6, 3))
+        ttk.Entry(body, textvariable=self.feed_max_var, width=8).grid(row=13, column=3, sticky="w", pady=(6, 3))
+        ttk.Label(body, text="S 上下限").grid(row=14, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Entry(body, textvariable=self.spindle_min_var, width=8).grid(row=14, column=1, sticky="w", pady=(6, 3))
+        ttk.Label(body, text="~").grid(row=14, column=2, sticky="w", pady=(6, 3))
+        ttk.Entry(body, textvariable=self.spindle_max_var, width=8).grid(row=14, column=3, sticky="w", pady=(6, 3))
+        ttk.Label(body, text="留空 = 不检查").grid(row=15, column=1, columnspan=3, sticky="w", pady=(0, 3))
+
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
         ttk.Button(actions, text="恢复默认", command=self._restore_default_settings).pack(side="left")
@@ -1108,12 +1127,25 @@ class App(ttk.Frame):
     def _parsed_output_extension(self):
         return parse_output_extension(self.program_output_extension_var.get())
 
+    @staticmethod
+    def _parsed_limit(raw):
+        """解析可选数值上限/下限：留空 → None；非法或负数 → ValueError。"""
+        value = (raw or "").strip()
+        if not value:
+            return None
+        parsed = float(value)
+        if parsed < 0:
+            raise ValueError(f"上下限不得为负数：{value}")
+        return parsed
+
     def _confirm_settings(self):
         try:
             self._parsed_delete_extensions()
             re.compile(self.allowed_name_pattern_var.get().strip())
             self._parsed_program_extensions()
             self._parsed_output_extension()
+            for var in (self.feed_min_var, self.feed_max_var, self.spindle_min_var, self.spindle_max_var):
+                self._parsed_limit(var.get())
         except (ValueError, re.error) as error:
             messagebox.showerror("程序设置无效", str(error), parent=self.settings_window)
             return
@@ -1152,6 +1184,10 @@ class App(ttk.Frame):
         self.required_drawing_var.set(True)
         self.required_part_var.set(True)
         self.m03_position_var.set("after-s")
+        self.feed_min_var.set("")
+        self.feed_max_var.set("")
+        self.spindle_min_var.set("")
+        self.spindle_max_var.set("")
         # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
         self.info_vars["bianzhi"].set("")
         self.info_vars["shenhe"].set("")
@@ -1201,6 +1237,10 @@ class App(ttk.Frame):
         self.required_drawing_var.set(snapshot.get("required_drawing", self.required_drawing_var.get()))
         self.required_part_var.set(snapshot.get("required_part", self.required_part_var.get()))
         self.m03_position_var.set(snapshot.get("m03_position", self.m03_position_var.get()))
+        self.feed_min_var.set(snapshot.get("feed_min", self.feed_min_var.get()))
+        self.feed_max_var.set(snapshot.get("feed_max", self.feed_max_var.get()))
+        self.spindle_min_var.set(snapshot.get("spindle_min", self.spindle_min_var.get()))
+        self.spindle_max_var.set(snapshot.get("spindle_max", self.spindle_max_var.get()))
         self.settings_window.destroy()
         self.settings_window = None
 
@@ -1227,10 +1267,15 @@ class App(ttk.Frame):
             delete_extensions = self._parsed_delete_extensions()
             program_extensions = self._parsed_program_extensions()
             program_output_extension = self._parsed_output_extension()
+            feed_min = self._parsed_limit(self.feed_min_var.get())
+            feed_max = self._parsed_limit(self.feed_max_var.get())
+            spindle_min = self._parsed_limit(self.spindle_min_var.get())
+            spindle_max = self._parsed_limit(self.spindle_max_var.get())
         except ValueError:
             delete_extensions = {".log", ".moaptindexes"}
             program_extensions = {".mpf"}
             program_output_extension = ".MPF"
+            feed_min = feed_max = spindle_min = spindle_max = None
         required_flags = {
             "BIANZHI": self.required_bianzhi_var.get(),
             "SHENHE": self.required_shenhe_var.get(),
@@ -1256,6 +1301,10 @@ class App(ttk.Frame):
             program_output_extension=program_output_extension,
             required_fields=[key for key, _label, _required in FIELD_ORDER if required_flags.get(key, True)],
             m03_position=self.m03_position_var.get(),
+            feed_min=feed_min,
+            feed_max=feed_max,
+            spindle_min=spindle_min,
+            spindle_max=spindle_max,
         )
 
     def info(self):

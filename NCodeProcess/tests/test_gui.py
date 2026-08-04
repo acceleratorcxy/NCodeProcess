@@ -1057,7 +1057,8 @@ class SettingsDialogTests(LayoutWidgetTests):
             win = app.settings_window
             win.update_idletasks()
             self.assertLessEqual(win.winfo_reqwidth(), 640)
-            self.assertLessEqual(win.winfo_reqheight(), 420)
+            # Batch 2 校验规则控件加入后对话框变高；Task F 将重构为 Notebook 两页并重新收紧高度。
+            self.assertLessEqual(win.winfo_reqheight(), 520)
 
             def collect_buttons(widget):
                 buttons = []
@@ -1218,6 +1219,31 @@ class SettingsDialogTests(LayoutWidgetTests):
             self.assertEqual(app.m03_position_var.get(), "after-s")
             app.m03_position_var.set("standalone")
             self.assertEqual(app.config().m03_position, "standalone")
+        finally:
+            root.destroy()
+
+    def test_feed_limits_vars_roundtrip(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.feed_min_var.set("100")
+            app.feed_max_var.set("")
+            config = app.config()
+            self.assertEqual(config.feed_min, 100.0)
+            self.assertIsNone(config.feed_max)
+            self.assertIsNone(config.spindle_min)
+            self.assertIsNone(config.spindle_max)
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_rejects_non_numeric_limits(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            with patch("ncodeprocess.gui.messagebox.showerror") as err_mock:
+                app.feed_min_var.set("abc")
+                app._confirm_settings()
+                err_mock.assert_called_once()
+            self.assertIsNotNone(app.settings_window)  # 对话框未关闭
         finally:
             root.destroy()
 
