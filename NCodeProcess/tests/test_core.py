@@ -679,6 +679,51 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(report.success, 1)
         self.assertIn(b"\r\n", (root / "P.MPF").read_bytes())
 
+    def test_aux_m03_after_first_cut_is_error(self):
+        # m03-before-motion：M03 出现在首次切削运动之后 → error。
+        text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M03\nN3M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", aux_checks={"m03-before-motion"}))
+        self.assertTrue(any(i.kind == "aux-order" and i.severity == "error" for i in issues))
+
+    def test_aux_m03_before_first_cut_no_issue(self):
+        text = '%\nMSG("PROGRAM:P")\nN1M03\nN2G1X10\nN3M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", aux_checks={"m03-before-motion"}))
+        self.assertFalse(any(i.kind == "aux-order" for i in issues))
+
+    def test_aux_m05_after_end_is_warning(self):
+        text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\nN3M05\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", aux_checks={"m05-before-end"}))
+        self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
+
+    def test_aux_m08_after_first_cut_is_warning(self):
+        text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M08\nN3M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", aux_checks={"m08-before-cut"}))
+        self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
+
+    def test_aux_m09_absent_produces_no_warning(self):
+        # M09 未出现时不提示 m09-before-end；出现且晚于结束指令时才提示。
+        text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", aux_checks={"m09-before-end"}))
+        self.assertFalse(any(i.kind == "aux-order" for i in issues))
+
+    def test_aux_m09_after_end_is_warning(self):
+        text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\nN3M09\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow", aux_checks={"m09-before-end"}))
+        self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
+
+    def test_aux_checks_empty_disables_all(self):
+        # 未启用任何顺序规则时（默认）不产生 aux-order，锁定默认行为。
+        text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M30\nN3M05\nN4M08\n%\n'
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                                  Config(g00_level="allow"))
+        self.assertFalse(any(i.kind == "aux-order" for i in issues))
+
 
 if __name__ == "__main__":
     unittest.main()

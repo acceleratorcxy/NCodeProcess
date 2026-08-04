@@ -612,6 +612,11 @@ class App(ttk.Frame):
         self.spindle_max_var = tk.StringVar(value="")
         # 换行策略（Batch 2，仅本次运行生效）：auto / crlf / lf。
         self.newline_var = tk.StringVar(value="auto")
+        # 辅助指令顺序规则（Batch 2，仅本次运行生效）：默认全部启用。
+        self.aux_m03_before_motion_var = tk.BooleanVar(value=True)
+        self.aux_m05_before_end_var = tk.BooleanVar(value=True)
+        self.aux_m08_before_cut_var = tk.BooleanVar(value=True)
+        self.aux_m09_before_end_var = tk.BooleanVar(value=True)
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
@@ -1044,6 +1049,10 @@ class App(ttk.Frame):
             "spindle_min": self.spindle_min_var.get(),
             "spindle_max": self.spindle_max_var.get(),
             "newline": self.newline_var.get(),
+            "aux_m03_before_motion": self.aux_m03_before_motion_var.get(),
+            "aux_m05_before_end": self.aux_m05_before_end_var.get(),
+            "aux_m08_before_cut": self.aux_m08_before_cut_var.get(),
+            "aux_m09_before_end": self.aux_m09_before_end_var.get(),
         }
         win = tk.Toplevel(self.master)
         win.title("程序设置")
@@ -1115,6 +1124,16 @@ class App(ttk.Frame):
                                      values=("auto", "crlf", "lf"))
         labeled(16, "换行策略", newline_combo)
         ttk.Label(body, text="auto 跟随源文件；crlf/lf 强制").grid(row=16, column=2, sticky="w", padx=(6, 0))
+
+        ttk.Label(body, text="辅助指令顺序").grid(row=17, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        aux_rows = (
+            (("M03 先于切削", self.aux_m03_before_motion_var), ("M05 先于结束", self.aux_m05_before_end_var)),
+            (("M08 先于切削", self.aux_m08_before_cut_var), ("M09 先于结束", self.aux_m09_before_end_var)),
+        )
+        for row_offset, row_items in enumerate(aux_rows):
+            for col, (text, var) in enumerate(row_items):
+                ttk.Checkbutton(body, text=text, variable=var).grid(
+                    row=17 + row_offset, column=1 + col, sticky="w", pady=(6 if row_offset == 0 else 0, 3))
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
@@ -1197,6 +1216,10 @@ class App(ttk.Frame):
         self.spindle_min_var.set("")
         self.spindle_max_var.set("")
         self.newline_var.set("auto")
+        self.aux_m03_before_motion_var.set(True)
+        self.aux_m05_before_end_var.set(True)
+        self.aux_m08_before_cut_var.set(True)
+        self.aux_m09_before_end_var.set(True)
         # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
         self.info_vars["bianzhi"].set("")
         self.info_vars["shenhe"].set("")
@@ -1251,6 +1274,10 @@ class App(ttk.Frame):
         self.spindle_min_var.set(snapshot.get("spindle_min", self.spindle_min_var.get()))
         self.spindle_max_var.set(snapshot.get("spindle_max", self.spindle_max_var.get()))
         self.newline_var.set(snapshot.get("newline", self.newline_var.get()))
+        self.aux_m03_before_motion_var.set(snapshot.get("aux_m03_before_motion", self.aux_m03_before_motion_var.get()))
+        self.aux_m05_before_end_var.set(snapshot.get("aux_m05_before_end", self.aux_m05_before_end_var.get()))
+        self.aux_m08_before_cut_var.set(snapshot.get("aux_m08_before_cut", self.aux_m08_before_cut_var.get()))
+        self.aux_m09_before_end_var.set(snapshot.get("aux_m09_before_end", self.aux_m09_before_end_var.get()))
         self.settings_window.destroy()
         self.settings_window = None
 
@@ -1292,6 +1319,12 @@ class App(ttk.Frame):
             "DRAWING NUMBER": self.required_drawing_var.get(),
             "PART VERSION": self.required_part_var.get(),
         }
+        aux_flags = {
+            "m03-before-motion": self.aux_m03_before_motion_var.get(),
+            "m05-before-end": self.aux_m05_before_end_var.get(),
+            "m08-before-cut": self.aux_m08_before_cut_var.get(),
+            "m09-before-end": self.aux_m09_before_end_var.get(),
+        }
         return Config(
             recursive=self.recursive.get(),
             save_aptsource=self.save_aptsource.get(),
@@ -1316,6 +1349,7 @@ class App(ttk.Frame):
             spindle_min=spindle_min,
             spindle_max=spindle_max,
             newline=self.newline_var.get(),
+            aux_checks={name for name, enabled in aux_flags.items() if enabled},
         )
 
     def info(self):

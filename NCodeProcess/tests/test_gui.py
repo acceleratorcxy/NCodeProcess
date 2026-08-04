@@ -1058,7 +1058,7 @@ class SettingsDialogTests(LayoutWidgetTests):
             win.update_idletasks()
             self.assertLessEqual(win.winfo_reqwidth(), 640)
             # Batch 2 校验规则控件逐项加入导致对话框变高；Task F 将重构为 Notebook 两页并重新收紧高度。
-            self.assertLessEqual(win.winfo_reqheight(), 560)
+            self.assertLessEqual(win.winfo_reqheight(), 620)
 
             def collect_buttons(widget):
                 buttons = []
@@ -1254,6 +1254,31 @@ class SettingsDialogTests(LayoutWidgetTests):
             app.newline_var.set("lf")
             self.assertEqual(app.config().newline, "lf")
         finally:
+            root.destroy()
+
+    def test_aux_checks_vars_default_enabled(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            self.assertEqual(
+                {"m03-before-motion", "m05-before-end", "m08-before-cut", "m09-before-end"},
+                app.config().aux_checks,
+            )
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_toggles_aux_rule(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.settings_registry_key = TEST_SETTINGS_KEY
+            with patch.object(App, "scan") as scan_mock:
+                app.open_settings()
+                app.aux_m08_before_cut_var.set(False)
+                app._confirm_settings()
+                scan_mock.assert_called_once_with()
+            self.assertNotIn("m08-before-cut", app.config().aux_checks)
+            self.assertIn("m03-before-motion", app.config().aux_checks)
+        finally:
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
 

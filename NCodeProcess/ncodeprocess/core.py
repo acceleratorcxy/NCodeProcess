@@ -39,6 +39,11 @@ END_LINE_RE = re.compile(r"^%\s*;?$", re.I)
 END_CODE_RE = re.compile(r"(?<![A-Z])M(?:30|02)(?!\d)", re.I)
 M03_RE = re.compile(r"(?<![A-Z])M0?3(?!\d)", re.I)
 M06_RE = re.compile(r"(?<![A-Z])M0?6(?!\d)", re.I)
+M05_RE = re.compile(r"(?<![A-Z])M0?5(?!\d)", re.I)
+M08_RE = re.compile(r"(?<![A-Z])M0?8(?!\d)", re.I)
+M09_RE = re.compile(r"(?<![A-Z])M0?9(?!\d)", re.I)
+# 切削/进给运动：G1/G2/G3 或 X/Y/Z 坐标（G0 为快速定位，不计入切削）。
+CUT_RE = re.compile(r"(?<![A-Z])(?:G0*[123](?!\d)|[XYZ]\s*" + NUM + r")", re.I)
 TOOL_CALL_RE = re.compile(r"(?<![A-Z])T(\d+)(?!\d)", re.I)
 MOTION_RE = re.compile(r"(?<![A-Z])G0*([0-3])(?!\d)", re.I)
 INVALID_ADDR_RE = re.compile(r"(?<![A-Za-z])([GTMFSXYZIJ])\s*(?=$|[;\s])", re.I)
@@ -85,6 +90,12 @@ class Config:
     spindle_max: Optional[float] = None
     # 换行策略：auto（跟随源文件）/ crlf / lf。
     newline: str = "auto"
+    # 辅助指令顺序规则集合（默认空 = 全部关闭）：
+    #   m03-before-motion  M03 先于首次切削运动（error）
+    #   m05-before-end     M05 先于程序结束（warning）
+    #   m08-before-cut     M08 先于首次切削（warning）
+    #   m09-before-end     M09 先于程序结束（warning，M09 未出现时不提示）
+    aux_checks: set = field(default_factory=set)
 
 
 @dataclass
@@ -917,6 +928,12 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     tool_numbers = set()
     feed_values: List[Tuple[int, str, float, str]] = []
     spindle_values: List[Tuple[int, str, float, str]] = []
+    first_cut: Optional[int] = None
+    m03_pos: Optional[int] = None
+    m05_pos: Optional[int] = None
+    m08_pos: Optional[int] = None
+    m09_pos: Optional[int] = None
+    end_pos: Optional[int] = None
     for i, raw_line in enumerate(lines[start:], start=start + 1):
         line = raw_line.strip()
         if not line:
@@ -929,6 +946,8 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         upper_code = code.upper()
         if not has_end and (line.startswith("%") and END_LINE_RE.match(line) or "M" in upper_code and END_CODE_RE.search(code)):
             has_end = True
+            if end_pos is None:
+                end_pos = i
         nm = N_RE.match(raw_line)
         if nm:
             n = int(nm.group(1))
@@ -975,6 +994,17 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                 issues.append(Issue(filename, i, raw_line, "negative-parameter", "error", f"{key} 不得为负数"))
         if not has_m03 and "M" in upper_code and M03_RE.search(code):
             has_m03 = True
+            if m03_pos is None:
+                m03_pos = i
+        if first_cut is None and CUT_RE.search(code):
+            first_cut = i
+        if "M" in upper_code:
+            if m05_pos is None and M05_RE.search(code):
+                m05_pos = i
+            if m08_pos is None and M08_RE.search(code):
+                m08_pos = i
+            if m09_pos is None and M09_RE.search(code):
+                m09_pos = i
         if config.require_m06 and "T" in upper_code:
             for tm in TOOL_CALL_RE.finditer(code):
                 tool_numbers.add(int(tm.group(1)))
@@ -1000,6 +1030,17 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             issues.append(Issue(filename, start + 1, "", "spindle-start", "warning", "正文中未找到 M03"))
     if config.require_m06 and tool_numbers and not M06_RE.search("\n".join(lines[start:])):
         issues.append(Issue(filename, start + 1, "", "tool-change", "error", "存在刀具调用但缺少 M06"))
+    # 辅助指令顺序规则（仅当相关指令都出现且顺序错误时报告）。
+    aux = set(config.aux_checks)
+    if aux:
+        if "m03-before-motion" in aux and first_cut is not None and m03_pos is not None and m03_pos > first_cut:
+            issues.append(Issue(filename, m03_pos, lines[m03_pos - 1], "aux-order", "error", "M03 出现在首次切削运动之后，应在切削前启动主轴"))
+        if "m05-before-end" in aux and m05_pos is not None and end_pos is not None and end_pos < m05_pos:
+            issues.append(Issue(filename, m05_pos, lines[m05_pos - 1], "aux-order", "warning", "M05 出现在程序结束指令之后，主轴停止指令无效"))
+        if "m08-before-cut" in aux and m08_pos is not None and first_cut is not None and first_cut < m08_pos:
+            issues.append(Issue(filename, m08_pos, lines[m08_pos - 1], "aux-order", "warning", "M08 出现在首次切削之后，首刀无冷却"))
+        if "m09-before-end" in aux and m09_pos is not None and end_pos is not None and end_pos < m09_pos:
+            issues.append(Issue(filename, m09_pos, lines[m09_pos - 1], "aux-order", "warning", "M09 出现在程序结束指令之后，冷却液未及时关闭"))
     # A feed value of one or two digits is suspicious when the program is
     # otherwise dominated by feeds in the thousands.  Keep this as a warning
     # because some machines legitimately use a slower local feed.
