@@ -13,6 +13,10 @@ from ncodeprocess.gui import (
     merge_drawing_choices,
     needs_detailed_confirmation,
 )
+from ncodeprocess.preferences import clear_settings, load_settings, save_settings
+
+# 独立的注册表测试键，避免污染真实的 HKCU\Software\NCodeProcess。
+TEST_SETTINGS_KEY = r"Software\NCodeProcess_UnitTests_Gui"
 
 
 class DiffViewTests(unittest.TestCase):
@@ -939,6 +943,7 @@ class SettingsDialogTests(LayoutWidgetTests):
     def test_settings_dialog_opens_and_confirm_applies(self):
         root, app = self._build_app(1286, 668)
         try:
+            app.settings_registry_key = TEST_SETTINGS_KEY
             with patch.object(App, "scan") as scan_mock:
                 app.open_settings()
                 self.assertIsNotNone(app.settings_window)
@@ -954,7 +959,9 @@ class SettingsDialogTests(LayoutWidgetTests):
                 self.assertTrue(config.require_m06)
                 self.assertFalse(config.require_end_marker)
                 scan_mock.assert_called_once_with()
+            self.assertEqual(load_settings(TEST_SETTINGS_KEY)["encoding"], "gb18030")
         finally:
+            clear_settings(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_settings_dialog_cancel_discards(self):
@@ -1043,6 +1050,109 @@ class SettingsDialogTests(LayoutWidgetTests):
             texts = {button.cget("text") for button in collect_buttons(win)}
             self.assertIn("确定", texts)
             self.assertIn("取消", texts)
+            self.assertIn("恢复默认", texts)
+            self.assertIn("清除注册表", texts)
+        finally:
+            root.destroy()
+
+    def test_parse_extension_list_and_output_extension(self):
+        self.assertEqual(gui.parse_extension_list(".MPF, .nc"), {".mpf", ".nc"})
+        self.assertEqual(gui.parse_extension_list(""), set())
+        with self.assertRaises(ValueError):
+            gui.parse_extension_list("mpf")
+        self.assertEqual(gui.parse_output_extension(".MPF"), ".MPF")
+        self.assertEqual(gui.parse_output_extension(".nc"), ".nc")
+        with self.assertRaises(ValueError):
+            gui.parse_output_extension("MPF")
+        with self.assertRaises(ValueError):
+            gui.parse_output_extension("")
+
+    def test_settings_vars_loaded_from_registry(self):
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            with patch.object(App, "scan", lambda _self: None):
+                save_settings({"encoding": "gb18030", "program_extensions": ".mpf,.nc", "require_m06": "1"}, TEST_SETTINGS_KEY)
+                app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
+            self.assertEqual(app.encoding_var.get(), "gb18030")
+            self.assertEqual(app.program_extensions_var.get(), ".mpf,.nc")
+            self.assertTrue(app.require_m06_var.get())
+            # 未持久化的项使用默认值
+            self.assertEqual(app.delete_extensions_var.get(), ".log, .moaptindexes")
+        finally:
+            clear_settings(TEST_SETTINGS_KEY)
+            root.destroy()
+
+    def test_settings_dialog_saves_to_registry_on_confirm(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.settings_registry_key = TEST_SETTINGS_KEY
+            with patch.object(App, "scan") as scan_mock:
+                app.open_settings()
+                app.encoding_var.set("gb18030")
+                app.program_extensions_var.set(".mpf,.nc")
+                app._confirm_settings()
+                saved = load_settings(TEST_SETTINGS_KEY)
+                self.assertEqual(saved["encoding"], "gb18030")
+                self.assertEqual(saved["program_extensions"], ".mpf,.nc")
+                scan_mock.assert_called_once_with()
+        finally:
+            clear_settings(TEST_SETTINGS_KEY)
+            root.destroy()
+
+    def test_restore_defaults_resets_and_persists(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.settings_registry_key = TEST_SETTINGS_KEY
+            save_settings({"encoding": "gb18030", "require_m06": "1"}, TEST_SETTINGS_KEY)
+            with patch.object(App, "scan") as scan_mock:
+                app.open_settings()
+                app._restore_default_settings()
+            self.assertEqual(app.encoding_var.get(), "auto")
+            self.assertFalse(app.require_m06_var.get())
+            self.assertEqual(load_settings(TEST_SETTINGS_KEY)["encoding"], "auto")
+            scan_mock.assert_called_once_with()
+        finally:
+            clear_settings(TEST_SETTINGS_KEY)
+            root.destroy()
+
+    def test_clear_registry_confirmed_removes_values(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.settings_registry_key = TEST_SETTINGS_KEY
+            save_settings({"encoding": "gb18030"}, TEST_SETTINGS_KEY)
+            with patch("ncodeprocess.gui.messagebox.askyesno", return_value=True), patch.object(App, "scan") as scan_mock:
+                app.open_settings()
+                app._clear_registry_settings()
+            self.assertEqual(load_settings(TEST_SETTINGS_KEY), {})
+            self.assertEqual(app.encoding_var.get(), "auto")
+            scan_mock.assert_called_once_with()
+        finally:
+            clear_settings(TEST_SETTINGS_KEY)
+            root.destroy()
+
+    def test_clear_registry_cancelled_keeps_values(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.settings_registry_key = TEST_SETTINGS_KEY
+            save_settings({"encoding": "gb18030"}, TEST_SETTINGS_KEY)
+            with patch("ncodeprocess.gui.messagebox.askyesno", return_value=False):
+                app.open_settings()
+                app._clear_registry_settings()
+            self.assertEqual(load_settings(TEST_SETTINGS_KEY)["encoding"], "gb18030")
+            self.assertIsNotNone(app.settings_window)
+        finally:
+            clear_settings(TEST_SETTINGS_KEY)
+            root.destroy()
+
+    def test_config_injects_program_extensions(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.program_extensions_var.set(".mpf,.nc")
+            app.program_output_extension_var.set(".NC")
+            config = app.config()
+            self.assertEqual(config.program_extensions, {".mpf", ".nc"})
+            self.assertEqual(config.program_output_extension, ".NC")
         finally:
             root.destroy()
 

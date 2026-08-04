@@ -28,19 +28,40 @@ from .core import (
     scan_directory,
     validate_program,
 )
-from .preferences import load as load_preferences, save as save_preferences
+from .preferences import (
+    KEY as PREFERENCES_KEY,
+    SETTING_DEFAULTS,
+    clear_settings,
+    load as load_preferences,
+    load_settings,
+    save as save_preferences,
+    save_settings,
+)
 
 
 DEFAULT_TOOL_TYPES = ["普通立铣刀", "反锥立铣刀", "铅笔铣刀", "T形刀", "钻头", "中心钻"]
 
 
-def parse_delete_extensions(raw: str) -> set:
-    """Normalize a comma/semicolon/whitespace separated extension list."""
+def parse_extension_list(raw: str) -> set:
+    """Normalize a comma/semicolon/whitespace separated extension list (lowercase)."""
     parts = [p.strip().lower() for p in re.split(r"[,;，；\s]+", raw or "") if p.strip()]
     for part in parts:
         if not re.match(r"^\.[a-z0-9]+$", part):
-            raise ValueError(f"扩展名格式无效：{part}（应为 .log 形式，逗号分隔）")
+            raise ValueError(f"扩展名格式无效：{part}（应为 .mpf 形式，逗号分隔）")
     return set(parts)
+
+
+def parse_delete_extensions(raw: str) -> set:
+    """待删除扩展名与主程序扩展名共用同一解析规则。"""
+    return parse_extension_list(raw)
+
+
+def parse_output_extension(raw: str) -> str:
+    """校验单个输出扩展名，保留原大小写（如 .MPF 或 .nc）。"""
+    value = (raw or "").strip()
+    if not re.match(r"^\.[A-Za-z0-9]+$", value):
+        raise ValueError(f"输出扩展名格式无效：{value or '空'}（应为 .MPF 形式）")
+    return value
 
 # 鼠标悬停在单元格上多久后弹出内容提示（毫秒）。
 CELL_TOOLTIP_DELAY_MS = 1500
@@ -293,9 +314,11 @@ def application_directory() -> Path:
 
 
 class App(ttk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, settings_registry_key=None):
         super().__init__(master, padding=8)
         self.master.title("NCodeProcess " + __version__)
+        self.settings_registry_key = settings_registry_key or PREFERENCES_KEY
+        self._loaded_settings = load_settings(self.settings_registry_key)
         self._configure_window_size()
         self.pack(fill="both", expand=True)
         self.workdir = application_directory()
@@ -562,13 +585,16 @@ class App(ttk.Frame):
         self.auto_m03 = tk.BooleanVar(value=True)
         self.auto_tool_change = tk.BooleanVar(value=False)
         self.g00_level = tk.StringVar(value="error")
-        self.encoding_var = tk.StringVar(value="auto")
-        self.delete_extensions_var = tk.StringVar(value=".log, .moaptindexes")
-        self.allowed_name_pattern_var = tk.StringVar(value=r"^[A-Za-z0-9_一-鿿-]+$")
-        self.aptsource_dir_var = tk.StringVar(value="aptsource")
-        self.require_end_marker_var = tk.BooleanVar(value=True)
-        self.require_m06_var = tk.BooleanVar(value=False)
-        self.require_spindle_speed_var = tk.BooleanVar(value=False)
+        loaded = self._loaded_settings
+        self.encoding_var = tk.StringVar(value=loaded.get("encoding", "auto"))
+        self.delete_extensions_var = tk.StringVar(value=loaded.get("delete_extensions", ".log, .moaptindexes"))
+        self.allowed_name_pattern_var = tk.StringVar(value=loaded.get("allowed_name_pattern", r"^[A-Za-z0-9_一-鿿-]+$"))
+        self.aptsource_dir_var = tk.StringVar(value=loaded.get("aptsource_dir", "aptsource"))
+        self.program_extensions_var = tk.StringVar(value=loaded.get("program_extensions", ".mpf"))
+        self.program_output_extension_var = tk.StringVar(value=loaded.get("program_output_extension", ".MPF"))
+        self.require_end_marker_var = tk.BooleanVar(value=loaded.get("require_end_marker", "1") == "1")
+        self.require_m06_var = tk.BooleanVar(value=loaded.get("require_m06", "0") == "1")
+        self.require_spindle_speed_var = tk.BooleanVar(value=loaded.get("require_spindle_speed", "0") == "1")
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
@@ -983,6 +1009,8 @@ class App(ttk.Frame):
             "delete_extensions": self.delete_extensions_var.get(),
             "allowed_name_pattern": self.allowed_name_pattern_var.get(),
             "aptsource_dir": self.aptsource_dir_var.get(),
+            "program_extensions": self.program_extensions_var.get(),
+            "program_output_extension": self.program_output_extension_var.get(),
             "require_end_marker": self.require_end_marker_var.get(),
             "require_m06": self.require_m06_var.get(),
             "require_spindle_speed": self.require_spindle_speed_var.get(),
@@ -1015,12 +1043,22 @@ class App(ttk.Frame):
         apt_entry = ttk.Entry(body, textvariable=self.aptsource_dir_var, width=24)
         labeled(4, "APTSOURCE 归档子目录", apt_entry)
 
-        ttk.Checkbutton(body, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(body, text="要求刀具调用包含 M06", variable=self.require_m06_var).grid(row=6, column=0, columnspan=3, sticky="w")
-        ttk.Checkbutton(body, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).grid(row=7, column=0, columnspan=3, sticky="w")
+        program_ext_entry = ttk.Entry(body, textvariable=self.program_extensions_var, width=24)
+        labeled(5, "主程序扩展名", program_ext_entry)
+        ttk.Label(body, text="逗号分隔，如 .mpf,.nc,.txt").grid(row=5, column=2, sticky="w", padx=(6, 0))
+
+        output_ext_entry = ttk.Entry(body, textvariable=self.program_output_extension_var, width=24)
+        labeled(6, "输出扩展名", output_ext_entry)
+        ttk.Label(body, text="如 .MPF 或 .nc").grid(row=6, column=2, sticky="w", padx=(6, 0))
+
+        ttk.Checkbutton(body, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(body, text="要求刀具调用包含 M06", variable=self.require_m06_var).grid(row=8, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(body, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).grid(row=9, column=0, columnspan=3, sticky="w")
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
+        ttk.Button(actions, text="恢复默认", command=self._restore_default_settings).pack(side="left")
+        ttk.Button(actions, text="清除注册表", command=self._clear_registry_settings).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="确定", command=self._confirm_settings).pack(side="right")
         ttk.Button(actions, text="取消", command=self._cancel_settings).pack(side="right", padx=(0, 8))
         win.bind("<Return>", lambda _event: self._confirm_settings())
@@ -1030,13 +1068,69 @@ class App(ttk.Frame):
     def _parsed_delete_extensions(self):
         return parse_delete_extensions(self.delete_extensions_var.get())
 
+    def _parsed_program_extensions(self):
+        return parse_extension_list(self.program_extensions_var.get())
+
+    def _parsed_output_extension(self):
+        return parse_output_extension(self.program_output_extension_var.get())
+
     def _confirm_settings(self):
         try:
             self._parsed_delete_extensions()
             re.compile(self.allowed_name_pattern_var.get().strip())
+            self._parsed_program_extensions()
+            self._parsed_output_extension()
         except (ValueError, re.error) as error:
             messagebox.showerror("程序设置无效", str(error), parent=self.settings_window)
             return
+        self._save_settings_values()
+        self.settings_window.destroy()
+        self.settings_window = None
+        self.scan()
+
+    def _save_settings_values(self):
+        save_settings({
+            "encoding": self.encoding_var.get().strip(),
+            "delete_extensions": self.delete_extensions_var.get().strip(),
+            "allowed_name_pattern": self.allowed_name_pattern_var.get().strip(),
+            "aptsource_dir": self.aptsource_dir_var.get().strip() or "aptsource",
+            "program_extensions": self.program_extensions_var.get().strip(),
+            "program_output_extension": self._parsed_output_extension(),
+            "require_end_marker": "1" if self.require_end_marker_var.get() else "0",
+            "require_m06": "1" if self.require_m06_var.get() else "0",
+            "require_spindle_speed": "1" if self.require_spindle_speed_var.get() else "0",
+        }, self.settings_registry_key)
+
+    def _apply_settings_defaults(self):
+        defaults = SETTING_DEFAULTS
+        self.encoding_var.set(defaults["encoding"])
+        self.delete_extensions_var.set(defaults["delete_extensions"])
+        self.allowed_name_pattern_var.set(defaults["allowed_name_pattern"])
+        self.aptsource_dir_var.set(defaults["aptsource_dir"])
+        self.program_extensions_var.set(defaults["program_extensions"])
+        self.program_output_extension_var.set(defaults["program_output_extension"])
+        self.require_end_marker_var.set(defaults["require_end_marker"] == "1")
+        self.require_m06_var.set(defaults["require_m06"] == "1")
+        self.require_spindle_speed_var.set(defaults["require_spindle_speed"] == "1")
+
+    def _restore_default_settings(self):
+        """恢复全部默认值并立即写入注册表。"""
+        self._apply_settings_defaults()
+        self._save_settings_values()
+        self.settings_window.destroy()
+        self.settings_window = None
+        self.scan()
+
+    def _clear_registry_settings(self):
+        """删除注册表中的程序设置值（编制/审核不受影响）并回到默认值。"""
+        if not messagebox.askyesno(
+            "清除注册表",
+            "将删除 HKCU\\Software\\NCodeProcess 下的程序设置值（编制/审核不受影响），确定？",
+            parent=self.settings_window,
+        ):
+            return
+        clear_settings(self.settings_registry_key)
+        self._apply_settings_defaults()
         self.settings_window.destroy()
         self.settings_window = None
         self.scan()
@@ -1047,6 +1141,8 @@ class App(ttk.Frame):
         self.delete_extensions_var.set(snapshot.get("delete_extensions", self.delete_extensions_var.get()))
         self.allowed_name_pattern_var.set(snapshot.get("allowed_name_pattern", self.allowed_name_pattern_var.get()))
         self.aptsource_dir_var.set(snapshot.get("aptsource_dir", self.aptsource_dir_var.get()))
+        self.program_extensions_var.set(snapshot.get("program_extensions", self.program_extensions_var.get()))
+        self.program_output_extension_var.set(snapshot.get("program_output_extension", self.program_output_extension_var.get()))
         self.require_end_marker_var.set(snapshot.get("require_end_marker", self.require_end_marker_var.get()))
         self.require_m06_var.set(snapshot.get("require_m06", self.require_m06_var.get()))
         self.require_spindle_speed_var.set(snapshot.get("require_spindle_speed", self.require_spindle_speed_var.get()))
@@ -1074,8 +1170,12 @@ class App(ttk.Frame):
     def config(self):
         try:
             delete_extensions = self._parsed_delete_extensions()
+            program_extensions = self._parsed_program_extensions()
+            program_output_extension = self._parsed_output_extension()
         except ValueError:
             delete_extensions = {".log", ".moaptindexes"}
+            program_extensions = {".mpf"}
+            program_output_extension = ".MPF"
         return Config(
             recursive=self.recursive.get(),
             save_aptsource=self.save_aptsource.get(),
@@ -1091,6 +1191,8 @@ class App(ttk.Frame):
             require_end_marker=self.require_end_marker_var.get(),
             require_m06=self.require_m06_var.get(),
             require_spindle_speed=self.require_spindle_speed_var.get(),
+            program_extensions=program_extensions,
+            program_output_extension=program_output_extension,
         )
 
     def info(self):
