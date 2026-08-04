@@ -912,6 +912,17 @@ class LayoutWidgetTests(unittest.TestCase):
             root.destroy()
 
 
+class SettingsDialogTests(LayoutWidgetTests):
+    def test_parse_delete_extensions_normalizes_and_validates(self):
+        self.assertEqual(gui.parse_delete_extensions(".LOG, .moaptindexes"), {".log", ".moaptindexes"})
+        self.assertEqual(gui.parse_delete_extensions(""), set())
+        self.assertEqual(gui.parse_delete_extensions(".log；.txt"), {".log", ".txt"})
+        with self.assertRaises(ValueError):
+            gui.parse_delete_extensions("log")  # 缺前导点
+        with self.assertRaises(ValueError):
+            gui.parse_delete_extensions(".bad_ext;")  # 含非法字符
+
+
 class StartupCallbackTests(unittest.TestCase):
     def test_destroy_cancels_startup_callbacks_before_replacing_root(self):
         root = tk.Tk()

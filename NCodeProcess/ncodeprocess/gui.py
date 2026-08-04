@@ -33,6 +33,15 @@ from .preferences import load as load_preferences, save as save_preferences
 
 DEFAULT_TOOL_TYPES = ["普通立铣刀", "反锥立铣刀", "铅笔铣刀", "T形刀", "钻头", "中心钻"]
 
+
+def parse_delete_extensions(raw: str) -> set:
+    """Normalize a comma/semicolon/whitespace separated extension list."""
+    parts = [p.strip().lower() for p in re.split(r"[,;，；\s]+", raw or "") if p.strip()]
+    for part in parts:
+        if not re.match(r"^\.[a-z0-9]+$", part):
+            raise ValueError(f"扩展名格式无效：{part}（应为 .log 形式，逗号分隔）")
+    return set(parts)
+
 # 鼠标悬停在单元格上多久后弹出内容提示（毫秒）。
 CELL_TOOLTIP_DELAY_MS = 1500
 
