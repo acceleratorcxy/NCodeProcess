@@ -1058,43 +1058,51 @@ class App(ttk.Frame):
         win.title("程序设置")
         win.transient(self.master)
         win.resizable(False, False)
-        body = ttk.Frame(win, padding=10)
-        body.pack(fill="both", expand=True)
+        notebook = ttk.Notebook(win)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+        basic = ttk.Frame(notebook, padding=8)
+        rules = ttk.Frame(notebook, padding=8)
+        notebook.add(basic, text="基本设置")
+        notebook.add(rules, text="校验规则")
+        self.settings_notebook = notebook
+        self.settings_pages = (basic, rules)
 
-        def labeled(row, text, widget):
-            ttk.Label(body, text=text).grid(row=row, column=0, sticky="w", padx=(0, 6), pady=3)
+        def labeled(page, row, text, widget):
+            ttk.Label(page, text=text).grid(row=row, column=0, sticky="w", padx=(0, 6), pady=3)
             widget.grid(row=row, column=1, sticky="w", pady=3)
 
-        encoding_combo = ttk.Combobox(body, textvariable=self.encoding_var, state="readonly", width=16,
+        # ── 基本设置：编码 / 扩展名 / 允许字符 / APTSOURCE ──
+        encoding_combo = ttk.Combobox(basic, textvariable=self.encoding_var, state="readonly", width=16,
                                       values=("auto", "utf-8", "utf-8-sig", "gb18030", "cp1252"))
-        labeled(0, "文件编码", encoding_combo)
-        ttk.Label(body, text="自动识别或强制指定").grid(row=0, column=2, sticky="w", padx=(6, 0))
+        labeled(basic, 0, "文件编码", encoding_combo)
+        ttk.Label(basic, text="自动识别或强制指定").grid(row=0, column=2, sticky="w", padx=(6, 0))
 
-        delete_entry = ttk.Entry(body, textvariable=self.delete_extensions_var, width=24)
-        labeled(1, "待删除扩展名", delete_entry)
-        ttk.Button(body, text="恢复默认", command=lambda: self.delete_extensions_var.set(".log, .moaptindexes")).grid(row=1, column=2, padx=(6, 0))
-        ttk.Label(body, text="逗号分隔，如 .log,.moaptindexes；留空则全部保留").grid(row=2, column=1, columnspan=2, sticky="w")
+        delete_entry = ttk.Entry(basic, textvariable=self.delete_extensions_var, width=24)
+        labeled(basic, 1, "待删除扩展名", delete_entry)
+        ttk.Button(basic, text="恢复默认", command=lambda: self.delete_extensions_var.set(".log, .moaptindexes")).grid(row=1, column=2, padx=(6, 0))
+        ttk.Label(basic, text="逗号分隔，如 .log,.moaptindexes；留空则全部保留").grid(row=2, column=1, columnspan=2, sticky="w")
 
-        pattern_entry = ttk.Entry(body, textvariable=self.allowed_name_pattern_var, width=24)
-        labeled(3, "程序名允许字符", pattern_entry)
-        ttk.Button(body, text="恢复默认", command=lambda: self.allowed_name_pattern_var.set(r"^[A-Za-z0-9_一-鿿-]+$")).grid(row=3, column=2, padx=(6, 0))
+        pattern_entry = ttk.Entry(basic, textvariable=self.allowed_name_pattern_var, width=24)
+        labeled(basic, 3, "程序名允许字符", pattern_entry)
+        ttk.Button(basic, text="恢复默认", command=lambda: self.allowed_name_pattern_var.set(r"^[A-Za-z0-9_一-鿿-]+$")).grid(row=3, column=2, padx=(6, 0))
 
-        apt_entry = ttk.Entry(body, textvariable=self.aptsource_dir_var, width=24)
-        labeled(4, "APTSOURCE 归档子目录", apt_entry)
+        apt_entry = ttk.Entry(basic, textvariable=self.aptsource_dir_var, width=24)
+        labeled(basic, 4, "APTSOURCE 归档子目录", apt_entry)
 
-        program_ext_entry = ttk.Entry(body, textvariable=self.program_extensions_var, width=24)
-        labeled(5, "主程序扩展名", program_ext_entry)
-        ttk.Label(body, text="逗号分隔，如 .mpf,.nc,.txt").grid(row=5, column=2, sticky="w", padx=(6, 0))
+        program_ext_entry = ttk.Entry(basic, textvariable=self.program_extensions_var, width=24)
+        labeled(basic, 5, "主程序扩展名", program_ext_entry)
+        ttk.Label(basic, text="逗号分隔，如 .mpf,.nc,.txt").grid(row=5, column=2, sticky="w", padx=(6, 0))
 
-        output_ext_entry = ttk.Entry(body, textvariable=self.program_output_extension_var, width=24)
-        labeled(6, "输出扩展名", output_ext_entry)
-        ttk.Label(body, text="如 .MPF 或 .nc").grid(row=6, column=2, sticky="w", padx=(6, 0))
+        output_ext_entry = ttk.Entry(basic, textvariable=self.program_output_extension_var, width=24)
+        labeled(basic, 6, "输出扩展名", output_ext_entry)
+        ttk.Label(basic, text="如 .MPF 或 .nc").grid(row=6, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Checkbutton(body, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(body, text="要求刀具调用包含 M06", variable=self.require_m06_var).grid(row=8, column=0, columnspan=3, sticky="w")
-        ttk.Checkbutton(body, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).grid(row=9, column=0, columnspan=3, sticky="w")
+        # ── 校验规则：必填字段 / M03 / S/F / 换行 / 辅助顺序 ──
+        ttk.Checkbutton(rules, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 0))
+        ttk.Checkbutton(rules, text="要求刀具调用包含 M06", variable=self.require_m06_var).grid(row=1, column=0, columnspan=4, sticky="w")
+        ttk.Checkbutton(rules, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
-        ttk.Label(body, text="必填 MSG 字段").grid(row=10, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Label(rules, text="必填 MSG 字段").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=(4, 3))
         required_columns = (
             ("编制", self.required_bianzhi_var),
             ("审核", self.required_shenhe_var),
@@ -1102,38 +1110,38 @@ class App(ttk.Frame):
             ("版次", self.required_part_var),
         )
         for col, (text, var) in enumerate(required_columns):
-            ttk.Checkbutton(body, text=text, variable=var).grid(row=10, column=1 + col, sticky="w", pady=(6, 3))
-        ttk.Label(body, text="程序/机床/控制系统固定必填").grid(row=11, column=1, columnspan=3, sticky="w", pady=(0, 3))
+            ttk.Checkbutton(rules, text=text, variable=var).grid(row=3, column=1 + col, sticky="w", pady=(4, 3))
+        ttk.Label(rules, text="程序/机床/控制系统固定必填").grid(row=4, column=1, columnspan=3, sticky="w", pady=(0, 3))
 
-        m03_combo = ttk.Combobox(body, textvariable=self.m03_position_var, state="readonly", width=14,
+        m03_combo = ttk.Combobox(rules, textvariable=self.m03_position_var, state="readonly", width=14,
                                  values=("after-s", "standalone"))
-        labeled(12, "M03 补写位置", m03_combo)
-        ttk.Label(body, text="紧贴 S 数值后 / 独立行").grid(row=12, column=2, sticky="w", padx=(6, 0))
+        labeled(rules, 5, "M03 补写位置", m03_combo)
+        ttk.Label(rules, text="紧贴 S 数值后 / 独立行").grid(row=5, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Label(body, text="F 上下限").grid(row=13, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        ttk.Entry(body, textvariable=self.feed_min_var, width=8).grid(row=13, column=1, sticky="w", pady=(6, 3))
-        ttk.Label(body, text="~").grid(row=13, column=2, sticky="w", pady=(6, 3))
-        ttk.Entry(body, textvariable=self.feed_max_var, width=8).grid(row=13, column=3, sticky="w", pady=(6, 3))
-        ttk.Label(body, text="S 上下限").grid(row=14, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        ttk.Entry(body, textvariable=self.spindle_min_var, width=8).grid(row=14, column=1, sticky="w", pady=(6, 3))
-        ttk.Label(body, text="~").grid(row=14, column=2, sticky="w", pady=(6, 3))
-        ttk.Entry(body, textvariable=self.spindle_max_var, width=8).grid(row=14, column=3, sticky="w", pady=(6, 3))
-        ttk.Label(body, text="留空 = 不检查").grid(row=15, column=1, columnspan=3, sticky="w", pady=(0, 3))
+        ttk.Label(rules, text="F 上下限").grid(row=6, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Entry(rules, textvariable=self.feed_min_var, width=8).grid(row=6, column=1, sticky="w", pady=(6, 3))
+        ttk.Label(rules, text="~").grid(row=6, column=2, sticky="w", pady=(6, 3))
+        ttk.Entry(rules, textvariable=self.feed_max_var, width=8).grid(row=6, column=3, sticky="w", pady=(6, 3))
+        ttk.Label(rules, text="S 上下限").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Entry(rules, textvariable=self.spindle_min_var, width=8).grid(row=7, column=1, sticky="w", pady=(6, 3))
+        ttk.Label(rules, text="~").grid(row=7, column=2, sticky="w", pady=(6, 3))
+        ttk.Entry(rules, textvariable=self.spindle_max_var, width=8).grid(row=7, column=3, sticky="w", pady=(6, 3))
+        ttk.Label(rules, text="留空 = 不检查").grid(row=8, column=1, columnspan=3, sticky="w", pady=(0, 3))
 
-        newline_combo = ttk.Combobox(body, textvariable=self.newline_var, state="readonly", width=14,
+        newline_combo = ttk.Combobox(rules, textvariable=self.newline_var, state="readonly", width=14,
                                      values=("auto", "crlf", "lf"))
-        labeled(16, "换行策略", newline_combo)
-        ttk.Label(body, text="auto 跟随源文件；crlf/lf 强制").grid(row=16, column=2, sticky="w", padx=(6, 0))
+        labeled(rules, 9, "换行策略", newline_combo)
+        ttk.Label(rules, text="auto 跟随源文件；crlf/lf 强制").grid(row=9, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Label(body, text="辅助指令顺序").grid(row=17, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Label(rules, text="辅助指令顺序").grid(row=10, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
         aux_rows = (
             (("M03 先于切削", self.aux_m03_before_motion_var), ("M05 先于结束", self.aux_m05_before_end_var)),
             (("M08 先于切削", self.aux_m08_before_cut_var), ("M09 先于结束", self.aux_m09_before_end_var)),
         )
         for row_offset, row_items in enumerate(aux_rows):
             for col, (text, var) in enumerate(row_items):
-                ttk.Checkbutton(body, text=text, variable=var).grid(
-                    row=17 + row_offset, column=1 + col, sticky="w", pady=(6 if row_offset == 0 else 0, 3))
+                ttk.Checkbutton(rules, text=text, variable=var).grid(
+                    row=11 + row_offset, column=1 + col, sticky="w", pady=(6 if row_offset == 0 else 0, 3))
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")

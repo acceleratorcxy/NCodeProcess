@@ -1057,8 +1057,8 @@ class SettingsDialogTests(LayoutWidgetTests):
             win = app.settings_window
             win.update_idletasks()
             self.assertLessEqual(win.winfo_reqwidth(), 640)
-            # Batch 2 校验规则控件逐项加入导致对话框变高；Task F 将重构为 Notebook 两页并重新收紧高度。
-            self.assertLessEqual(win.winfo_reqheight(), 620)
+            # Notebook 两页重构后高度重新收紧：每页内容 + 底部操作栏。
+            self.assertLessEqual(win.winfo_reqheight(), 480)
 
             def collect_buttons(widget):
                 buttons = []
@@ -1279,6 +1279,40 @@ class SettingsDialogTests(LayoutWidgetTests):
             self.assertIn("m03-before-motion", app.config().aux_checks)
         finally:
             clear_all(TEST_SETTINGS_KEY)
+            root.destroy()
+
+    def test_settings_dialog_pages_switch_and_controls_visible(self):
+        # 设置对话框为 Notebook 两页：基本设置 / 校验规则，切换页签时互斥显示。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            notebook = app.settings_notebook
+            self.assertEqual(len(notebook.tabs()), 2)
+            self.assertEqual(notebook.tab(0, "text"), "基本设置")
+            self.assertEqual(notebook.tab(1, "text"), "校验规则")
+            basic, rules = app.settings_pages
+            notebook.select(0)
+            root.update()
+            self.assertTrue(basic.winfo_ismapped())
+            self.assertFalse(rules.winfo_ismapped())
+            notebook.select(1)
+            root.update()
+            self.assertFalse(basic.winfo_ismapped())
+            self.assertTrue(rules.winfo_ismapped())
+        finally:
+            root.destroy()
+
+    def test_batch2_controls_exist(self):
+        # Batch 2 五组配置控件存在且默认值正确（必填全选、M03 after-s、上下限空、换行 auto）。
+        root, app = self._build_app(1286, 668)
+        try:
+            self.assertEqual(app.m03_position_var.get(), "after-s")
+            self.assertEqual(app.newline_var.get(), "auto")
+            for name in ("required_bianzhi_var", "required_shenhe_var", "required_drawing_var", "required_part_var"):
+                self.assertTrue(getattr(app, name).get())
+            for name in ("feed_min_var", "feed_max_var", "spindle_min_var", "spindle_max_var"):
+                self.assertEqual(getattr(app, name).get(), "")
+        finally:
             root.destroy()
 
 
