@@ -1023,6 +1023,29 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
+    def test_settings_dialog_fits_1286_and_controls_visible(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            win = app.settings_window
+            win.update_idletasks()
+            self.assertLessEqual(win.winfo_reqwidth(), 640)
+            self.assertLessEqual(win.winfo_reqheight(), 420)
+
+            def collect_buttons(widget):
+                buttons = []
+                for child in widget.winfo_children():
+                    if child.winfo_class() == "TButton":
+                        buttons.append(child)
+                    buttons.extend(collect_buttons(child))
+                return buttons
+
+            texts = {button.cget("text") for button in collect_buttons(win)}
+            self.assertIn("确定", texts)
+            self.assertIn("取消", texts)
+        finally:
+            root.destroy()
+
 
 class StartupCallbackTests(unittest.TestCase):
     def test_destroy_cancels_startup_callbacks_before_replacing_root(self):
