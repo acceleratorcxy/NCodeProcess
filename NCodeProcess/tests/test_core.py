@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -5,10 +6,22 @@ from pathlib import Path
 
 from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ToolInfo, add_m03, align_lines, apply_header, build_plan, calculate_stats, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
 
+# 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
+DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+
 
 class CoreTests(unittest.TestCase):
     def make_dir(self):
         return Path(tempfile.mkdtemp(prefix="ncodeprocess-"))
+
+    @staticmethod
+    def _cfg(**overrides):
+        """默认放开 G00 检查，并按需覆盖其它配置。"""
+        return Config(g00_level="allow", **overrides)
+
+    @staticmethod
+    def _mpf(plan):
+        return next(f for f in plan.files if f.kind == "mpf")
 
     def test_v5_header_m03_stats_and_cleanup(self):
         root = self.make_dir()
@@ -20,7 +33,7 @@ class CoreTests(unittest.TestCase):
         info = ProgramInfo("A", "B", "D", "V", "M", "C", "", [ToolInfo(1, "10", "", "")])
         cfg = Config(g00_level="allow", save_aptsource=True)
         plan = build_plan(scan_directory(str(root), cfg), info, cfg)
-        mpf = next(f for f in plan.files if f.kind == "mpf")
+        mpf = self._mpf(plan)
         self.assertIn("M03", mpf.output_text)
         self.assertEqual(mpf.output_text.count("M03"), 1)
         self.assertEqual(mpf.stats.minimum["X"], -2.5)
@@ -38,10 +51,10 @@ class CoreTests(unittest.TestCase):
     def test_hass_percent_and_existing_m03(self):
         root = self.make_dir()
         (root / "x_AG6D311A0101.MPF").write_bytes("%;\r\nN1G01X1S5000M03;\r\nN2M30;\r\n%;\r\n".encode("utf-8"))
-        info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
-        cfg = Config(g00_level="allow")
+        info = DEFAULT_INFO
+        cfg = self._cfg()
         plan = build_plan(scan_directory(str(root), cfg), info, cfg)
-        out = next(f for f in plan.files if f.kind == "mpf").output_text
+        out = self._mpf(plan).output_text
         self.assertTrue(out.startswith("%;\r\nMSG("))
         self.assertEqual(out.count("M03"), 1)
         self.assertNotIn("\n\nN", out)
@@ -85,7 +98,7 @@ class CoreTests(unittest.TestCase):
         # still has no M03 afterwards, the failed insertion must be reported
         # as an error requiring user confirmation, not a silent warning.
         text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), Config(auto_m03=True))
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, Config(auto_m03=True))
         spindle = [i for i in issues if i.kind == "spindle-start"]
         self.assertEqual(len(spindle), 1)
         self.assertEqual(spindle[0].severity, "error")
@@ -94,7 +107,7 @@ class CoreTests(unittest.TestCase):
         # With auto insertion disabled the missing M03 stays a warning so the
         # user can decide how to handle the program.
         text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), Config(auto_m03=False))
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, Config(auto_m03=False))
         spindle = [i for i in issues if i.kind == "spindle-start"]
         self.assertEqual(len(spindle), 1)
         self.assertEqual(spindle[0].severity, "warning")
@@ -104,7 +117,7 @@ class CoreTests(unittest.TestCase):
         # in-memory plan must regenerate output and clear the previous error.
         f = FilePlan("x_P.MPF", "mpf", "P", "P.MPF", "keep")
         f.original_text = '%\nMSG("PROGRAM:P")\n(ONLY COMMENT)\n%\n'
-        info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+        info = DEFAULT_INFO
         cfg = Config(g00_level="allow", auto_m03=True)
         reprocess_file(f, info, cfg)
         self.assertTrue(any(i.kind == "spindle-start" and i.severity == "error" for i in f.issues))
@@ -137,9 +150,9 @@ class CoreTests(unittest.TestCase):
         root = self.make_dir()
         (root / "x_AG6D311A0101.MPF").write_text("%;\nN1T1M06;\nN2S100M03;\nN3M30;\n%;\n", encoding="utf-8")
         (root / "x_AG6D311A0101_I.aptsource").write_text("PPRINT PROGNAME AG6D311A0101\nTOOLNO/1, 20.0, 3.0,, 120.0,$\n", encoding="utf-8")
-        cfg = Config(g00_level="allow")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
-        out = next(f for f in plan.files if f.kind == "mpf").output_text
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        out = self._mpf(plan).output_text
         self.assertIn('MSG("T1:DIA=20.000,TOOL_CONER=3.000");', out)
         self.assertNotIn("TOOL_TYPE=", out)
         apt = next(f for f in plan.files if f.kind == "aptsource")
@@ -189,31 +202,30 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(tool.tool_type, "普通立铣刀")
         self.assertEqual(tool.tool_angle, "")
 
-    def test_center_drill_detected_independent_of_diameter(self):
-        text = (
+    def test_drill_types_detected_independent_of_diameter(self):
+        # 钻类判定仅依赖 APT 参数规律（TOOLNO 角度/续行），不限制直径规格。
+        center = (
             "CUTTER/ 7.250000, 0.000000, 3.625000, 2.000000, 31.000000,$\n"
             "         0.000000, 11.000000\n"
             "TOOLNO/13, 7.250000,, 118.000000, 120.000000,$\n"
             "    5.000000,, 11.000000,, 0.000000,NOTE\n"
         )
-        tool = extract_tools(text)[0]
-        self.assertEqual(tool.dia, "7.250")
-        self.assertEqual(tool.tool_type, "中心钻")
-        self.assertEqual(tool.tool_angle, "")
-        self.assertNotIn("TOOL_ANGLE", tool.to_msg())
-
-    def test_drill_detected_independent_of_diameter(self):
-        text = (
+        drill = (
             "CUTTER/ 8.750000, 0.000000, 4.375000, 2.500000, 30.000000,$\n"
             "         0.000000, 35.000000\n"
             "TOOLNO/10, 8.750000,, 120.000000, 120.000000,$\n"
             "   45.000000, 2.500000, 35.000000,2, 0.000000,NOTE\n"
         )
-        tool = extract_tools(text)[0]
-        self.assertEqual(tool.dia, "8.750")
-        self.assertEqual(tool.tool_type, "钻头")
-        self.assertEqual(tool.tool_angle, "")
-        self.assertNotIn("TOOL_ANGLE", tool.to_msg())
+        for text, dia, expected_type in (
+            (center, "7.250", "中心钻"),
+            (drill, "8.750", "钻头"),
+        ):
+            with self.subTest(tool_type=expected_type):
+                tool = extract_tools(text)[0]
+                self.assertEqual(tool.dia, dia)
+                self.assertEqual(tool.tool_type, expected_type)
+                self.assertEqual(tool.tool_angle, "")
+                self.assertNotIn("TOOL_ANGLE", tool.to_msg())
 
     def test_special_tool_is_written_to_mpf_from_paired_apt(self):
         root = self.make_dir()
@@ -222,9 +234,9 @@ class CoreTests(unittest.TestCase):
             "CUTTER/ 16.000000, 3.000000\nTOOLNO/5, 13.178000, 3.000000, -6.000000,$\n",
             encoding="utf-8",
         )
-        cfg = Config(g00_level="allow")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
-        out = next(f for f in plan.files if f.kind == "mpf").output_text
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        out = self._mpf(plan).output_text
         self.assertIn('MSG("T5:DIA=16.000,TOOL_CONER=3.000,TOOL_ANGLE=-3.000,TOOL_TYPE=反锥立铣刀")', out)
 
     def test_paired_apt_tools_take_priority_over_existing_mpf_tools(self):
@@ -237,14 +249,14 @@ class CoreTests(unittest.TestCase):
             "CUTTER/ 16.000000, 3.000000\nTOOLNO/5, 16.000000, 3.000000,, 120.000000,$\n",
             encoding="utf-8",
         )
-        cfg = Config(g00_level="allow")
+        cfg = self._cfg()
         plan = build_plan(
             scan_directory(str(root), cfg),
-            ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+            DEFAULT_INFO,
             cfg,
             {"P": [ToolInfo(5, "88", "", "配置旧信息")]},
         )
-        out = next(f for f in plan.files if f.kind == "mpf").output_text
+        out = self._mpf(plan).output_text
         self.assertIn('MSG("T5:DIA=16.000,TOOL_CONER=3.000,TOOL_TYPE=普通立铣刀")', out)
         self.assertNotIn("DIA=99", out)
         self.assertNotIn("DIA=88", out)
@@ -256,12 +268,11 @@ class CoreTests(unittest.TestCase):
         new = root / "new_P_I.aptsource"
         old.write_text("CUTTER/ 10.000000, 3.000000\nTOOLNO/5, 10.000000, 3.000000,, 120.000000,$\n", encoding="utf-8")
         new.write_text("CUTTER/ 16.000000, 3.000000\nTOOLNO/5, 16.000000, 3.000000,, 120.000000,$\n", encoding="utf-8")
-        import os
         os.utime(old, (1000, 1000))
         os.utime(new, (2000, 2000))
-        cfg = Config(g00_level="allow")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
-        out = next(f for f in plan.files if f.kind == "mpf").output_text
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        out = self._mpf(plan).output_text
         self.assertIn('MSG("T5:DIA=16.000,TOOL_CONER=3.000,TOOL_TYPE=普通立铣刀")', out)
         self.assertNotIn("DIA=10.000000", out)
 
@@ -275,25 +286,25 @@ class CoreTests(unittest.TestCase):
             + "\nCUTTER/ 6.000000, 1.000000\nTOOLNO/2, 6.000000, 1.000000,, 120.000000,$\n",
             encoding="utf-8",
         )
-        cfg = Config(g00_level="allow")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
-        out = next(f for f in plan.files if f.kind == "mpf").output_text
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        out = self._mpf(plan).output_text
         self.assertIn('MSG("T1:DIA=10.000,TOOL_CONER=3.000,TOOL_TYPE=普通立铣刀")', out)
         self.assertIn('MSG("T2:DIA=6.000,TOOL_CONER=1.000,TOOL_TYPE=普通立铣刀")', out)
 
     def test_program_tool_override_replaces_existing_tool_rows(self):
         root = self.make_dir()
         (root / "x_AG6D311A0101.MPF").write_text('MSG("PROGRAM:AG6D311A0101")\nMSG("T1:DIA=20")\nMSG("T2:DIA=10")\nN1S100M03\nN2M30\n', encoding="utf-8")
-        cfg = Config(g00_level="allow")
-        info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+        cfg = self._cfg()
+        info = DEFAULT_INFO
         plan = build_plan(scan_directory(str(root), cfg), info, cfg, {"AG6D311A0101": [ToolInfo(1, "8", "", "自定义刀")]})
-        out = next(f for f in plan.files if f.kind == "mpf").output_text
+        out = self._mpf(plan).output_text
         self.assertIn('MSG("T1:DIA=8.000,TOOL_TYPE=自定义刀")', out)
         self.assertNotIn('MSG("T2:', out)
 
     def test_tool_rows_are_last_header_lines(self):
         text = 'MSG("PROGRAM:P")\nMSG("DRAWING NUMBER:D")\nMSG("PART VERSION:V")\nN1S100M03\nN2M30\n'
-        cfg = Config(g00_level="allow")
+        cfg = self._cfg()
         info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE", [ToolInfo(1, "8", "", "钻头")])
         out, _, _ = apply_header(text, "P", info, cfg, replace_tools=True)
         lines = out.splitlines()
@@ -334,8 +345,8 @@ class CoreTests(unittest.TestCase):
             encoding="utf-8",
         )
         cfg = Config(g00_level="allow", auto_tool_change=True)
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
-        out = next(f for f in plan.files if f.kind == "mpf").output_text
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        out = self._mpf(plan).output_text
         lines = out.splitlines()
         body_index = next(i for i, line in enumerate(lines) if line.startswith("T1M6"))
         self.assertTrue(lines[body_index - 1].startswith('MSG("T1:'))
@@ -347,8 +358,8 @@ class CoreTests(unittest.TestCase):
         root = self.make_dir(); out = self.make_dir()
         src = root / "x_AG6D311A0101.MPF"
         src.write_text('MSG("PROGRAM:AG6D311A0101")\nN1S100M03\nN2M30\n', encoding="utf-8")
-        cfg = Config(g00_level="allow")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         report = process_plan(plan, str(out), cfg)
         self.assertEqual(report.success, 1)
         self.assertTrue(src.exists())
@@ -360,11 +371,10 @@ class CoreTests(unittest.TestCase):
         new = root / "new_P.MPF"
         old.write_text("N1X1S100M03\nN2M30\n", encoding="utf-8")
         new.write_text("N1X9S100M03\nN2M30\n", encoding="utf-8")
-        import os
         os.utime(old, (1000, 1000))
         os.utime(new, (2000, 2000))
-        cfg = Config(g00_level="allow")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         older = next(f for f in plan.files if f.source == old.name)
         newest = next(f for f in plan.files if f.source == new.name)
         self.assertEqual(older.action, "duplicate")
@@ -430,7 +440,7 @@ class CoreTests(unittest.TestCase):
     def test_feed_and_spindle_validation_and_g00_stats(self):
         text = "MSG(\"PROGRAM:P\")\nF2000\nF2500\nF1800\nF25\nS5000\nS6000\nG00 X1\nM30\n"
         info = ProgramInfo("A", "B", "D", "V", "M", "S", "DATE")
-        issues = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow"))
+        issues = validate_program(text, "P.MPF", "P", info, self._cfg())
         kinds = {issue.kind for issue in issues}
         self.assertIn("feed-outlier", kinds)
         self.assertIn("multiple-spindle-speeds", kinds)
@@ -439,7 +449,7 @@ class CoreTests(unittest.TestCase):
 
     def test_zero_feed_is_error(self):
         text = "MSG(\"PROGRAM:P\")\nF0\nM30\n"
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "S", "DATE"), Config(g00_level="allow"))
+        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "S", "DATE"), self._cfg())
         zero = [issue for issue in issues if issue.kind == "feed-zero"]
         self.assertEqual(len(zero), 1)
         self.assertEqual(zero[0].severity, "error")
@@ -458,9 +468,9 @@ class CoreTests(unittest.TestCase):
             '%\n',
             encoding="utf-8",
         )
-        cfg = Config(g00_level="allow")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
-        mpf = next(f for f in plan.files if f.kind == "mpf")
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        mpf = self._mpf(plan)
         duplicate = [issue for issue in mpf.issues if issue.kind == "duplicate-msg-field"]
         self.assertEqual(len(duplicate), 1)
         self.assertEqual(duplicate[0].severity, "warning")
@@ -482,7 +492,7 @@ class CoreTests(unittest.TestCase):
             'N2M30\n'
         )
         out, changes, issues = apply_header(
-            text, "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), Config(g00_level="allow")
+            text, "P", DEFAULT_INFO, self._cfg()
         )
         duplicates = [issue for issue in issues if issue.kind == "duplicate-msg-field"]
         self.assertEqual(len(duplicates), 1)
@@ -495,9 +505,9 @@ class CoreTests(unittest.TestCase):
         path = root / "x_P.MPF"
         path.write_bytes('MSG("PROGRAM:P")\nN1X1S100M03\nN2M30\n'.encode("gb18030"))
         plan = build_plan(scan_directory(str(root), Config(encoding="gb18030")),
-                          ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+                          DEFAULT_INFO,
                           Config(encoding="gb18030"))
-        self.assertEqual(next(f for f in plan.files if f.kind == "mpf").program, "P")
+        self.assertEqual(self._mpf(plan).program, "P")
 
     def test_delete_extensions_config_filters_cleanup_plan(self):
         root = self.make_dir()
@@ -513,19 +523,19 @@ class CoreTests(unittest.TestCase):
 
     def test_end_marker_check_can_be_disabled(self):
         text = "MSG(\"PROGRAM:P\")\nN1S100M03\n"
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
                                   Config(g00_level="allow", require_end_marker=False))
         self.assertFalse(any(i.kind == "end-marker" for i in issues))
 
     def test_m06_requirement_can_be_enabled(self):
         text = "MSG(\"PROGRAM:P\")\nN1T1\nN2S100M03\nN3M30\n"
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
                                   Config(g00_level="allow", require_m06=True))
         self.assertTrue(any(i.kind == "tool-change" and i.severity == "error" for i in issues))
 
     def test_spindle_speed_requirement_can_be_enabled(self):
         text = "MSG(\"PROGRAM:P\")\nN1G1X1\nN2M30\n"
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
                                   Config(g00_level="allow", require_spindle_speed=True, auto_m03=False))
         self.assertTrue(any(i.kind == "spindle-speed" and i.severity == "error" for i in issues))
 
@@ -534,8 +544,8 @@ class CoreTests(unittest.TestCase):
         path = root / "程序_P.MPF"
         path.write_text('MSG("PROGRAM:P")\nN1S100M03\nN2M30\n', encoding="utf-8")
         strict = Config(allowed_name_pattern=r"^[A-Za-z0-9]+$")
-        plan = build_plan(scan_directory(str(root), strict), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), strict)
-        mpf = next(f for f in plan.files if f.kind == "mpf")
+        plan = build_plan(scan_directory(str(root), strict), DEFAULT_INFO, strict)
+        mpf = self._mpf(plan)
         self.assertEqual(mpf.program, "P")
         self.assertEqual(Path(mpf.target).name, "P.MPF")
 
@@ -545,7 +555,7 @@ class CoreTests(unittest.TestCase):
         (root / "x_P.NC").write_text('MSG("PROGRAM:P")\nN1S100M03\nN2M30\n', encoding="utf-8")
         (root / "x_Q.txt").write_text('MSG("PROGRAM:Q")\nN1S200M03\nN2M30\n', encoding="utf-8")
         cfg = Config(g00_level="allow", program_extensions={".mpf", ".nc", ".txt"})
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         programs = sorted(f.program for f in plan.files if f.kind == "mpf")
         self.assertEqual(programs, ["P", "Q"])
         targets = sorted(Path(f.target).name for f in plan.files if f.kind == "mpf")
@@ -561,8 +571,8 @@ class CoreTests(unittest.TestCase):
         root = self.make_dir()
         (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S100M03\nN2M30\n', encoding="utf-8")
         cfg = Config(g00_level="allow", program_output_extension=".NC")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
-        mpf = next(f for f in plan.files if f.kind == "mpf")
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        mpf = self._mpf(plan)
         self.assertEqual(Path(mpf.target).name, "P.NC")
         report = process_plan(plan, str(root), cfg)
         self.assertEqual(report.success, 1)
@@ -573,11 +583,11 @@ class CoreTests(unittest.TestCase):
         # SHENHE 从必填列表移除后，缺失的 SHENHE 头部不再报 required-field；
         # 默认配置（全部必填）下缺失仍报错，锁定现行为。
         text = 'MSG("PROGRAM:P")\nN1S100M03\nN2M30\n'
-        info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+        info = DEFAULT_INFO
         omit_shenhe = [key for key, _label, _required in FIELD_ORDER if key != "SHENHE"]
         issues = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow", required_fields=omit_shenhe))
         self.assertFalse(any(i.kind == "required-field" and "SHENHE" in i.suggestion for i in issues))
-        default_issues = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow"))
+        default_issues = validate_program(text, "P.MPF", "P", info, self._cfg())
         self.assertTrue(any(i.kind == "required-field" and "SHENHE" in i.suggestion for i in default_issues))
 
     def test_required_fields_drive_header_insertion(self):
@@ -588,7 +598,7 @@ class CoreTests(unittest.TestCase):
         omit_shenhe = [key for key, _label, _required in FIELD_ORDER if key != "SHENHE"]
         out, _changes, _issues = apply_header(text, "P", info, Config(g00_level="allow", required_fields=omit_shenhe))
         self.assertNotIn('MSG("SHENHE:', out)
-        out_default, _changes, _issues = apply_header(text, "P", info, Config(g00_level="allow"))
+        out_default, _changes, _issues = apply_header(text, "P", info, self._cfg())
         self.assertIn('MSG("SHENHE:")', out_default)
 
     def test_standalone_m03_position_inserts_independent_row_with_s_present(self):
@@ -604,7 +614,7 @@ class CoreTests(unittest.TestCase):
     def test_after_s_position_is_default_and_attaches(self):
         # 默认 m03_position="after-s"：M03 紧贴首个 S 转速之后（锁定现行为）。
         text = '%\nMSG("PROGRAM:P")\nN1G1X10S1000\nN2M30\n%\n'
-        out, changed, _note = add_m03(text, Config(g00_level="allow"))
+        out, changed, _note = add_m03(text, self._cfg())
         self.assertTrue(changed)
         self.assertIn("S1000M03", out)
         self.assertNotIn("\nM03\n", out)
@@ -618,21 +628,21 @@ class CoreTests(unittest.TestCase):
         self.assertIn("M03\nN1S1000", out)
         self.assertNotIn("S1000M03", out)
 
-    def test_feed_below_min_is_error(self):
-        text = '%\nMSG("PROGRAM:P")\nN1G1X10F3S1000M03\nN2M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
-                                  Config(g00_level="allow", feed_min=100.0))
-        self.assertTrue(any(i.kind == "feed-range" and i.severity == "error" for i in issues))
-
-    def test_feed_above_max_is_error(self):
-        text = '%\nMSG("PROGRAM:P")\nN1G1X10F30000S1000M03\nN2M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
-                                  Config(g00_level="allow", feed_max=20000.0))
-        self.assertTrue(any(i.kind == "feed-range" and i.severity == "error" for i in issues))
+    def test_feed_limits_check_both_ends(self):
+        # F 值低于 feed_min 或高于 feed_max 都报 feed-range error。
+        info = DEFAULT_INFO
+        below = '%\nMSG("PROGRAM:P")\nN1G1X10F3S1000M03\nN2M30\n%\n'
+        above = '%\nMSG("PROGRAM:P")\nN1G1X10F30000S1000M03\nN2M30\n%\n'
+        with self.subTest(direction="below-min"):
+            issues = validate_program(below, "P.MPF", "P", info, self._cfg(feed_min=100.0))
+            self.assertTrue(any(i.kind == "feed-range" and i.severity == "error" for i in issues))
+        with self.subTest(direction="above-max"):
+            issues = validate_program(above, "P.MPF", "P", info, self._cfg(feed_max=20000.0))
+            self.assertTrue(any(i.kind == "feed-range" and i.severity == "error" for i in issues))
 
     def test_spindle_limits_check_both_ends(self):
         text = '%\nMSG("PROGRAM:P")\nN1G1X10F100S5000M03\nN2M30\n%\n'
-        info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+        info = DEFAULT_INFO
         below = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow", spindle_min=6000.0))
         self.assertTrue(any(i.kind == "spindle-range" and i.severity == "error" for i in below))
         above = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow", spindle_max=4000.0))
@@ -641,8 +651,8 @@ class CoreTests(unittest.TestCase):
     def test_limits_none_do_not_report(self):
         # 未配置上下限（None）时不产生范围类问题，锁定默认行为。
         text = '%\nMSG("PROGRAM:P")\nN1G1X10F3S5000M03\nN2M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
-                                  Config(g00_level="allow"))
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
+                                  self._cfg())
         self.assertFalse(any(i.kind in ("feed-range", "spindle-range") for i in issues))
 
     def test_newline_force_lf_converts_crlf_source(self):
@@ -650,7 +660,7 @@ class CoreTests(unittest.TestCase):
         root = self.make_dir()
         (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\r\nN1S1000M03\r\nN2M30\r\n'.encode("utf-8"))
         cfg = Config(g00_level="allow", newline="lf")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         report = process_plan(plan, str(root), cfg)
         self.assertEqual(report.success, 1)
         data = (root / "P.MPF").read_bytes()
@@ -662,7 +672,7 @@ class CoreTests(unittest.TestCase):
         root = self.make_dir()
         (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S1000M03\nN2M30\n', encoding="utf-8")
         cfg = Config(g00_level="allow", newline="crlf")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         report = process_plan(plan, str(root), cfg)
         self.assertEqual(report.success, 1)
         data = (root / "P.MPF").read_bytes()
@@ -673,55 +683,54 @@ class CoreTests(unittest.TestCase):
         # 默认 auto：CRLF 源保持 CRLF（锁定现行为）。
         root = self.make_dir()
         (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\r\nN1S1000M03\r\nN2M30\r\n'.encode("utf-8"))
-        cfg = Config(g00_level="allow")
-        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         report = process_plan(plan, str(root), cfg)
         self.assertEqual(report.success, 1)
         self.assertIn(b"\r\n", (root / "P.MPF").read_bytes())
 
-    def test_aux_m03_after_first_cut_is_error(self):
-        # m03-before-motion：M03 出现在首次切削运动之后 → error。
-        text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M03\nN3M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
-                                  Config(g00_level="allow", aux_checks={"m03-before-motion"}))
+    def test_aux_m03_rule_reports_only_when_violated(self):
+        # m03-before-motion：M03 出现在首次切削运动之后 → error；之前 → 无问题。
+        info = DEFAULT_INFO
+        violated = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M03\nN3M30\n%\n'
+        ok = '%\nMSG("PROGRAM:P")\nN1M03\nN2G1X10\nN3M30\n%\n'
+        issues = validate_program(violated, "P.MPF", "P", info,
+                                  self._cfg(aux_checks={"m03-before-motion"}))
         self.assertTrue(any(i.kind == "aux-order" and i.severity == "error" for i in issues))
-
-    def test_aux_m03_before_first_cut_no_issue(self):
-        text = '%\nMSG("PROGRAM:P")\nN1M03\nN2G1X10\nN3M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
-                                  Config(g00_level="allow", aux_checks={"m03-before-motion"}))
+        issues = validate_program(ok, "P.MPF", "P", info,
+                                  self._cfg(aux_checks={"m03-before-motion"}))
         self.assertFalse(any(i.kind == "aux-order" for i in issues))
 
     def test_aux_m05_after_end_is_warning(self):
         text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\nN3M05\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
                                   Config(g00_level="allow", aux_checks={"m05-before-end"}))
         self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
 
     def test_aux_m08_after_first_cut_is_warning(self):
         text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M08\nN3M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
                                   Config(g00_level="allow", aux_checks={"m08-before-cut"}))
         self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
 
     def test_aux_m09_absent_produces_no_warning(self):
         # M09 未出现时不提示 m09-before-end；出现且晚于结束指令时才提示。
         text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
                                   Config(g00_level="allow", aux_checks={"m09-before-end"}))
         self.assertFalse(any(i.kind == "aux-order" for i in issues))
 
     def test_aux_m09_after_end_is_warning(self):
         text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\nN3M09\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
                                   Config(g00_level="allow", aux_checks={"m09-before-end"}))
         self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
 
     def test_aux_checks_empty_disables_all(self):
         # 未启用任何顺序规则时（默认）不产生 aux-order，锁定默认行为。
         text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M30\nN3M05\nN4M08\n%\n'
-        issues = validate_program(text, "P.MPF", "P", ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"),
-                                  Config(g00_level="allow"))
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
+                                  self._cfg())
         self.assertFalse(any(i.kind == "aux-order" for i in issues))
 
 

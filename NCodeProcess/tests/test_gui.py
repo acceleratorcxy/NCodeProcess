@@ -91,51 +91,22 @@ class LayoutMetricTests(unittest.TestCase):
         self.assertEqual(min_width, width)
         self.assertEqual(min_height, height)
 
-    def test_fit_column_widths_shrinks_to_available_width(self):
+    def test_fit_column_widths_cases(self):
+        # 各宽度档位下按「多余宽度只给伸缩列、收缩先缩伸缩列、不低于最小宽度」规则分配。
         self._require_layout_interface("fit_column_widths")
         specs = (("fixed", 100, 80, False), ("stretch", 220, 120, True))
-        result = gui.fit_column_widths(300, specs)
-        self.assertEqual(sum(result.values()), 300)
-        for name, initial, minimum, _stretch in specs:
-            self.assertGreaterEqual(result[name], minimum)
-            self.assertLessEqual(result[name], initial)
-
-    def test_fit_column_widths_shrinks_stretch_before_fixed(self):
-        self._require_layout_interface("fit_column_widths")
-        specs = (("fixed", 100, 80, False), ("stretch", 220, 120, True))
-        result = gui.fit_column_widths(300, specs)
-        self.assertEqual(result, {"fixed": 100, "stretch": 200})
-
-    def test_fit_column_widths_shrinks_fixed_after_stretch_reaches_minimum(self):
-        self._require_layout_interface("fit_column_widths")
-        specs = (("fixed", 100, 80, False), ("stretch", 220, 120, True))
-        result = gui.fit_column_widths(210, specs)
-        self.assertEqual(result, {"fixed": 90, "stretch": 120})
-
-    def test_fit_column_widths_returns_minimums_at_minimum_total(self):
-        self._require_layout_interface("fit_column_widths")
-        specs = (("fixed", 100, 80, False), ("stretch", 220, 120, True))
-        result = gui.fit_column_widths(200, specs)
-        self.assertEqual(result, {"fixed": 80, "stretch": 120})
-
-    def test_fit_column_widths_returns_minimums_below_minimum_total(self):
-        self._require_layout_interface("fit_column_widths")
-        specs = (("fixed", 100, 80, False), ("stretch", 220, 120, True))
-        result = gui.fit_column_widths(180, specs)
-        self.assertEqual(result, {"fixed": 80, "stretch": 120})
-
-    def test_fit_column_widths_keeps_initials_for_non_positive_space(self):
-        self._require_layout_interface("fit_column_widths")
-        specs = (("fixed", 100, 80, False), ("stretch", 220, 120, True))
-        self.assertEqual(gui.fit_column_widths(0, specs), {"fixed": 100, "stretch": 220})
-        self.assertEqual(gui.fit_column_widths(-1, specs), {"fixed": 100, "stretch": 220})
-
-    def test_fit_column_widths_assigns_extra_space_only_to_stretch_columns(self):
-        self._require_layout_interface("fit_column_widths")
-        specs = (("fixed", 100, 80, False), ("stretch", 220, 120, True))
-        result = gui.fit_column_widths(400, specs)
-        self.assertEqual(result["fixed"], 100)
-        self.assertEqual(result["stretch"], 300)
+        cases = (
+            (400, {"fixed": 100, "stretch": 300}),  # 多余宽度只分配给伸缩列
+            (300, {"fixed": 100, "stretch": 200}),  # 收缩时优先压缩伸缩列
+            (210, {"fixed": 90, "stretch": 120}),   # 伸缩列到最小后压缩固定列
+            (200, {"fixed": 80, "stretch": 120}),   # 恰好最小总宽
+            (180, {"fixed": 80, "stretch": 120}),   # 低于最小总宽仍取最小值
+            (0, {"fixed": 100, "stretch": 220}),    # 非正空间保留初始宽度
+            (-1, {"fixed": 100, "stretch": 220}),
+        )
+        for available, expected in cases:
+            with self.subTest(available=available):
+                self.assertEqual(gui.fit_column_widths(available, specs), expected)
 
     def test_ensure_heading_widths_expands_initials_and_minimums_without_changing_flags(self):
         self._require_layout_interface("ensure_heading_widths")
@@ -169,30 +140,22 @@ class FontAwareLayoutMetricTests(unittest.TestCase):
         missing = [name for name in ("keep_specs", "tool_specs", "validation_width") if not hasattr(profile, name)]
         self.assertFalse(missing, f"font layout profile missing attribute(s): {', '.join(missing)}")
 
-    def test_choose_ui_font_family_returns_each_available_candidate(self):
+    def test_choose_ui_font_family_priority_and_fallback(self):
         self._require_font_layout_interface("choose_ui_font_family")
-        for family in ("Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Tahoma"):
-            with self.subTest(family=family):
+        candidates = ("Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Tahoma")
+        for family in candidates:
+            with self.subTest(single=family):
                 self.assertEqual(gui.choose_ui_font_family({family}), family)
-
-    def test_choose_ui_font_family_uses_defined_priority_for_overlapping_candidates(self):
-        self._require_font_layout_interface("choose_ui_font_family")
         cases = (
             ({"Tahoma", "Microsoft YaHei"}, "Microsoft YaHei"),
             ({"Microsoft YaHei", "Segoe UI"}, "Microsoft YaHei"),
             ({"Segoe UI", "Tahoma"}, "Segoe UI"),
             ({"Microsoft YaHei UI", "Microsoft YaHei"}, "Microsoft YaHei UI"),
-            (
-                {"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Tahoma"},
-                "Microsoft YaHei UI",
-            ),
+            (set(candidates), "Microsoft YaHei UI"),
         )
         for available, expected in cases:
             with self.subTest(available=available):
                 self.assertEqual(gui.choose_ui_font_family(available), expected)
-
-    def test_choose_ui_font_family_has_stable_fallback(self):
-        self._require_font_layout_interface("choose_ui_font_family")
         self.assertEqual(gui.choose_ui_font_family({"Arial"}), "TkDefaultFont")
 
     def test_font_layout_profile_expands_win7_style_metrics_and_preserves_column_flags(self):
@@ -292,6 +255,30 @@ class LayoutWidgetTests(unittest.TestCase):
         root.update()
         root.update_idletasks()
         return root, app
+
+    @staticmethod
+    def _descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from LayoutWidgetTests._descendants(child)
+
+    @staticmethod
+    def _collect_buttons(widget):
+        buttons = []
+        for child in widget.winfo_children():
+            if child.winfo_class() == "TButton":
+                buttons.append(child)
+            buttons.extend(LayoutWidgetTests._collect_buttons(child))
+        return buttons
+
+    @staticmethod
+    def _relative_x_to_root(widget, root):
+        x = 0
+        current = widget
+        while current is not root:
+            x += current.winfo_x()
+            current = current.master
+        return x
 
     @staticmethod
     def _column_total(table, columns):
@@ -804,24 +791,17 @@ class LayoutWidgetTests(unittest.TestCase):
             root.update()
             root.update_idletasks()
 
-            def x_relative_to_root(widget):
-                x = 0
-                current = widget
-                while current is not root:
-                    x += current.winfo_x()
-                    current = current.master
-                return x
-
             controls = (
                 app.process_info_frame,
                 app.folder_choice_combo,
                 app.drawing_choice_button,
             )
+
             for control in controls:
                 self.assertTrue(control.winfo_ismapped())
                 self.assertGreater(control.winfo_width(), 0)
                 self.assertLessEqual(
-                    x_relative_to_root(control) + control.winfo_width(),
+                    self._relative_x_to_root(control, root) + control.winfo_width(),
                     root.winfo_width(),
                 )
 
@@ -830,15 +810,7 @@ class LayoutWidgetTests(unittest.TestCase):
                 app.drawing_choice_button.winfo_width(),
             )
 
-            def collect_buttons(widget):
-                buttons = []
-                for child in widget.winfo_children():
-                    if child.winfo_class() == "TButton":
-                        buttons.append(child)
-                    buttons.extend(collect_buttons(child))
-                return buttons
-
-            for button in collect_buttons(app.process_info_frame):
+            for button in self._collect_buttons(app.process_info_frame):
                 self.assertLessEqual(button.winfo_reqwidth(), button.winfo_width())
         finally:
             root.destroy()
@@ -848,14 +820,6 @@ class LayoutWidgetTests(unittest.TestCase):
         # 输入框与按钮紧邻、不超出程序信息区右边界；程序信息区内不再有 G00 下拉框。
         root, app = self._build_app(1286, 668)
         try:
-            def coordinate_relative_to_root(widget, axis):
-                coordinate = 0
-                current = widget
-                while current is not root:
-                    coordinate += getattr(current, f"winfo_{axis}")()
-                    current = current.master
-                return coordinate
-
             entry = app.custom_tool_type_entry
             button = app.add_tool_type_button
             for control in (entry, button):
@@ -870,26 +834,21 @@ class LayoutWidgetTests(unittest.TestCase):
                 current = current.master
             self.assertIn(app.process_info_frame, ancestors)
 
-            def descendants(widget):
-                for child in widget.winfo_children():
-                    yield child
-                    yield from descendants(child)
-
             g00_in_frame = any(
                 child.winfo_class() == "TCombobox"
                 and str(child.cget("textvariable")) == str(app.g00_level)
-                for child in descendants(app.process_info_frame)
+                for child in self._descendants(app.process_info_frame)
             )
             self.assertFalse(g00_in_frame)
 
-            entry_right = coordinate_relative_to_root(entry, "x") + entry.winfo_width()
-            button_left = coordinate_relative_to_root(button, "x")
+            entry_right = self._relative_x_to_root(entry, root) + entry.winfo_width()
+            button_left = self._relative_x_to_root(button, root)
             self.assertGreaterEqual(button_left - entry_right, 0)
             self.assertLessEqual(button_left - entry_right, 8)
 
             button_right = button_left + button.winfo_width()
             frame_right = (
-                coordinate_relative_to_root(app.process_info_frame, "x")
+                self._relative_x_to_root(app.process_info_frame, root)
                 + app.process_info_frame.winfo_width()
             )
             self.assertLessEqual(button_right, frame_right)
@@ -949,17 +908,9 @@ class SettingsDialogTests(LayoutWidgetTests):
         # "程序设置…"按钮位于"包含子目录"复选框右侧，顶部栏更名为"程序运行配置"。
         root, app = self._build_app(1286, 668)
         try:
-            def x_relative_to_root(widget):
-                x = 0
-                current = widget
-                while current is not root:
-                    x += current.winfo_x()
-                    current = current.master
-                return x
-
             self.assertGreater(
-                x_relative_to_root(app.settings_button),
-                x_relative_to_root(app.recursive_checkbox),
+                self._relative_x_to_root(app.settings_button, root),
+                self._relative_x_to_root(app.recursive_checkbox, root),
             )
             self.assertEqual(app.settings_button.master.cget("text"), "程序运行配置")
         finally:
@@ -1065,15 +1016,7 @@ class SettingsDialogTests(LayoutWidgetTests):
             # Notebook 两页 + G00 级别行：整体高度上限（Win7 1366×768 下完整显示）。
             self.assertLessEqual(win.winfo_reqheight(), 500)
 
-            def collect_buttons(widget):
-                buttons = []
-                for child in widget.winfo_children():
-                    if child.winfo_class() == "TButton":
-                        buttons.append(child)
-                    buttons.extend(collect_buttons(child))
-                return buttons
-
-            texts = {button.cget("text") for button in collect_buttons(win)}
+            texts = {button.cget("text") for button in self._collect_buttons(win)}
             self.assertIn("确定", texts)
             self.assertIn("取消", texts)
             self.assertIn("恢复默认", texts)
@@ -1326,15 +1269,9 @@ class SettingsDialogTests(LayoutWidgetTests):
         try:
             app.open_settings()
             rules = app.settings_pages[1]
-
-            def descendants(widget):
-                for child in widget.winfo_children():
-                    yield child
-                    yield from descendants(child)
-
             combo = next(
                 child
-                for child in descendants(rules)
+                for child in self._descendants(rules)
                 if child.winfo_class() == "TCombobox"
                 and str(child.cget("textvariable")) == str(app.g00_level)
             )
@@ -1348,14 +1285,8 @@ class SettingsDialogTests(LayoutWidgetTests):
         try:
             app.open_settings()
             rules = app.settings_pages[1]
-
-            def descendants(widget):
-                for child in widget.winfo_children():
-                    yield child
-                    yield from descendants(child)
-
             checkbuttons = [
-                widget for widget in descendants(rules)
+                widget for widget in self._descendants(rules)
                 if widget.winfo_class() == "TCheckbutton"
                 and widget.cget("text") in ("编制", "审核", "图号", "版次")
             ]
@@ -1374,18 +1305,12 @@ class SettingsDialogTests(LayoutWidgetTests):
         try:
             app.open_settings()
             rules = app.settings_pages[1]
-
-            def descendants(widget):
-                for child in widget.winfo_children():
-                    yield child
-                    yield from descendants(child)
-
             limit_vars = {
                 str(app.feed_min_var), str(app.feed_max_var),
                 str(app.spindle_min_var), str(app.spindle_max_var),
             }
             limit_entries = [
-                widget for widget in descendants(rules)
+                widget for widget in self._descendants(rules)
                 if widget.winfo_class() == "TEntry"
                 and str(widget.cget("textvariable")) in limit_vars
             ]
