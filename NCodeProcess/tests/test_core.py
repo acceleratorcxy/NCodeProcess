@@ -591,6 +591,33 @@ class CoreTests(unittest.TestCase):
         out_default, _changes, _issues = apply_header(text, "P", info, Config(g00_level="allow"))
         self.assertIn('MSG("SHENHE:")', out_default)
 
+    def test_standalone_m03_position_inserts_independent_row_with_s_present(self):
+        # m03_position="standalone"：即使存在 S 转速，也只把独立 M03 行插到
+        # 第一条切削/运动指令之前，不把 M03 附加到 S 所在的程序块。
+        text = '%\nMSG("PROGRAM:P")\nN1T1\nN2G1X10S1000\nN3M30\n%\n'
+        out, changed, _note = add_m03(text, Config(g00_level="allow", m03_position="standalone"))
+        self.assertTrue(changed)
+        self.assertNotIn("S1000M03", out)
+        self.assertIn("M03\nN2G1X10S1000", out)
+        self.assertEqual(out.count("M03"), 1)
+
+    def test_after_s_position_is_default_and_attaches(self):
+        # 默认 m03_position="after-s"：M03 紧贴首个 S 转速之后（锁定现行为）。
+        text = '%\nMSG("PROGRAM:P")\nN1G1X10S1000\nN2M30\n%\n'
+        out, changed, _note = add_m03(text, Config(g00_level="allow"))
+        self.assertTrue(changed)
+        self.assertIn("S1000M03", out)
+        self.assertNotIn("\nM03\n", out)
+
+    def test_standalone_m03_falls_back_when_no_motion_instruction(self):
+        # 正文没有切削/运动指令时，独立行策略回退到第一条指令行前插入，
+        # 且不把 M03 附加到 S 指令。
+        text = '%\nMSG("PROGRAM:P")\nN1S1000\nN2M30\n%\n'
+        out, changed, _note = add_m03(text, Config(g00_level="allow", m03_position="standalone"))
+        self.assertTrue(changed)
+        self.assertIn("M03\nN1S1000", out)
+        self.assertNotIn("S1000M03", out)
+
 
 if __name__ == "__main__":
     unittest.main()

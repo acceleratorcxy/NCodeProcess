@@ -1212,6 +1212,15 @@ class SettingsDialogTests(LayoutWidgetTests):
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
+    def test_m03_position_var_roundtrip(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            self.assertEqual(app.m03_position_var.get(), "after-s")
+            app.m03_position_var.set("standalone")
+            self.assertEqual(app.config().m03_position, "standalone")
+        finally:
+            root.destroy()
+
 
 class StartupCallbackTests(unittest.TestCase):
     def test_destroy_cancels_startup_callbacks_before_replacing_root(self):

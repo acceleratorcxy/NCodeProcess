@@ -603,6 +603,8 @@ class App(ttk.Frame):
         self.required_shenhe_var = tk.BooleanVar(value=True)
         self.required_drawing_var = tk.BooleanVar(value=True)
         self.required_part_var = tk.BooleanVar(value=True)
+        # M03 补写位置策略（Batch 2，仅本次运行生效）：after-s / standalone。
+        self.m03_position_var = tk.StringVar(value="after-s")
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
@@ -1029,6 +1031,7 @@ class App(ttk.Frame):
             "required_shenhe": self.required_shenhe_var.get(),
             "required_drawing": self.required_drawing_var.get(),
             "required_part": self.required_part_var.get(),
+            "m03_position": self.m03_position_var.get(),
         }
         win = tk.Toplevel(self.master)
         win.title("程序设置")
@@ -1080,6 +1083,11 @@ class App(ttk.Frame):
         for col, (text, var) in enumerate(required_columns):
             ttk.Checkbutton(body, text=text, variable=var).grid(row=10, column=1 + col, sticky="w", pady=(6, 3))
         ttk.Label(body, text="程序/机床/控制系统固定必填").grid(row=11, column=1, columnspan=3, sticky="w", pady=(0, 3))
+
+        m03_combo = ttk.Combobox(body, textvariable=self.m03_position_var, state="readonly", width=14,
+                                 values=("after-s", "standalone"))
+        labeled(12, "M03 补写位置", m03_combo)
+        ttk.Label(body, text="紧贴 S 数值后 / 独立行").grid(row=12, column=2, sticky="w", padx=(6, 0))
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
@@ -1143,6 +1151,7 @@ class App(ttk.Frame):
         self.required_shenhe_var.set(True)
         self.required_drawing_var.set(True)
         self.required_part_var.set(True)
+        self.m03_position_var.set("after-s")
         # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
         self.info_vars["bianzhi"].set("")
         self.info_vars["shenhe"].set("")
@@ -1191,6 +1200,7 @@ class App(ttk.Frame):
         self.required_shenhe_var.set(snapshot.get("required_shenhe", self.required_shenhe_var.get()))
         self.required_drawing_var.set(snapshot.get("required_drawing", self.required_drawing_var.get()))
         self.required_part_var.set(snapshot.get("required_part", self.required_part_var.get()))
+        self.m03_position_var.set(snapshot.get("m03_position", self.m03_position_var.get()))
         self.settings_window.destroy()
         self.settings_window = None
 
@@ -1245,6 +1255,7 @@ class App(ttk.Frame):
             program_extensions=program_extensions,
             program_output_extension=program_output_extension,
             required_fields=[key for key, _label, _required in FIELD_ORDER if required_flags.get(key, True)],
+            m03_position=self.m03_position_var.get(),
         )
 
     def info(self):

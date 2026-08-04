@@ -76,6 +76,8 @@ class Config:
     # 必填的 MSG 头部字段键（默认全部 FIELD_ORDER 键）；PROGRAM/NC MACHINE/
     # CONTROL SYSTEM 在 GUI 中固定必填，其余可按车间要求收紧或放宽。
     required_fields: List[str] = field(default_factory=lambda: [key for key, _label, _required in FIELD_ORDER])
+    # M03 补写位置策略：after-s（紧贴首个 S 数值后，默认）/ standalone（独立行）。
+    m03_position: str = "after-s"
 
 
 @dataclass
@@ -779,6 +781,8 @@ def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
         code = line.split("(", 1)[0]
         if m03_re.search(code):
             return text, False, ""
+    if config.m03_position == "standalone":
+        return _insert_standalone_m03(text, lines, start, newline)
     s_re = re.compile(r"(?<![A-Z])S\s*" + NUM, re.I)
     for idx in range(start, len(lines)):
         line = lines[idx]
@@ -799,6 +803,29 @@ def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
         stripped = lines[idx].strip()
         if stripped and stripped != "%" and not stripped.startswith("("):
             lines.insert(idx, "M03;" if any(l.rstrip().endswith(";") for l in lines[start:] if l.strip()) else "M03")
+            return newline.join(lines), True, f"第 {idx + 1} 行前插入独立 M03"
+    return text, False, "无法确定 M03 插入位置"
+
+
+def _insert_standalone_m03(text: str, lines: Sequence[str], start: int, newline: str) -> Tuple[str, bool, str]:
+    """独立行策略：在第一条切削/运动指令（G1/G2/G3 或 X/Y/Z）前插入独立 M03 行。
+
+    找不到切削/运动指令时回退到第一条指令行前插入，与 after-s 无 S 时的行为一致。
+    """
+    semicolon = any(line.rstrip().endswith(";") for line in lines[start:] if line.strip())
+    command = "M03;" if semicolon else "M03"
+    motion_re = re.compile(r"(?<![A-Z])(?:G0*[0-3]|[XYZ]\s*" + NUM + r")", re.I)
+    for idx in range(start, len(lines)):
+        code = lines[idx].split("(", 1)[0]
+        if _parse_msg(lines[idx]) or not code.strip():
+            continue
+        if motion_re.search(code):
+            lines.insert(idx, command)
+            return newline.join(lines), True, f"第 {idx + 1} 行前插入独立 M03"
+    for idx in range(start, len(lines)):
+        stripped = lines[idx].strip()
+        if stripped and stripped != "%" and not stripped.startswith("("):
+            lines.insert(idx, command)
             return newline.join(lines), True, f"第 {idx + 1} 行前插入独立 M03"
     return text, False, "无法确定 M03 插入位置"
 
