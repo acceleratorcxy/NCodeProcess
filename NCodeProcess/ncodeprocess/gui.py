@@ -628,21 +628,15 @@ class App(ttk.Frame):
         ttk.Checkbutton(options, text="自动添加换刀指令", variable=self.auto_tool_change).grid(row=0, column=4, padx=3, sticky="w")
         ttk.Label(options, text="机床：自动 HASS/2500B；控制系统：SIE840D").grid(row=0, column=5, padx=(8, 3), sticky="e")
 
-        tool_options = ttk.Frame(info)
-        tool_options.grid(row=2, column=0, sticky="ew", padx=4)
-        tool_options.columnconfigure(2, weight=1)
-        g00_options = ttk.Frame(tool_options)
-        g00_options.grid(row=0, column=0, padx=(0, 12), sticky="w")
-        ttk.Label(g00_options, text="G00 级别").grid(row=0, column=0, padx=(0, 4), sticky="w")
-        ttk.Combobox(g00_options, textvariable=self.g00_level, values=("error", "warning", "allow"), state="readonly", width=10).grid(row=0, column=1, sticky="w")
-        custom_type_group = ttk.Frame(tool_options)
-        custom_type_group.grid(row=0, column=1, sticky="w")
-        ttk.Label(custom_type_group, text="自定义刀具类型").grid(row=0, column=0, padx=(0, 4), sticky="w")
+        # G00 级别已移入程序设置对话框；此处仅保留自定义刀具类型一行。
+        custom_type_row = ttk.Frame(info)
+        custom_type_row.grid(row=2, column=0, sticky="ew", padx=4)
+        ttk.Label(custom_type_row, text="自定义刀具类型").pack(side="left", padx=(0, 4))
         self.new_type_var = tk.StringVar()
-        self.custom_tool_type_entry = ttk.Entry(custom_type_group, textvariable=self.new_type_var, width=20)
-        self.custom_tool_type_entry.grid(row=0, column=1, padx=(0, 4), sticky="w")
-        self.add_tool_type_button = ttk.Button(custom_type_group, text="添加类型", command=self.add_tool_type)
-        self.add_tool_type_button.grid(row=0, column=2, sticky="w")
+        self.custom_tool_type_entry = ttk.Entry(custom_type_row, textvariable=self.new_type_var, width=20)
+        self.custom_tool_type_entry.pack(side="left", padx=(0, 4))
+        self.add_tool_type_button = ttk.Button(custom_type_row, text="添加类型", command=self.add_tool_type)
+        self.add_tool_type_button.pack(side="left")
 
         drawing_choices = ttk.Frame(info)
         drawing_choices.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 2))
@@ -1049,6 +1043,7 @@ class App(ttk.Frame):
             "spindle_min": self.spindle_min_var.get(),
             "spindle_max": self.spindle_max_var.get(),
             "newline": self.newline_var.get(),
+            "g00_level": self.g00_level.get(),
             "aux_m03_before_motion": self.aux_m03_before_motion_var.get(),
             "aux_m05_before_end": self.aux_m05_before_end_var.get(),
             "aux_m08_before_cut": self.aux_m08_before_cut_var.get(),
@@ -1097,43 +1092,49 @@ class App(ttk.Frame):
         labeled(basic, 6, "输出扩展名", output_ext_entry)
         ttk.Label(basic, text="如 .MPF 或 .nc").grid(row=6, column=2, sticky="w", padx=(6, 0))
 
-        # ── 校验规则：必填字段 / M03 / S/F / 换行 / 辅助顺序 ──
+        # ── 校验规则：G00 / 必填字段 / M03 / S/F / 换行 / 辅助顺序 ──
         ttk.Checkbutton(rules, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 0))
         ttk.Checkbutton(rules, text="要求刀具调用包含 M06", variable=self.require_m06_var).grid(row=1, column=0, columnspan=4, sticky="w")
         ttk.Checkbutton(rules, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
-        ttk.Label(rules, text="必填 MSG 字段").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=(4, 3))
-        required_columns = (
+        g00_combo = ttk.Combobox(rules, textvariable=self.g00_level, state="readonly", width=10,
+                                 values=("error", "warning", "allow"))
+        labeled(rules, 3, "G00 级别", g00_combo)
+        ttk.Label(rules, text="error 报错 / warning 提示 / allow 放行").grid(row=3, column=2, sticky="w", padx=(6, 0))
+
+        ttk.Label(rules, text="必填 MSG 字段").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=(4, 3))
+        required_frame = ttk.Frame(rules)
+        required_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=(4, 3))
+        for text, var in (
             ("编制", self.required_bianzhi_var),
             ("审核", self.required_shenhe_var),
             ("图号", self.required_drawing_var),
             ("版次", self.required_part_var),
-        )
-        for col, (text, var) in enumerate(required_columns):
-            ttk.Checkbutton(rules, text=text, variable=var).grid(row=3, column=1 + col, sticky="w", pady=(4, 3))
-        ttk.Label(rules, text="程序/机床/控制系统固定必填").grid(row=4, column=1, columnspan=3, sticky="w", pady=(0, 3))
+        ):
+            ttk.Checkbutton(required_frame, text=text, variable=var).pack(side="left", padx=8)
+        ttk.Label(rules, text="程序/机床/控制系统固定必填").grid(row=5, column=1, columnspan=3, sticky="w", pady=(0, 3))
 
         m03_combo = ttk.Combobox(rules, textvariable=self.m03_position_var, state="readonly", width=14,
                                  values=("after-s", "standalone"))
-        labeled(rules, 5, "M03 补写位置", m03_combo)
-        ttk.Label(rules, text="紧贴 S 数值后 / 独立行").grid(row=5, column=2, sticky="w", padx=(6, 0))
+        labeled(rules, 6, "M03 补写位置", m03_combo)
+        ttk.Label(rules, text="紧贴 S 数值后 / 独立行").grid(row=6, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Label(rules, text="F 上下限").grid(row=6, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        ttk.Entry(rules, textvariable=self.feed_min_var, width=8).grid(row=6, column=1, sticky="w", pady=(6, 3))
-        ttk.Label(rules, text="~").grid(row=6, column=2, sticky="w", pady=(6, 3))
-        ttk.Entry(rules, textvariable=self.feed_max_var, width=8).grid(row=6, column=3, sticky="w", pady=(6, 3))
-        ttk.Label(rules, text="S 上下限").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        ttk.Entry(rules, textvariable=self.spindle_min_var, width=8).grid(row=7, column=1, sticky="w", pady=(6, 3))
+        ttk.Label(rules, text="F 上下限").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Entry(rules, textvariable=self.feed_min_var, width=8).grid(row=7, column=1, sticky="w", pady=(6, 3))
         ttk.Label(rules, text="~").grid(row=7, column=2, sticky="w", pady=(6, 3))
-        ttk.Entry(rules, textvariable=self.spindle_max_var, width=8).grid(row=7, column=3, sticky="w", pady=(6, 3))
-        ttk.Label(rules, text="留空 = 不检查").grid(row=8, column=1, columnspan=3, sticky="w", pady=(0, 3))
+        ttk.Entry(rules, textvariable=self.feed_max_var, width=8).grid(row=7, column=3, sticky="w", pady=(6, 3))
+        ttk.Label(rules, text="S 上下限").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Entry(rules, textvariable=self.spindle_min_var, width=8).grid(row=8, column=1, sticky="w", pady=(6, 3))
+        ttk.Label(rules, text="~").grid(row=8, column=2, sticky="w", pady=(6, 3))
+        ttk.Entry(rules, textvariable=self.spindle_max_var, width=8).grid(row=8, column=3, sticky="w", pady=(6, 3))
+        ttk.Label(rules, text="留空 = 不检查").grid(row=9, column=1, columnspan=3, sticky="w", pady=(0, 3))
 
         newline_combo = ttk.Combobox(rules, textvariable=self.newline_var, state="readonly", width=14,
                                      values=("auto", "crlf", "lf"))
-        labeled(rules, 9, "换行策略", newline_combo)
-        ttk.Label(rules, text="auto 跟随源文件；crlf/lf 强制").grid(row=9, column=2, sticky="w", padx=(6, 0))
+        labeled(rules, 10, "换行策略", newline_combo)
+        ttk.Label(rules, text="auto 跟随源文件；crlf/lf 强制").grid(row=10, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Label(rules, text="辅助指令顺序").grid(row=10, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Label(rules, text="辅助指令顺序").grid(row=11, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
         aux_rows = (
             (("M03 先于切削", self.aux_m03_before_motion_var), ("M05 先于结束", self.aux_m05_before_end_var)),
             (("M08 先于切削", self.aux_m08_before_cut_var), ("M09 先于结束", self.aux_m09_before_end_var)),
@@ -1141,7 +1142,7 @@ class App(ttk.Frame):
         for row_offset, row_items in enumerate(aux_rows):
             for col, (text, var) in enumerate(row_items):
                 ttk.Checkbutton(rules, text=text, variable=var).grid(
-                    row=11 + row_offset, column=1 + col, sticky="w", pady=(6 if row_offset == 0 else 0, 3))
+                    row=12 + row_offset, column=1 + col, sticky="w", pady=(6 if row_offset == 0 else 0, 3))
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
@@ -1224,6 +1225,7 @@ class App(ttk.Frame):
         self.spindle_min_var.set("")
         self.spindle_max_var.set("")
         self.newline_var.set("auto")
+        self.g00_level.set("error")
         self.aux_m03_before_motion_var.set(True)
         self.aux_m05_before_end_var.set(True)
         self.aux_m08_before_cut_var.set(True)
@@ -1282,6 +1284,7 @@ class App(ttk.Frame):
         self.spindle_min_var.set(snapshot.get("spindle_min", self.spindle_min_var.get()))
         self.spindle_max_var.set(snapshot.get("spindle_max", self.spindle_max_var.get()))
         self.newline_var.set(snapshot.get("newline", self.newline_var.get()))
+        self.g00_level.set(snapshot.get("g00_level", self.g00_level.get()))
         self.aux_m03_before_motion_var.set(snapshot.get("aux_m03_before_motion", self.aux_m03_before_motion_var.get()))
         self.aux_m05_before_end_var.set(snapshot.get("aux_m05_before_end", self.aux_m05_before_end_var.get()))
         self.aux_m08_before_cut_var.set(snapshot.get("aux_m08_before_cut", self.aux_m08_before_cut_var.get()))

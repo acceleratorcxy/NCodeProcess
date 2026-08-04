@@ -283,7 +283,9 @@ class LayoutWidgetTests(unittest.TestCase):
         root = tk.Tk()
         root.withdraw()
         with patch.object(App, "scan", lambda _self: None):
-            app = App(root)
+            # 使用隔离的测试注册表键，避免本机真实 HKCU\Software\NCodeProcess
+            # 中的用户设置（如 require_m06/require_spindle_speed）污染默认值断言。
+            app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
         root.geometry(f"{width}x{height}")
         root.deiconify()
         root.update_idletasks()
@@ -842,6 +844,8 @@ class LayoutWidgetTests(unittest.TestCase):
             root.destroy()
 
     def test_custom_tool_controls_stay_adjacent_and_visible_at_1286_width(self):
+        # 自定义刀具类型控件位于程序信息区（G00 已移入设置，此处为其独立一行），
+        # 输入框与按钮紧邻、不超出程序信息区右边界；程序信息区内不再有 G00 下拉框。
         root, app = self._build_app(1286, 668)
         try:
             def coordinate_relative_to_root(widget, axis):
@@ -859,6 +863,25 @@ class LayoutWidgetTests(unittest.TestCase):
                 self.assertGreaterEqual(control.winfo_width(), control.winfo_reqwidth())
                 self.assertGreaterEqual(control.winfo_height(), control.winfo_reqheight())
 
+            ancestors = set()
+            current = entry.master
+            while current is not None:
+                ancestors.add(current)
+                current = current.master
+            self.assertIn(app.process_info_frame, ancestors)
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            g00_in_frame = any(
+                child.winfo_class() == "TCombobox"
+                and str(child.cget("textvariable")) == str(app.g00_level)
+                for child in descendants(app.process_info_frame)
+            )
+            self.assertFalse(g00_in_frame)
+
             entry_right = coordinate_relative_to_root(entry, "x") + entry.winfo_width()
             button_left = coordinate_relative_to_root(button, "x")
             self.assertGreaterEqual(button_left - entry_right, 0)
@@ -871,24 +894,6 @@ class LayoutWidgetTests(unittest.TestCase):
             )
             self.assertLessEqual(button_right, frame_right)
             self.assertLessEqual(button_right, root.winfo_width())
-
-            def descendants(widget):
-                for child in widget.winfo_children():
-                    yield child
-                    yield from descendants(child)
-
-            g00_combo = next(
-                child
-                for child in descendants(app.process_info_frame)
-                if child.winfo_class() == "TCombobox"
-                and str(child.cget("textvariable")) == str(app.g00_level)
-            )
-            self.assertTrue(g00_combo.winfo_ismapped())
-            g00_y = coordinate_relative_to_root(g00_combo, "y")
-            entry_y = coordinate_relative_to_root(entry, "y")
-            self.assertLessEqual(abs(g00_y - entry_y), 2)
-            self.assertLess(g00_y, entry_y + entry.winfo_height())
-            self.assertLess(entry_y, g00_y + g00_combo.winfo_height())
         finally:
             root.destroy()
 
@@ -1057,8 +1062,8 @@ class SettingsDialogTests(LayoutWidgetTests):
             win = app.settings_window
             win.update_idletasks()
             self.assertLessEqual(win.winfo_reqwidth(), 640)
-            # Notebook 两页重构后高度重新收紧：每页内容 + 底部操作栏。
-            self.assertLessEqual(win.winfo_reqheight(), 480)
+            # Notebook 两页 + G00 级别行：整体高度上限（Win7 1366×768 下完整显示）。
+            self.assertLessEqual(win.winfo_reqheight(), 500)
 
             def collect_buttons(widget):
                 buttons = []
@@ -1312,6 +1317,53 @@ class SettingsDialogTests(LayoutWidgetTests):
                 self.assertTrue(getattr(app, name).get())
             for name in ("feed_min_var", "feed_max_var", "spindle_min_var", "spindle_max_var"):
                 self.assertEqual(getattr(app, name).get(), "")
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_has_g00_level_control(self):
+        # G00 级别下拉框已从主窗口移入设置对话框的校验规则页。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            rules = app.settings_pages[1]
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            combo = next(
+                child
+                for child in descendants(rules)
+                if child.winfo_class() == "TCombobox"
+                and str(child.cget("textvariable")) == str(app.g00_level)
+            )
+            self.assertEqual(tuple(combo.cget("values")), ("error", "warning", "allow"))
+        finally:
+            root.destroy()
+
+    def test_required_field_checkbuttons_have_equal_spacing(self):
+        # 必填 MSG 字段的 4 个勾选项位于同一容器内等间距排列。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            rules = app.settings_pages[1]
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            checkbuttons = [
+                widget for widget in descendants(rules)
+                if widget.winfo_class() == "TCheckbutton"
+                and widget.cget("text") in ("编制", "审核", "图号", "版次")
+            ]
+            self.assertEqual(len(checkbuttons), 4)
+            root.update()
+            positions = [widget.winfo_x() for widget in checkbuttons]
+            deltas = [positions[i + 1] - positions[i] for i in range(len(positions) - 1)]
+            self.assertEqual(len(set(deltas)), 1)  # 相邻间距一致
         finally:
             root.destroy()
 
