@@ -922,6 +922,20 @@ class SettingsDialogTests(LayoutWidgetTests):
         with self.assertRaises(ValueError):
             gui.parse_delete_extensions(".bad_ext;")  # 含非法字符
 
+    def test_settings_button_and_vars_exist(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            self.assertTrue(app.settings_button.winfo_ismapped())
+            self.assertEqual(app.encoding_var.get(), "auto")
+            self.assertEqual(app.delete_extensions_var.get(), ".log, .moaptindexes")
+            self.assertEqual(app.allowed_name_pattern_var.get(), r"^[A-Za-z0-9_一-鿿-]+$")
+            self.assertEqual(app.aptsource_dir_var.get(), "aptsource")
+            self.assertTrue(app.require_end_marker_var.get())
+            self.assertFalse(app.require_m06_var.get())
+            self.assertFalse(app.require_spindle_speed_var.get())
+        finally:
+            root.destroy()
+
 
 class StartupCallbackTests(unittest.TestCase):
     def test_destroy_cancels_startup_callbacks_before_replacing_root(self):
