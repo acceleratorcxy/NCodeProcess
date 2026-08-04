@@ -105,7 +105,7 @@
 
 ## 八、相关文档
 
-- 实施计划（已归档）：`docs/archive/superpowers/plans/2026-08-04-gui-config-settings-batch2-plan.md`
+- 实施计划（已归档，仅本地保留、git 不跟踪）：`docs/archive/superpowers/plans/2026-08-04-gui-config-settings-batch2-plan.md`
 - 需求文档：`NCodeProcess-需求文档.md`（第 8 节、7.2/7.3、FR-05.4/FR-05.7）
 - 程序理解与操作记录：`docs/NCodeProcess-程序理解与操作记录.md`
 - 审查与待办：`docs/NCodeProcess-审查与待办.md`

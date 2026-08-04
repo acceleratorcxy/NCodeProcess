@@ -1,7 +1,7 @@
 # NCodeProcess 程序理解与操作记录
 
 > 本文件合并自 `2026-08-04-程序理解与操作记录.md`（Batch 1 及更早）与 `2026-08-05-程序理解与操作记录-Batch2.md`（Batch 2 会话），后续开发操作在此持续追加。
-> 历史实施计划与设计规格见 `docs/archive/superpowers/`（任务已完成，归档备查）。
+> 历史实施计划与设计规格见 `docs/archive/superpowers/`（任务已完成，归档备查；该目录仅本地保留，git 不跟踪）。
 
 ---
 
@@ -130,6 +130,8 @@ scan_directory(目录, Config) → build_plan(scan, ProgramInfo, Config)
 ### 2.4 提交记录（截至 2026-08-05）
 
 ```
+090887d chore(git): 归档文档仅本地保留，从 git 移除跟踪
+a44f497 docs: 整理 docs 文件夹，归档已完成计划并合并审查与记录文档
 9e0a994 refactor(gui): F/S 上下限输入框与~改为独立子容器紧凑排列
 7ecb17f refactor(gui): 必填字段等间距排版、G00 级别移入设置、自定义刀具类型独立成行
 3c50468 docs: 归档 Batch 2 实施计划与发布说明
@@ -145,8 +147,8 @@ d3ac9ca feat(core): M03 补写位置策略可配置（after-s/standalone），ad
 
 ### 2.5 配套工作
 
-- **实施计划**：`docs/archive/superpowers/plans/`（Batch 1、Batch 2、Win7 布局计划，任务已完成）
-- **设计规格**：`docs/archive/superpowers/specs/`
+- **实施计划**：`docs/archive/superpowers/plans/`（Batch 1、Batch 2、Win7 布局计划，任务已完成；仅本地保留，git 不跟踪）
+- **设计规格**：`docs/archive/superpowers/specs/`（同上，仅本地保留）
 - **发布说明**：`docs/NCodeProcess-发布说明.md`
 - **审查与待办**：`docs/NCodeProcess-审查与待办.md`
 - **流程文档**：`docs/更改测试打包提交流程.md`（本地维护，未入库）
@@ -160,5 +162,5 @@ d3ac9ca feat(core): M03 补写位置策略可配置（after-s/standalone），ad
 2. **机床行程检查**：按用户决定暂不实施；如后续需要可单独规划（`Config.machine_limits` + 越程校验 + 未配置时 info 提示）。
 3. **辅助指令顺序规则按机床配置**：当前为全局规则集，不区分机床。
 4. **版本号**：当前 `__version__` 仍 1.0.0，正式发版前建议提升并同步 `VERSION.txt`/`version_info.txt`。
-5. **流程文档入库**：`docs/更改测试打包提交流程.md` 目前仅本地；如需团队共享可考虑纳入版本管理。
+5. **流程文档入库**：`docs/更改测试打包提交流程.md` 按用户决定仅本地维护、不入库（如需团队共享可重新评估）。
 6. **审查与待办**：详见 `docs/NCodeProcess-审查与待办.md`（线程安全、子窗口适配、备份/只读预检等未处理项）。
