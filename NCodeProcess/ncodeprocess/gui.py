@@ -1,0 +1,1653 @@
+from __future__ import annotations
+
+import difflib
+import json
+import re
+import sys
+import threading
+import tkinter as tk
+import tkinter.font as tkfont
+from pathlib import Path
+from tkinter import messagebox, simpledialog, ttk
+from typing import List, NamedTuple
+
+from . import __version__
+from .core import (
+    Config,
+    ProgramInfo,
+    ToolInfo,
+    align_lines,
+    build_plan,
+    calculate_stats,
+    extract_header_fields,
+    extract_tools,
+    format_nc_date,
+    process_plan,
+    reprocess_file,
+    save_timestamped_report,
+    scan_directory,
+    validate_program,
+)
+from .preferences import load as load_preferences, save as save_preferences
+
+
+DEFAULT_TOOL_TYPES = ["普通立铣刀", "反锥立铣刀", "铅笔铣刀", "T形刀", "钻头", "中心钻"]
+
+# 鼠标悬停在单元格上多久后弹出内容提示（毫秒）。
+CELL_TOOLTIP_DELAY_MS = 1500
+
+
+class CellTooltip:
+    """A small always-on-top window that shows a cell's full content."""
+
+    def __init__(self, master):
+        self.window = tk.Toplevel(master)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        self.label = ttk.Label(
+            self.window,
+            background="#ffffe0",
+            foreground="#333333",
+            relief="solid",
+            borderwidth=1,
+            padding=(4, 2),
+            justify="left",
+        )
+        self.label.pack()
+
+    def show(self, text, x, y):
+        """Position the window next to the cursor and make it visible."""
+        self.label.configure(text=text)
+        self.window.update_idletasks()
+        width = self.window.winfo_reqwidth()
+        height = self.window.winfo_reqheight()
+        screen_w = self.window.winfo_screenwidth()
+        screen_h = self.window.winfo_screenheight()
+        x = min(x + 12, screen_w - width - 4)
+        y = min(y + 14, screen_h - height - 4)
+        self.window.geometry(f"+{max(4, x)}+{max(4, y)}")
+        self.window.deiconify()
+        self.window.lift()
+
+    def hide(self):
+        self.window.withdraw()
+
+
+KEEP_COLUMN_SPECS = (
+    ("action", 58, 52, False),
+    ("program", 112, 96, False),
+    ("source", 205, 130, True),
+    ("target", 150, 105, True),
+)
+TOOL_COLUMN_SPECS = (
+    ("number", 50, 48, False),
+    ("dia", 50, 48, False),
+    ("coner", 82, 76, True),
+    ("angle", 84, 78, True),
+    ("type", 104, 88, True),
+)
+KEEP_TABLE_HEADINGS = ("动作", "程序名", "MPF 源文件", "目标")
+TOOL_TABLE_HEADINGS = ("刀具号", "DIA", "TOOL_CONER", "TOOL_ANGLE", "TOOL_TYPE")
+
+UI_FONT_CANDIDATES = ("Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Tahoma")
+
+
+class FontLayoutProfile(NamedTuple):
+    keep_specs: tuple
+    tool_specs: tuple
+    validation_width: int
+
+
+def choose_ui_font_family(available_families):
+    """Return the first compatible UI font available on this system."""
+    available = set(available_families)
+    for family in UI_FONT_CANDIDATES:
+        if family in available:
+            return family
+    return "TkDefaultFont"
+
+
+def font_layout_profile(measure):
+    """Create deterministic table dimensions from a Treeview font measure."""
+    scale = max(1.0, min(1.5, float(measure("程序名")) / 36.0))
+
+    def scale_specs(specs):
+        return tuple(
+            (name, round(initial * scale), round(minimum * scale), stretch)
+            for name, initial, minimum, stretch in specs
+        )
+
+    keep_specs = scale_specs(KEEP_COLUMN_SPECS)
+    tool_specs = list(scale_specs(TOOL_COLUMN_SPECS))
+    number_index = next(index for index, spec in enumerate(tool_specs) if spec[0] == "number")
+    name, initial, minimum, stretch = tool_specs[number_index]
+    number_width = measure("刀具号") + 20
+    tool_specs[number_index] = (
+        name,
+        max(initial, number_width),
+        max(minimum, number_width),
+        stretch,
+    )
+    validation_width = max(round(82 * scale), measure("999 错 / 999 警") + 20)
+    return FontLayoutProfile(keep_specs, tuple(tool_specs), validation_width)
+
+
+def ensure_heading_widths(specs, headings, measure, padding):
+    """Ensure each runtime column can render its heading with padding."""
+    if len(specs) != len(headings):
+        raise ValueError("column specifications and headings must have equal lengths")
+    return tuple(
+        (
+            name,
+            max(initial, measure(heading) + padding),
+            max(minimum, measure(heading) + padding),
+            stretch,
+        )
+        for (name, initial, minimum, stretch), heading in zip(specs, headings)
+    )
+
+
+def window_geometry_for_screen(screen_width, screen_height):
+    supported = screen_width >= 1366 and screen_height >= 768
+    if supported:
+        # Cap the default window at roughly 1280x720 so larger screens
+        # (1600x900, 1920x1080) no longer open nearly full-screen.
+        width = min(1290, max(1180, screen_width - 80))
+        height = min(720, max(650, screen_height - 100))
+        return width, height, 1180, 650
+
+    width = min(screen_width, min(1600, max(900, screen_width - 40)))
+    height = min(screen_height, min(900, max(560, screen_height - 60)))
+    return width, height, width, height
+
+
+def fit_column_widths(available_width, specs):
+    """Fit ordered column specifications into an available pixel width."""
+    widths = {name: initial for name, initial, _minimum, _stretch in specs}
+    if available_width <= 0:
+        return widths
+
+    initial_total = sum(widths.values())
+    if available_width >= initial_total:
+        extra = available_width - initial_total
+        stretch_names = [name for name, _initial, _minimum, stretch in specs if stretch]
+        if stretch_names:
+            share, remainder = divmod(extra, len(stretch_names))
+            for index, name in enumerate(stretch_names):
+                widths[name] += share + (1 if index < remainder else 0)
+        return widths
+
+    minimums = {name: minimum for name, _initial, minimum, _stretch in specs}
+    if available_width < sum(minimums.values()):
+        return minimums
+
+    remaining = initial_total - available_width
+    for names in (
+        [name for name, _initial, _minimum, stretch in specs if stretch],
+        [name for name, _initial, _minimum, _stretch in specs],
+    ):
+        while remaining:
+            adjustable = [name for name in names if widths[name] > minimums[name]]
+            if not adjustable:
+                break
+            share, remainder = divmod(remaining, len(adjustable))
+            reduced = 0
+            for index, name in enumerate(adjustable):
+                reduction = min(widths[name] - minimums[name], share + (index < remainder))
+                widths[name] -= reduction
+                reduced += reduction
+            remaining -= reduced
+        if not remaining:
+            break
+    return widths
+
+
+def _display_with_gap(value):
+    """Return the table-only representation used to keep path text readable."""
+    return f" {value}" if value else ""
+
+
+def folder_drawing_choices(directory: Path):
+    choices = []
+    current = directory.resolve()
+    for level in range(4):
+        label = ("当前目录" if level == 0 else "上" + str(level) + "层") + "：" + current.name
+        choices.append((label, current.name))
+        current = current.parent
+    return choices
+
+
+def merge_drawing_choices(folder_choices, apt_candidates):
+    """Merge duplicate values within each source method."""
+    choices = list(folder_choices)
+    for label, value in apt_candidates or []:
+        display = label + "：" + value
+        if (display, value) not in choices:
+            choices.append((display, value))
+    return choices
+
+
+def compact_diff_rows(before, after, context=3):
+    """Return aligned diff rows with only the requested unchanged context.
+
+    Each row is ``(before_no, before_text, before_tag, after_no,
+    after_text, after_tag)``. Unchanged records outside the context window are
+    omitted and returned as a single count for the blue footer.
+    """
+    before_lines = before.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    after_lines = after.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
+    records = []
+    for opcode, a1, a2, b1, b2 in matcher.get_opcodes():
+        if opcode == "equal":
+            for offset, (left, right) in enumerate(zip(before_lines[a1:a2], after_lines[b1:b2])):
+                records.append((a1 + offset + 1, left, "", b1 + offset + 1, right, "", False))
+        elif opcode == "delete":
+            for offset, left in enumerate(before_lines[a1:a2]):
+                records.append((a1 + offset + 1, left, "removed", None, "", "", True))
+        elif opcode == "insert":
+            for offset, right in enumerate(after_lines[b1:b2]):
+                records.append((None, "", "", b1 + offset + 1, right, "added", True))
+        else:
+            length = max(a2 - a1, b2 - b1)
+            for offset in range(length):
+                has_left = a1 + offset < a2
+                has_right = b1 + offset < b2
+                records.append((
+                    a1 + offset + 1 if has_left else None,
+                    before_lines[a1 + offset] if has_left else "",
+                    "removed" if has_left else "",
+                    b1 + offset + 1 if has_right else None,
+                    after_lines[b1 + offset] if has_right else "",
+                    "added" if has_right else "",
+                    True,
+                ))
+    changed = [index for index, row in enumerate(records) if row[6]]
+    visible = set()
+    for index in changed:
+        visible.update(range(max(0, index - context), min(len(records), index + context + 1)))
+    rows = [row[:6] for index, row in enumerate(records) if index in visible]
+    hidden = sum(1 for index, row in enumerate(records) if index not in visible and not row[6])
+    return rows, hidden
+
+
+def needs_detailed_confirmation(lines, max_items=10, max_characters=1200):
+    """Return True when a native message box would become impractically tall."""
+    return len(lines) > max_items or sum(len(line) for line in lines) > max_characters
+
+
+def application_directory() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+class App(ttk.Frame):
+    def __init__(self, master):
+        super().__init__(master, padding=8)
+        self.master.title("NCodeProcess " + __version__)
+        self._configure_window_size()
+        self.pack(fill="both", expand=True)
+        self.workdir = application_directory()
+        self.folder_choices = folder_drawing_choices(self.workdir)
+        self.data_dir = self.workdir / "NCodeProcessData"
+        self.special_tools_path = self.data_dir / "special_tools.json"
+        self.legacy_special_tools_path = self.workdir / "NCPostProcessData" / "special_tools.json"
+        self.scan_result = None
+        self.report = None
+        self.info_vars = {}
+        self.info_defaults = {key: "" for key in ("bianzhi", "shenhe", "drawing", "version", "date")}
+        self.applied_info = ProgramInfo()
+        self.program_tools = {}
+        self.current_program = None
+        self.detail_notebook = None
+        self.stats_page = None
+        self.all_stats_window = None
+        self.program_editor_window = None
+        self.program_editor_text = None
+        self.program_editor_gutter = None
+        self.program_compare_window = None
+        self.program_compare_left = None
+        self.program_compare_right = None
+        self.program_compare_left_gutter = None
+        self.program_compare_right_gutter = None
+        self.keep_table_menu = None
+        self._syncing_keep_selection = False
+        self._startup_after_ids = set()
+        self._column_profile_states = []
+        self.cell_tooltip = CellTooltip(self.master)
+        self._cell_tip_key = None
+        self._cell_tip_after = None
+        self._cell_tip_text = ""
+        self.bind("<Destroy>", self._cancel_startup_callbacks, add="+")
+        self.tool_types = list(DEFAULT_TOOL_TYPES)
+        self._configure_typography()
+        self._build()
+        self.load_saved_fields()
+        self.load_special_tools()
+        self._schedule_startup_callback(50, self._present_window)
+        self._schedule_startup_callback(120, self.scan)
+
+    def _configure_typography(self):
+        """Set compatible native fonts and derive layout from Treeview metrics."""
+        default_font = tkfont.Font(root=self.master, name="TkDefaultFont", exists=True)
+        selected_family = choose_ui_font_family(tkfont.families(self.master))
+        family = (
+            default_font.actual("family")
+            if selected_family == "TkDefaultFont"
+            else selected_family
+        )
+
+        for font_name in ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont"):
+            try:
+                tkfont.Font(root=self.master, name=font_name, exists=True).configure(
+                    family=family, size=9
+                )
+            except tk.TclError:
+                pass
+
+        self._treeview_font = tkfont.Font(root=self.master, family=family, size=9)
+        actual_family = self._treeview_font.actual("family")
+        style = ttk.Style(self.master)
+        style.configure("Treeview", font=self._treeview_font,
+                        rowheight=max(22, self._treeview_font.metrics("linespace") + 6))
+        self.tree_heading_font = tkfont.Font(
+            root=self.master, family=actual_family, size=8, weight="bold"
+        )
+        self.tree_heading_padding = 8
+        style.configure("Treeview.Heading", font=self.tree_heading_font)
+
+        profile = font_layout_profile(self._treeview_font.measure)
+        self.keep_column_specs = ensure_heading_widths(
+            profile.keep_specs,
+            KEEP_TABLE_HEADINGS,
+            self.tree_heading_font.measure,
+            self.tree_heading_padding,
+        )
+        self.tool_column_specs = ensure_heading_widths(
+            profile.tool_specs,
+            TOOL_TABLE_HEADINGS,
+            self.tree_heading_font.measure,
+            self.tree_heading_padding,
+        )
+        self.validation_column_width = profile.validation_width
+        self.ui_font_family = actual_family
+
+    def _schedule_startup_callback(self, delay, callback):
+        """Schedule a startup callback that can be cancelled with this App."""
+        after_id = None
+
+        def run():
+            self._startup_after_ids.discard(after_id)
+            callback()
+
+        after_id = self.after(delay, run)
+        self._startup_after_ids.add(after_id)
+
+    def _cancel_startup_callbacks(self, event):
+        """Cancel pending startup work when this frame is destroyed."""
+        if event.widget is not self:
+            return
+        for after_id in self._startup_after_ids:
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self._startup_after_ids.clear()
+        for state in self._column_profile_states:
+            after_id = state.get("after_id")
+            if after_id is None:
+                continue
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            state["after_id"] = None
+
+    def _bind_column_profile(self, table, specs, available_width_callback):
+        """Keep a Treeview's declared column profile fitted to its viewport."""
+        state = {"after_id": None, "destroyed": False, "manual_widths": {}}
+        self._column_profile_states.append(state)
+        table._column_profile_state = state
+
+        def update_widths():
+            state["after_id"] = None
+            if state["destroyed"]:
+                return
+            try:
+                available_width = int(available_width_callback())
+                manual_widths = state["manual_widths"]
+                automatic_specs = tuple(spec for spec in specs if spec[0] not in manual_widths)
+                automatic_available = available_width - sum(manual_widths.values())
+                if automatic_available <= 0:
+                    widths = {
+                        name: minimum
+                        for name, _initial, minimum, _stretch in automatic_specs
+                    }
+                else:
+                    widths = fit_column_widths(automatic_available, automatic_specs)
+                for name, _initial, minimum, stretch in specs:
+                    if name in manual_widths:
+                        manual_width = manual_widths[name]
+                        table.column(
+                            name,
+                            width=manual_width,
+                            minwidth=minimum,
+                            stretch=False,
+                        )
+                    else:
+                        table.column(name, width=widths[name], minwidth=minimum, stretch=stretch)
+            except tk.TclError:
+                state["destroyed"] = True
+
+        def schedule(_event=None):
+            if state["destroyed"] or state["after_id"] is not None:
+                return
+            try:
+                state["after_id"] = self.after_idle(update_widths)
+            except tk.TclError:
+                state["destroyed"] = True
+
+        def cancel(event):
+            if event.widget is not table:
+                return
+            state["destroyed"] = True
+            state["manual_widths"].clear()
+            after_id = state["after_id"]
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                state["after_id"] = None
+
+        table.bind("<Configure>", schedule, add="+")
+        table.bind("<Destroy>", cancel, add="+")
+        schedule()
+
+    @staticmethod
+    def _treeview_available_width(table):
+        """Allow for native Treeview borders before fitting declared columns."""
+        return max(0, table.winfo_width() - 8)
+
+    @staticmethod
+    def _preserve_manual_treeview_width(table):
+        """Let a user-resized column create horizontal overflow when needed."""
+        columns = tuple(table["columns"])
+        state = table._column_profile_state
+
+        def start_resize(event):
+            if table.identify_region(event.x, event.y) != "separator":
+                return
+            column_id = table.identify_column(event.x)
+            try:
+                column = columns[int(column_id[1:]) - 1]
+            except (IndexError, ValueError):
+                return
+            state["resizing_column"] = column
+            table.column(column, stretch=False)
+
+        def finish_resize(_event):
+            column = state.pop("resizing_column", None)
+            if column is None or state["destroyed"]:
+                return
+            try:
+                width = int(table.column(column, "width"))
+                state["manual_widths"][column] = width
+                table.column(column, width=width, stretch=False)
+            except tk.TclError:
+                state["destroyed"] = True
+
+        table.bind("<ButtonPress-1>", start_resize, add="+")
+        table.bind("<ButtonRelease-1>", finish_resize, add="+")
+
+    def _present_window(self):
+        """Realize the layout before showing the configured window."""
+        self.master.update_idletasks()
+        self.master.deiconify()
+
+    def _configure_window_size(self):
+        """Choose a centered, non-maximized default (~1280x720 on 1080p)."""
+        screen_width = self.master.winfo_screenwidth()
+        screen_height = self.master.winfo_screenheight()
+        width, height, min_width, min_height = window_geometry_for_screen(
+            screen_width, screen_height
+        )
+        x = max(0, (screen_width - width) // 2)
+        y = max(0, (screen_height - height) // 2)
+        self.master.geometry(f"{width}x{height}+{x}+{y}")
+        self.master.minsize(min_width, min_height)
+
+    def _build(self):
+        top = ttk.LabelFrame(self, text="自动扫描目录")
+        top.pack(fill="x")
+        ttk.Label(top, text="扫描应用程序所在目录：").pack(side="left", padx=(8, 2), pady=6)
+        ttk.Label(top, text=str(self.workdir)).pack(side="left", padx=2, pady=6)
+        self.recursive = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="包含子目录", variable=self.recursive).pack(side="right", padx=5)
+        self.save_aptsource = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="保存 APTSOURCE（按时间归档）", variable=self.save_aptsource, command=self.scan).pack(side="right", padx=8)
+        ttk.Button(top, text="重新扫描目录", command=self.scan).pack(side="right", padx=5)
+
+        self.process_info_frame = ttk.LabelFrame(self, text="程序信息")
+        self.process_info_frame.pack(fill="x", pady=(7, 0))
+        self.process_info_frame.columnconfigure(0, weight=1)
+        info = self.process_info_frame
+
+        basic_info = ttk.Frame(info)
+        basic_info.grid(row=0, column=0, sticky="ew", padx=4, pady=(2, 0))
+        fields = (("编制 BIANZHI", "bianzhi"), ("审核/校对 SHENHE", "shenhe"), ("图号", "drawing"), ("版次", "version"), ("日期", "date"))
+        for col, (label, key) in enumerate(fields):
+            basic_info.columnconfigure(col, weight=1, uniform="program_info_field")
+            field = ttk.Frame(basic_info)
+            field.grid(row=0, column=col, padx=3, sticky="ew")
+            field.columnconfigure(1, weight=1)
+            ttk.Label(field, text=label).grid(row=0, column=0, padx=(0, 3), sticky="w")
+            var = tk.StringVar()
+            self.info_vars[key] = var
+            ttk.Entry(field, textvariable=var, width=10).grid(row=0, column=1, sticky="ew")
+        self.overwrite_fields = tk.BooleanVar(value=False)
+        self.auto_m03 = tk.BooleanVar(value=True)
+        self.auto_tool_change = tk.BooleanVar(value=False)
+        self.g00_level = tk.StringVar(value="error")
+
+        options = ttk.Frame(info)
+        options.grid(row=1, column=0, sticky="ew", padx=4)
+        options.columnconfigure(5, weight=1)
+        ttk.Button(options, text="应用设置", command=self.apply_info).grid(row=0, column=0, padx=3, sticky="w")
+        ttk.Button(options, text="保存编制/校对", command=self.save_fields).grid(row=0, column=1, padx=3, sticky="w")
+        ttk.Checkbutton(options, text="覆盖已有非空 MSG 字段", variable=self.overwrite_fields).grid(row=0, column=2, padx=3, sticky="w")
+        ttk.Checkbutton(options, text="自动补写 M03", variable=self.auto_m03).grid(row=0, column=3, padx=3, sticky="w")
+        ttk.Checkbutton(options, text="自动添加换刀指令", variable=self.auto_tool_change).grid(row=0, column=4, padx=3, sticky="w")
+        ttk.Label(options, text="机床：自动 HASS/2500B；控制系统：SIE840D").grid(row=0, column=5, padx=(8, 3), sticky="e")
+
+        tool_options = ttk.Frame(info)
+        tool_options.grid(row=2, column=0, sticky="ew", padx=4)
+        tool_options.columnconfigure(2, weight=1)
+        g00_options = ttk.Frame(tool_options)
+        g00_options.grid(row=0, column=0, padx=(0, 12), sticky="w")
+        ttk.Label(g00_options, text="G00 级别").grid(row=0, column=0, padx=(0, 4), sticky="w")
+        ttk.Combobox(g00_options, textvariable=self.g00_level, values=("error", "warning", "allow"), state="readonly", width=10).grid(row=0, column=1, sticky="w")
+        custom_type_group = ttk.Frame(tool_options)
+        custom_type_group.grid(row=0, column=1, sticky="w")
+        ttk.Label(custom_type_group, text="自定义刀具类型").grid(row=0, column=0, padx=(0, 4), sticky="w")
+        self.new_type_var = tk.StringVar()
+        self.custom_tool_type_entry = ttk.Entry(custom_type_group, textvariable=self.new_type_var, width=20)
+        self.custom_tool_type_entry.grid(row=0, column=1, padx=(0, 4), sticky="w")
+        self.add_tool_type_button = ttk.Button(custom_type_group, text="添加类型", command=self.add_tool_type)
+        self.add_tool_type_button.grid(row=0, column=2, sticky="w")
+
+        drawing_choices = ttk.Frame(info)
+        drawing_choices.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 2))
+        drawing_choices.columnconfigure(1, weight=1)
+        self.folder_choice_var = tk.StringVar(value=self.folder_choices[3][0])
+        ttk.Label(drawing_choices, text="图号候选").grid(row=0, column=0, padx=(0, 4), sticky="w")
+        self.folder_choice_combo = ttk.Combobox(drawing_choices, textvariable=self.folder_choice_var, values=[item[0] for item in self.folder_choices], state="readonly", width=8)
+        self.folder_choice_combo.grid(row=0, column=1, padx=4, sticky="ew")
+        self.drawing_choice_button = ttk.Button(drawing_choices, text="选取此项作为图号", command=self.use_folder_as_drawing)
+        self.drawing_choice_button.grid(row=0, column=2, padx=(4, 0), sticky="e")
+
+        actions = ttk.Frame(self)
+        actions.pack(fill="x", pady=7)
+        actions.columnconfigure(1, weight=1)
+        self.all_stats_button = ttk.Button(actions, text="查看全部程序信息", command=self.show_all_program_stats, state="disabled")
+        self.all_stats_button.grid(row=0, column=0, padx=3, sticky="w")
+        self.status = tk.StringVar(value="正在扫描……")
+        ttk.Label(actions, textvariable=self.status).grid(row=0, column=1, padx=12, sticky="w")
+        self.export_button = ttk.Button(actions, text="导出报告", command=self.export_report, state="disabled")
+        self.export_button.grid(row=0, column=2, padx=3, sticky="e")
+        self.process_button = ttk.Button(actions, text="确认并执行目录处理", command=self.process, state="disabled")
+        self.process_button.grid(row=0, column=3, padx=3, sticky="e")
+
+        content = ttk.Frame(self)
+        content.pack(fill="both", expand=True)
+        content.rowconfigure(0, weight=1)
+        content.columnconfigure(0, weight=1, uniform="main")
+        content.columnconfigure(1, weight=1, uniform="main")
+        left = ttk.Notebook(content)
+        right = ttk.Frame(content)
+        self.left_notebook = left
+        self.right_detail_frame = right
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
+        right.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=1, uniform="detail")
+        right.rowconfigure(1, weight=1, uniform="detail")
+
+        keep_frame = ttk.Frame(left)
+        apt_frame = ttk.Frame(left)
+        delete_frame = ttk.Frame(left)
+        left.add(keep_frame, text="保留 / 归档文件")
+        left.add(apt_frame, text="APTSOURCE 文件")
+        left.add(delete_frame, text="待删除文件")
+        self.keep_table, self.keep_issue_table = self._keep_tables(keep_frame)
+        self.apt_table = self._table(apt_frame, ("action", "program", "source", "target"), ("处理方式", "程序名", "APTSOURCE 文件", "处理目标"), (100, 125, 250, 240))
+        for column, width in (("action", 80), ("program", 100), ("source", 200), ("target", 190)):
+            self.apt_table.column(column, width=width, anchor="w")
+        self.apt_table.pack(fill="both", expand=True)
+        self.delete_table = self._table(delete_frame, ("kind", "action", "source", "reason"), ("类型", "动作", "文件", "说明"), (90, 80, 320, 210))
+        for column, width in (("kind", 70), ("action", 70), ("source", 240), ("reason", 180)):
+            self.delete_table.column(column, width=width, anchor="w")
+        self.delete_table.pack(fill="both", expand=True)
+
+        notebook = ttk.Notebook(right)
+        self.detail_notebook = notebook
+        notebook.grid(row=0, column=0, sticky="nsew")
+        tool_frame = ttk.LabelFrame(right, text="当前程序刀具信息（可编辑）")
+        tool_frame.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        self.tool_frame = tool_frame
+        info_page = ttk.Frame(notebook)
+        issue_page = ttk.Frame(notebook)
+        stats_page = ttk.Frame(notebook)
+        self.stats_page = stats_page
+        self.info_table = self._table(info_page, ("key", "value"), ("字段 / 解析项目", "当前值"), (180, 560))
+        self.issue_table = self._table(issue_page, ("line", "kind", "severity", "text", "suggestion"), ("行", "类型", "级别", "原始文本", "建议"), (45, 90, 60, 220, 300))
+        # The statistics page is intentionally compact: one row per
+        # program/parameter, with only the requested min/max and G00 check.
+        # This makes the all-file overview readable without a horizontal
+        # scrollbar at the default window size.
+        self.stats_table = self._table(stats_page, ("program", "param", "count", "min", "max", "g00"), ("程序", "参数", "出现次数", "最小值", "最大值", "G00 检查"), (175, 65, 75, 105, 105, 150))
+        for column, width in (("key", 140), ("value", 410)):
+            self.info_table.column(column, width=width, anchor="w")
+        for column, width in (("line", 40), ("kind", 70), ("severity", 55), ("text", 160), ("suggestion", 220)):
+            self.issue_table.column(column, width=width, anchor="w")
+        for column, width in (("program", 130), ("param", 55), ("count", 65), ("min", 85), ("max", 85), ("g00", 115)):
+            self.stats_table.column(column, width=width, anchor="w")
+        self.info_table.pack(fill="both", expand=True)
+        self.issue_table.pack(fill="both", expand=True)
+        self.stats_table.pack(fill="both", expand=True)
+        diff_frame = ttk.Frame(notebook)
+        diff_frame.rowconfigure(0, weight=1)
+        diff_frame.columnconfigure(0, weight=1, uniform="diff")
+        diff_frame.columnconfigure(1, weight=1, uniform="diff")
+        diff_split = diff_frame
+        before_frame = ttk.LabelFrame(diff_split, text="修改前")
+        after_frame = ttk.LabelFrame(diff_split, text="修改后")
+        before_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
+        after_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
+        self.diff_before = self._text_with_scrollbars(before_frame)
+        self.diff_after = self._text_with_scrollbars(after_frame)
+        for widget in (self.diff_before, self.diff_after):
+            widget.tag_configure("removed", background="#ffd6d6", foreground="#8b0000")
+            widget.tag_configure("added", background="#d9f2d9", foreground="#176b17")
+            widget.tag_configure("changed", background="#fff0c2")
+            widget.tag_configure("collapsed", background="#e7f1ff", foreground="#1565c0", font=("Consolas", 9, "bold"))
+        notebook.add(info_page, text="解析信息")
+        notebook.add(issue_page, text="校验问题")
+        notebook.add(stats_page, text="参数统计")
+        notebook.add(diff_frame, text="修改差异")
+
+        # The editor reserves one grid column; the table and both scrollbars
+        # remain packed inside their own child frame.
+        tool_frame.rowconfigure(0, weight=1)
+        tool_frame.columnconfigure(0, weight=1)
+        tool_frame.columnconfigure(1, weight=0, minsize=230)
+        table_area = ttk.Frame(tool_frame)
+        table_area.grid(row=0, column=0, sticky="nsew", padx=(2, 1))
+        editor = ttk.Frame(tool_frame)
+        editor.grid(row=0, column=1, sticky="nsew")
+        self.tool_editor = editor
+        self.tool_table_area = table_area
+        editor.columnconfigure(1, weight=1)
+        tool_frame = table_area
+        self.tool_table = self._table(
+            tool_frame,
+            tuple(spec[0] for spec in self.tool_column_specs),
+            TOOL_TABLE_HEADINGS,
+            tuple(spec[2] for spec in self.tool_column_specs),
+        )
+        for column, _initial, minimum, stretch in self.tool_column_specs:
+            self.tool_table.column(
+                column, width=minimum, minwidth=minimum, stretch=stretch, anchor="w"
+            )
+        self.tool_table.pack(side="left", fill="both", expand=True, padx=(2, 0), pady=0)
+        self._bind_column_profile(
+            self.tool_table,
+            self.tool_column_specs,
+            lambda: self._treeview_available_width(self.tool_table),
+        )
+        self._preserve_manual_treeview_width(self.tool_table)
+        self.tool_table.bind("<<TreeviewSelect>>", self.load_tool_editor)
+        self.tool_vars = {key: tk.StringVar() for key in ("number", "dia", "coner", "angle", "type")}
+        for row, (label, key) in enumerate((("刀具号", "number"), ("DIA", "dia"), ("TOOL_CONER", "coner"), ("TOOL_ANGLE", "angle"))):
+            ttk.Label(editor, text=label).grid(row=row, column=0, padx=3, pady=1, sticky="e")
+            ttk.Entry(editor, textvariable=self.tool_vars[key], width=12).grid(row=row, column=1, padx=3, pady=1, sticky="ew")
+        ttk.Label(editor, text="TOOL_TYPE").grid(row=4, column=0, padx=3, pady=1, sticky="e")
+        self.tool_type_combo = ttk.Combobox(editor, textvariable=self.tool_vars["type"], values=self.tool_types, width=10)
+        self.tool_type_combo.grid(row=4, column=1, padx=3, pady=1, sticky="ew")
+        self.upsert_tool_button = ttk.Button(editor, text="新增/更新刀具信息", command=self.upsert_tool)
+        self.upsert_tool_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=1)
+        self.delete_tool_button = ttk.Button(editor, text="删除所选刀具", command=self.delete_tool)
+        self.delete_tool_button.grid(row=6, column=0, sticky="ew", pady=1)
+        self.clear_tool_editor_button = ttk.Button(editor, text="清除编辑内容", command=self.clear_tool_editor)
+        self.clear_tool_editor_button.grid(row=6, column=1, sticky="ew", pady=1)
+
+        for table in (
+            self.keep_table,
+            self.keep_issue_table,
+            self.apt_table,
+            self.delete_table,
+            self.info_table,
+            self.issue_table,
+            self.stats_table,
+            self.tool_table,
+        ):
+            self._bind_cell_tooltip(table)
+
+    @staticmethod
+    def _table(parent, columns, headings, widths, height=1):
+        table = ttk.Treeview(parent, columns=columns, show="headings", height=height)
+        for col, title, width in zip(columns, headings, widths):
+            table.heading(col, text=title)
+            # Keep declared widths stable so the horizontal scrollbar has a
+            # real overflow range instead of columns silently shrinking.
+            table.column(col, width=width, anchor="w")
+        ybar = ttk.Scrollbar(parent, orient="vertical", command=table.yview)
+        xbar = ttk.Scrollbar(parent, orient="horizontal", command=table.xview)
+        table.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        ybar.pack(side="right", fill="y")
+        xbar.pack(side="bottom", fill="x")
+        return table
+
+    def _keep_tables(self, parent):
+        """Build the keep table as two synchronized views.
+
+        Tk Treeview tags are row-scoped, so a second narrow Treeview is used
+        for the validation column. This allows only the validation cell to be
+        rendered red/bold while the program metadata remains normal.
+        """
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        main = ttk.Treeview(
+            frame,
+            columns=tuple(spec[0] for spec in self.keep_column_specs),
+            show="headings",
+            height=1,
+            selectmode="extended",
+        )
+        issue = ttk.Treeview(frame, columns=("issues",), show="headings", selectmode="none", height=1)
+        headings = tuple(zip((spec[0] for spec in self.keep_column_specs), KEEP_TABLE_HEADINGS))
+        for col, title in headings:
+            main.heading(col, text=title)
+        for column, _initial, minimum, stretch in self.keep_column_specs:
+            main.column(
+                column, width=minimum, minwidth=minimum, stretch=stretch, anchor="w"
+            )
+        issue.heading("issues", text="校验")
+        issue.column("issues", width=self.validation_column_width, minwidth=self.validation_column_width, stretch=False, anchor="w")
+        issue.tag_configure("validation-error", foreground="#c62828", font=(self.ui_font_family, 9, "bold"))
+        issue.tag_configure("validation-warning", foreground="#c62828", font=(self.ui_font_family, 9, "bold"))
+        ybar = ttk.Scrollbar(frame, orient="vertical")
+        xbar = ttk.Scrollbar(frame, orient="horizontal", command=main.xview)
+        def move_y(*args):
+            main.yview(*args)
+        ybar.configure(command=move_y)
+
+        def main_scroll(first, last):
+            ybar.set(first, last)
+            issue.yview_moveto(first)
+
+        def issue_scroll(first, last):
+            # The main tree is authoritative for the scrollbar thumb.
+            pass
+
+        main.configure(yscrollcommand=main_scroll, xscrollcommand=xbar.set)
+        issue.configure(yscrollcommand=issue_scroll)
+        main.grid(row=0, column=0, sticky="nsew")
+        issue.grid(row=0, column=1, sticky="ns")
+        ybar.grid(row=0, column=2, sticky="ns")
+        xbar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        main._keep_ybar = ybar
+        main._keep_xbar = xbar
+        self._bind_column_profile(
+            main,
+            self.keep_column_specs,
+            lambda: self._treeview_available_width(main),
+        )
+        self._preserve_manual_treeview_width(main)
+
+        def select_issue_row(event):
+            selected = issue.identify_row(event.y)
+            if selected:
+                main.selection_set(selected)
+                main.focus(selected)
+                main.see(selected)
+            self.show_selected()
+            return "break"
+
+        main.bind("<<TreeviewSelect>>", self.show_selected)
+        issue.bind("<Button-1>", select_issue_row)
+        self.keep_table_menu = tk.Menu(self.master, tearoff=0)
+        self.keep_table_menu.add_command(label="编辑程序代码", command=self.edit_program_code)
+        self.keep_table_menu.add_command(label="对比所选两条程序", command=self.compare_selected_programs)
+        main.bind("<Button-3>", self._open_keep_table_menu)
+        issue.bind("<Button-3>", self._open_keep_table_menu)
+        for tree in (main, issue):
+            tree.bind("<MouseWheel>", lambda event: (move_y("scroll", int(-event.delta / 120), "units"), "break")[1])
+            tree.bind("<Button-4>", lambda _event: (move_y("scroll", -1, "units"), "break")[1])
+            tree.bind("<Button-5>", lambda _event: (move_y("scroll", 1, "units"), "break")[1])
+        main._keep_frame = frame
+        issue._keep_frame = frame
+        return main, issue
+
+    def _bind_cell_tooltip(self, tree):
+        """Show a floating hint with the full cell content after a hover delay.
+
+        The hint only appears when the cell's text is cut off by the column
+        width, i.e. when the visible part is not the whole value.
+        """
+
+        def on_motion(event):
+            row = tree.identify_row(event.y)
+            column = tree.identify_column(event.x)
+            value = ""
+            if row and column != "#0":
+                value = tree.set(row, column) or ""
+            if not value or not self._cell_truncated(tree, row, column, value):
+                self._cancel_cell_tooltip()
+                return
+            key = (id(tree), row, column)
+            if key == self._cell_tip_key:
+                return
+            self._cancel_cell_tooltip()
+            self._cell_tip_key = key
+            self._cell_tip_text = value
+            self._cell_tip_after = self.master.after(
+                CELL_TOOLTIP_DELAY_MS,
+                lambda: self.cell_tooltip.show(self._cell_tip_text, event.x_root, event.y_root),
+            )
+
+        def on_leave(_event):
+            self._cancel_cell_tooltip()
+
+        tree.bind("<Motion>", on_motion, add="+")
+        tree.bind("<Leave>", on_leave, add="+")
+        for sequence in ("<ButtonPress-1>", "<ButtonPress-3>", "<MouseWheel>", "<Button-4>", "<Button-5>"):
+            tree.bind(sequence, lambda _event: self._cancel_cell_tooltip(), add="+")
+
+    def _cell_truncated(self, tree, row, column, value):
+        """True when the cell value is wider than the column's visible area."""
+        try:
+            bbox = tree.bbox(row, column)
+        except tk.TclError:
+            return False
+        if not bbox:
+            return False
+        return self._treeview_font.measure(value) > bbox[2] - 6
+
+    def _cancel_cell_tooltip(self):
+        self._cell_tip_key = None
+        if self._cell_tip_after is not None:
+            self.master.after_cancel(self._cell_tip_after)
+            self._cell_tip_after = None
+        if self.cell_tooltip is not None:
+            self.cell_tooltip.hide()
+
+    @staticmethod
+    def _text_with_scrollbars(parent):
+        text = tk.Text(parent, wrap="none", font=("Consolas", 9), undo=False, width=1, height=1)
+        ybar = ttk.Scrollbar(parent, orient="vertical", command=text.yview)
+        xbar = ttk.Scrollbar(parent, orient="horizontal", command=text.xview)
+        text.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        ybar.pack(side="right", fill="y")
+        xbar.pack(side="bottom", fill="x")
+        text.pack(side="left", fill="both", expand=True)
+        return text
+
+    def load_saved_fields(self):
+        values = load_preferences()
+        for key, value in values.items():
+            if key in self.info_vars:
+                self.info_vars[key].set(value)
+                self.info_defaults[key] = value
+        self.info_vars["date"].set(format_nc_date())
+
+    def save_fields(self):
+        save_preferences({"bianzhi": self.info_vars["bianzhi"].get().strip(), "shenhe": self.info_vars["shenhe"].get().strip()})
+        self.status.set("编制和审核/校对已保存到当前 Windows 用户设置。")
+
+    def load_special_tools(self):
+        source_path = self.special_tools_path
+        if not source_path.exists() and self.legacy_special_tools_path.exists():
+            source_path = self.legacy_special_tools_path
+        if not source_path.exists():
+            return
+        try:
+            data = json.loads(source_path.read_text(encoding="utf-8"))
+            for value in data.get("tool_types", []):
+                if value and value not in self.tool_types:
+                    self.tool_types.append(str(value))
+            for program, rows in data.get("program_tools", {}).items():
+                tools = []
+                for row in rows:
+                    try:
+                        tools.append(ToolInfo(int(row.get("number", 0)), str(row.get("dia", "")), str(row.get("tool_coner", "")), str(row.get("tool_type", "")), str(row.get("tool_angle", ""))))
+                    except (TypeError, ValueError):
+                        pass
+                if tools:
+                    self.program_tools[program] = sorted(tools, key=lambda x: x.number)
+            self.tool_type_combo.configure(values=self.tool_types)
+        except (OSError, ValueError, TypeError):
+            self.status.set("特殊刀具配置读取失败，将使用自动识别结果。")
+
+    def save_special_tools(self):
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "tool_types": self.tool_types,
+            "program_tools": {
+                program: [{"number": tool.number, "dia": tool.dia, "tool_coner": tool.tool_coner, "tool_type": tool.tool_type, "tool_angle": tool.tool_angle} for tool in tools]
+                for program, tools in self.program_tools.items()
+            },
+        }
+        temp = self.special_tools_path.with_suffix(".tmp")
+        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(self.special_tools_path)
+
+    def use_folder_as_drawing(self):
+        selected = self.folder_choice_var.get()
+        name = next((value for label, value in self.folder_choices if label == selected), "")
+        self.info_vars["drawing"].set(name)
+        self.info_defaults["drawing"] = name
+        self.status.set("已选取图号候选；点击“应用设置”后才会用于处理。")
+
+    def _set_drawing_choice(self, label):
+        self.folder_choice_var.set(label)
+
+    def apply_info(self):
+        v = self.info_vars
+        if not v["drawing"].get().strip() or not v["version"].get().strip():
+            messagebox.showerror("信息不完整", "图号和版次为必填项。未应用设置，也不会修改任何 MPF 文件。", parent=self.master)
+            return
+        self.applied_info = ProgramInfo(v["bianzhi"].get().strip(), v["shenhe"].get().strip(), v["drawing"].get().strip(), v["version"].get().strip(), "", "SIE840D", v["date"].get().strip())
+        self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
+        self.status.set("程序信息已应用，正在刷新预览……")
+        self.scan()
+
+    def add_tool_type(self):
+        value = self.new_type_var.get().strip()
+        if value and value not in self.tool_types:
+            self.tool_types.append(value)
+            self.tool_type_combo.configure(values=self.tool_types)
+            self.new_type_var.set("")
+            self.save_special_tools()
+
+    def config(self):
+        return Config(recursive=self.recursive.get(), save_aptsource=self.save_aptsource.get(), overwrite_fields=self.overwrite_fields.get(), auto_m03=self.auto_m03.get(), auto_tool_change=self.auto_tool_change.get(), defer_stats=False, g00_level=self.g00_level.get())
+
+    def info(self):
+        return ProgramInfo(self.applied_info.bianzhi, self.applied_info.shenhe, self.applied_info.drawing_number, self.applied_info.part_version, "", "SIE840D", self.applied_info.date)
+
+    def scan(self):
+        self.process_button.configure(state="disabled")
+        self.all_stats_button.configure(state="disabled")
+        if self.all_stats_window is not None and self.all_stats_window.winfo_exists():
+            self.all_stats_window.destroy()
+            self.all_stats_window = None
+        self.status.set("正在扫描 EXE 所在目录……")
+        config = self.config()
+        info = self.info()
+        def work():
+            result = build_plan(scan_directory(str(self.workdir), config), info, config, self.program_tools)
+            self.after(0, lambda: self.finish_scan(result))
+        threading.Thread(target=work, daemon=True).start()
+
+    def finish_scan(self, result):
+        unresolved = [f for f in result.files if f.kind == "mpf" and not f.program]
+        changed = False
+        for f in unresolved:
+            value = simpledialog.askstring("确认程序名", "无法确定程序名：" + f.source, parent=self.master)
+            if value and re.match(r"^[A-Za-z0-9_\u4e00-\u9fff-]+$", value.strip()):
+                f.program = value.strip()
+                f.issues = [i for i in f.issues if i.kind != "program-name"]
+                changed = True
+        if changed:
+            result = build_plan(result, self.info(), self.config(), self.program_tools)
+        self.scan_result = result
+        # A single existing PART VERSION/DRAWING NUMBER is a safe
+        # preselection for the next processing pass. Both remain editable and
+        # still require Apply before any MPF modification.
+        if not self.applied_info.part_version and not self.info_vars["version"].get().strip():
+            versions = sorted({
+                extract_header_fields(f.original_text or "").get("PART VERSION", "").strip()
+                for f in result.files if f.kind == "mpf"
+            } - {""})
+            if len(versions) == 1:
+                self.info_vars["version"].set(versions[0])
+                self.info_defaults["version"] = versions[0]
+        if not self.applied_info.drawing_number and not self.info_vars["drawing"].get().strip():
+            drawings = sorted({
+                extract_header_fields(f.original_text or "").get("DRAWING NUMBER", "").strip()
+                for f in result.files if f.kind == "mpf"
+            } - {""})
+            if len(drawings) == 1:
+                self.info_vars["drawing"].set(drawings[0])
+                self.info_defaults["drawing"] = drawings[0]
+        # APT headers can provide an authoritative drawing number.  Add those
+        # values to the same chooser as folder names, but leave the entry
+        # field untouched until the user clicks the read button.
+        self.folder_choices = merge_drawing_choices(folder_drawing_choices(self.workdir), result.drawing_candidates)
+        self.folder_choice_combo.configure(values=[item[0] for item in self.folder_choices])
+        if self.folder_choice_var.get() not in [item[0] for item in self.folder_choices]:
+            self._set_drawing_choice(self.folder_choices[3][0])
+        self.populate_file_tables()
+        mpfs = sum(f.kind == "mpf" for f in result.files)
+        self.status.set(f"扫描完成：{len(result.files)} 个文件，{mpfs} 个 MPF；从保留/归档表选择 MPF 查看解析信息。")
+        self.process_button.configure(state="normal" if result.files else "disabled")
+        self.all_stats_button.configure(state="normal" if mpfs else "disabled")
+
+    def populate_file_tables(self):
+        self._cancel_cell_tooltip()
+        for table in (self.keep_table, self.keep_issue_table, self.apt_table, self.delete_table):
+            for item in table.get_children():
+                table.delete(item)
+        for idx, f in enumerate(self.scan_result.files):
+            errors = sum(i.severity == "error" for i in f.issues)
+            warnings = sum(i.severity == "warning" for i in f.issues)
+            if f.kind == "mpf":
+                issue_text = f"{errors} 错 / {warnings} 警"
+                tag = "validation-error" if errors else ("validation-warning" if warnings else "")
+                self.keep_table.insert("", "end", iid=str(idx), values=(
+                    f.action,
+                    f.program or "待确认",
+                    _display_with_gap(f.source),
+                    _display_with_gap(Path(f.target).name if f.target else ""),
+                ))
+                self.keep_issue_table.insert("", "end", iid=str(idx), values=(issue_text,), tags=(tag,) if tag else ())
+            elif f.kind == "aptsource":
+                action = "保存并归档" if f.action == "move" else "不保存（删除）"
+                target = self.display_target(f.target) if f.target else "执行确认后删除"
+                self.apt_table.insert("", "end", iid=str(idx), values=(action, f.program or "未识别", f.source, target))
+            else:
+                reason = "按规则清理 LOG/MOAPTIndexes"
+                self.delete_table.insert("", "end", iid=str(idx), values=(f.kind, f.action, f.source, reason))
+
+    def display_target(self, target):
+        if not target:
+            return ""
+        try:
+            return str(Path(target).resolve().relative_to(self.workdir.resolve()))
+        except ValueError:
+            return str(target)
+
+    def selected_plan(self):
+        selection = self.keep_table.selection()
+        if not selection or not self.scan_result:
+            return None
+        return self.scan_result.files[int(selection[0])]
+
+    @staticmethod
+    def clear_table(table):
+        for item in table.get_children():
+            table.delete(item)
+
+    def show_selected(self, _event=None):
+        f = self.selected_plan()
+        if not f:
+            return
+        self.clear_table(self.info_table)
+        self.clear_table(self.issue_table)
+        self.clear_table(self.stats_table)
+        self.render_diff("", "")
+        self.info_table.insert("", "end", values=("源文件", f.source))
+        self.info_table.insert("", "end", values=("规范程序名", f.program or ""))
+        self.info_table.insert("", "end", values=("目标文件", f.target or ""))
+        existing_fields = extract_header_fields(f.original_text or "")
+        header_mapping = {
+            "bianzhi": "BIANZHI",
+            "shenhe": "SHENHE",
+            "drawing": "DRAWING NUMBER",
+            "version": "PART VERSION",
+            "date": "DATE",
+        }
+        for key, header_key in header_mapping.items():
+            existing_value = existing_fields.get(header_key, "").strip()
+            fallback = self.info_defaults.get(key, "").strip()
+            if key == "date" and not fallback:
+                fallback = format_nc_date()
+            self.info_vars[key].set(existing_value or fallback)
+        self.add_msg_rows(f.original_text, "已有/")
+        self.add_msg_rows(f.output_text, "处理后/")
+        if f.kind != "mpf":
+            self.current_program = None
+            self.refresh_tool_table([])
+            return
+        # The processed preview already contains the selected source's tool
+        # rows.  Reading it back keeps the table aligned with the newest APT
+        # result; special_tools.json is only visible when no APT tools exist.
+        tools = extract_tools(f.output_text or f.original_text or "") if f.program else []
+        self.current_program = f.program
+        self.refresh_tool_table(tools)
+        for issue in f.issues:
+            self.issue_table.insert("", "end", values=(issue.line, issue.kind, issue.severity, issue.text, issue.suggestion))
+        if f.stats is None and f.output_text is not None:
+            f.stats = calculate_stats(f.output_text)
+        if f.stats:
+            self._insert_stats_rows(f.program or "", f.stats)
+        if f.original_text is not None and f.output_text is not None:
+            self.render_diff(f.original_text, f.output_text)
+
+    @staticmethod
+    def _stat_value(value):
+        return "无数据" if value is None else (f"{value:.3f}" if isinstance(value, float) else str(value))
+
+    def _insert_stats_rows(self, program, stats):
+        for key in "FSXYZ":
+            self.stats_table.insert(
+                "", "end",
+                values=(program, key, stats.counts.get(key, 0), self._stat_value(stats.minimum.get(key)), self._stat_value(stats.maximum.get(key)), "发现" + str(stats.g00_count) + " 处" if stats.g00_count else "未发现"),
+            )
+
+    def show_all_program_stats(self):
+        """Open an independent all-program overview window."""
+        if not self.scan_result:
+            return
+        if self.all_stats_window is not None and self.all_stats_window.winfo_exists():
+            self.all_stats_window.deiconify()
+            self.all_stats_window.lift()
+            return
+        window = tk.Toplevel(self.master)
+        self.all_stats_window = window
+        window.title("全部程序参数统计")
+        window.geometry("1500x620")
+        window.minsize(1050, 420)
+        window.transient(self.master)
+        table = self._table(
+            window,
+            ("program", "f_count", "f_min", "f_max", "s_count", "s_min", "s_max", "x_count", "x_min", "x_max", "y_count", "y_min", "y_max", "z_count", "z_min", "z_max", "g00"),
+            ("程序", "F 次数", "F 最小", "F 最大", "S 次数", "S 最小", "S 最大", "X 次数", "X 最小", "X 最大", "Y 次数", "Y 最小", "Y 最大", "Z 次数", "Z 最小", "Z 最大", "G00 检查"),
+            (170, 60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80, 120),
+        )
+        table.pack(fill="both", expand=True, padx=8, pady=8)
+        self._bind_cell_tooltip(table)
+        rows = sorted((f for f in self.scan_result.files if f.kind == "mpf" and f.program), key=lambda item: item.program or "")
+        for f in rows:
+            if f.stats is None and f.output_text is not None:
+                f.stats = calculate_stats(f.output_text)
+            if f.stats:
+                s = f.stats
+                value = lambda key: self._stat_value(s.minimum.get(key))
+                maximum = lambda key: self._stat_value(s.maximum.get(key))
+                table.insert("", "end", values=(
+                    f.program or "", s.counts.get("F", 0), value("F"), maximum("F"),
+                    s.counts.get("S", 0), value("S"), maximum("S"),
+                    s.counts.get("X", 0), value("X"), maximum("X"),
+                    s.counts.get("Y", 0), value("Y"), maximum("Y"),
+                    s.counts.get("Z", 0), value("Z"), maximum("Z"),
+                    "发现 " + str(s.g00_count) + " 处" if s.g00_count else "未发现",
+                ))
+
+        def close_window():
+            if window.winfo_exists():
+                window.destroy()
+            self.all_stats_window = None
+
+        window.protocol("WM_DELETE_WINDOW", close_window)
+
+    def render_diff(self, before, after):
+        """Render changed lines with three surrounding context lines."""
+        widgets = (self.diff_before, self.diff_after)
+        for widget in widgets:
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+        rows, hidden = compact_diff_rows(before, after, context=3)
+
+        def put(widget, number, line, tag=""):
+            prefix = "     | " if number is None else f"{number:04d} | "
+            widget.insert("end", prefix + line + "\n", tag)
+
+        for before_no, before_line, before_tag, after_no, after_line, after_tag in rows:
+            put(self.diff_before, before_no, before_line, before_tag)
+            put(self.diff_after, after_no, after_line, after_tag)
+        if hidden:
+            summary = f"共 {hidden} 行未修改（已折叠）"
+            put(self.diff_before, None, summary, "collapsed")
+            put(self.diff_after, None, summary, "collapsed")
+        for widget in widgets:
+            widget.configure(state="disabled")
+
+    def add_msg_rows(self, text, prefix):
+        if not text:
+            return
+        for line in text.splitlines()[:80]:
+            match = re.match(r'\s*MSG\(\s*["\'](.*?)["\']\s*\)\s*;?', line, re.I)
+            if match:
+                key, separator, value = match.group(1).partition(":")
+                if separator:
+                    self.info_table.insert("", "end", values=(prefix + key, value))
+
+    def refresh_tool_table(self, tools):
+        self._cancel_cell_tooltip()
+        self.clear_table(self.tool_table)
+        for idx, tool in enumerate(sorted(tools, key=lambda x: x.number)):
+            self.tool_table.insert("", "end", iid=str(idx), values=(tool.number, tool.dia, tool.tool_coner, tool.tool_angle, tool.tool_type))
+        self.clear_tool_editor()
+
+    def load_tool_editor(self, _event=None):
+        selected = self.tool_table.selection()
+        if not selected:
+            return
+        values = self.tool_table.item(selected[0], "values")
+        for key, value in zip(("number", "dia", "coner", "angle", "type"), values):
+            self.tool_vars[key].set(value)
+
+    def clear_tool_editor(self):
+        for var in self.tool_vars.values():
+            var.set("")
+
+    def current_tool_list(self):
+        result = []
+        for item in self.tool_table.get_children():
+            values = self.tool_table.item(item, "values")
+            try:
+                result.append(ToolInfo(int(values[0]), values[1], values[2], values[4], values[3]))
+            except (ValueError, IndexError):
+                pass
+        return result
+
+    def upsert_tool(self):
+        if not self.current_program:
+            messagebox.showwarning("未选择 MPF", "请先从保留/归档文件表选择 MPF。", parent=self.master)
+            return
+        try:
+            number = int(self.tool_vars["number"].get())
+            if number <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("刀具号错误", "刀具号必须是正整数。", parent=self.master)
+            return
+        tools = self.current_tool_list()
+        replacement = ToolInfo(number, self.tool_vars["dia"].get().strip(), self.tool_vars["coner"].get().strip(), self.tool_vars["type"].get().strip(), self.tool_vars["angle"].get().strip())
+        tools = [tool for tool in tools if tool.number != number]
+        tools.append(replacement)
+        self.program_tools[self.current_program] = sorted(tools, key=lambda x: x.number)
+        self.save_special_tools()
+        self.rebuild_selected_preview()
+
+    def delete_tool(self):
+        if not self.current_program:
+            return
+        selected = self.tool_table.selection()
+        if not selected:
+            return
+        number = int(self.tool_table.item(selected[0], "values")[0])
+        tools = [tool for tool in self.current_tool_list() if tool.number != number]
+        self.program_tools[self.current_program] = tools
+        self.save_special_tools()
+        self.rebuild_selected_preview()
+
+    def rebuild_selected_preview(self):
+        f = self.selected_plan()
+        selection = self.keep_table.selection()
+        if not f or f.kind != "mpf" or not f.original_text or not f.program:
+            return
+        reprocess_file(f, self.info(), self.config(), tools=self.program_tools.get(f.program, []))
+        self.populate_file_tables()
+        if selection and self.keep_table.exists(selection[0]):
+            self.keep_table.selection_set(selection[0])
+            self.keep_table.focus(selection[0])
+        self.show_selected()
+
+    def _refresh_keep_menu_states(self):
+        """Enable the edit/compare entries based on the current selection."""
+        count = len(self.keep_table.selection())
+        self.keep_table_menu.entryconfig(0, state="normal" if count == 1 else "disabled")
+        self.keep_table_menu.entryconfig(1, state="normal" if count == 2 else "disabled")
+
+    def _open_keep_table_menu(self, event):
+        self._refresh_keep_menu_states()
+        try:
+            self.keep_table_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.keep_table_menu.grab_release()
+
+    def compare_selected_programs(self):
+        """Open a side-by-side diff of exactly two selected MPF programs."""
+        selection = self.keep_table.selection()
+        if len(selection) != 2 or not self.scan_result:
+            return
+        plans = []
+        for iid in selection:
+            try:
+                f = self.scan_result.files[int(iid)]
+            except (IndexError, TypeError, ValueError):
+                return
+            if f.kind != "mpf" or f.original_text is None or not f.program:
+                return
+            plans.append(f)
+        left, right = plans[0], plans[1]
+        if self.program_compare_window is not None and self.program_compare_window.winfo_exists():
+            self.program_compare_window.deiconify()
+            self.program_compare_window.lift()
+            return
+
+        def compare_label(f):
+            """文件名优先，程序名补充：a_P.MPF（P）。"""
+            file_name = Path(f.source).name or ""
+            if file_name and f.program:
+                return f"{file_name}（{f.program}）"
+            return file_name or f.program or ""
+
+        window = tk.Toplevel(self.master)
+        self.program_compare_window = window
+        window.title(f"程序差异对比：{compare_label(left)} vs {compare_label(right)}")
+        window.geometry("1100x650")
+        window.minsize(800, 480)
+        window.transient(self.master)
+        frame = ttk.Frame(window, padding=8)
+        frame.pack(fill="both", expand=True)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1, uniform="compare")
+        frame.columnconfigure(1, weight=1, uniform="compare")
+
+        def build_pane(column, title):
+            box = ttk.LabelFrame(frame, text=title)
+            box.grid(row=0, column=column, sticky="nsew", padx=(0, 2) if column == 0 else (2, 0))
+            box.rowconfigure(0, weight=1)
+            box.columnconfigure(0, weight=1)
+            body = ttk.Frame(box)
+            body.grid(row=0, column=0, sticky="nsew")
+            body.rowconfigure(0, weight=1)
+            body.columnconfigure(1, weight=1)
+            gutter = tk.Text(
+                body,
+                width=5,
+                padx=6,
+                takefocus=0,
+                borderwidth=0,
+                highlightthickness=0,
+                background="#f6f8fa",
+                foreground="#57606a",
+                font=("Consolas", 9),
+                state="disabled",
+                wrap="none",
+            )
+            gutter.grid(row=0, column=0, sticky="ns")
+            pane = tk.Text(body, wrap="none", font=("Consolas", 9), state="disabled")
+            pane.grid(row=0, column=1, sticky="nsew")
+            ybar = ttk.Scrollbar(body, orient="vertical", command=pane.yview)
+            ybar.grid(row=0, column=2, sticky="ns")
+            xbar = ttk.Scrollbar(box, orient="horizontal", command=pane.xview)
+            xbar.grid(row=1, column=0, sticky="ew")
+            # 每个区域独立滚动：内容与自身行号一起滚，左右两侧互不影响。
+            def pane_scroll(*args):
+                pane.yview(*args)
+                gutter.yview(*args)
+
+            def pane_sync(*args):
+                ybar.set(*args)
+                gutter.yview_moveto(args[0])
+
+            def on_wheel(event):
+                pane.yview_scroll(-int(event.delta / 120), "units")
+                return "break"
+
+            ybar.configure(command=pane_scroll)
+            pane.configure(yscrollcommand=pane_sync, xscrollcommand=xbar.set)
+            gutter.bind("<MouseWheel>", on_wheel)
+            # 不同部分红底、相同部分绿底。
+            pane.tag_configure("removed", background="#ffd6d6", foreground="#8b0000")
+            pane.tag_configure("added", background="#ffd6d6", foreground="#8b0000")
+            pane.tag_configure("changed", background="#ffd6d6", foreground="#8b0000")
+            pane.tag_configure("equal", background="#d9f2d9", foreground="#176b17")
+            return pane, gutter
+
+        left_text, left_gutter = build_pane(0, "程序A：" + compare_label(left))
+        right_text, right_gutter = build_pane(1, "程序B：" + compare_label(right))
+        self.program_compare_left = left_text
+        self.program_compare_right = right_text
+        self.program_compare_left_gutter = left_gutter
+        self.program_compare_right_gutter = right_gutter
+
+        left_numbers: List[str] = []
+        right_numbers: List[str] = []
+        left_num = right_num = 0
+        for left_row, left_tag, right_row, right_tag in align_lines(left.original_text, right.original_text):
+            left_tag = (left_tag or "equal") if left_row else ""
+            right_tag = (right_tag or "equal") if right_row else ""
+            left_text.configure(state="normal")
+            left_text.insert("end", left_row + "\n", left_tag)
+            left_text.configure(state="disabled")
+            right_text.configure(state="normal")
+            right_text.insert("end", right_row + "\n", right_tag)
+            right_text.configure(state="disabled")
+            if left_row:
+                left_num += 1
+                left_numbers.append(str(left_num))
+            else:
+                left_numbers.append("")
+            if right_row:
+                right_num += 1
+                right_numbers.append(str(right_num))
+            else:
+                right_numbers.append("")
+        for gutter, numbers in ((left_gutter, left_numbers), (right_gutter, right_numbers)):
+            gutter.configure(state="normal")
+            gutter.delete("1.0", "end")
+            gutter.insert("1.0", "\n".join(numbers))
+            gutter.configure(state="disabled")
+
+        def close():
+            window.destroy()
+            self.program_compare_window = None
+
+        window.protocol("WM_DELETE_WINDOW", close)
+
+    def edit_program_code(self, _event=None):
+        """Open an editable copy of the selected MPF; saving re-reviews it.
+
+        This is the manual escape hatch for files whose M03 could not be
+        auto-inserted: the operator fixes the NC code and saving runs the
+        whole preview pipeline again before anything is written to disk.
+        """
+        f = self.selected_plan()
+        if not f or f.kind != "mpf" or f.original_text is None or not f.program:
+            return
+        if self.program_editor_window is not None and self.program_editor_window.winfo_exists():
+            self.program_editor_window.deiconify()
+            self.program_editor_window.lift()
+            return
+        window = tk.Toplevel(self.master)
+        self.program_editor_window = window
+        window.title("编辑程序代码：" + f.program)
+        window.geometry("900x650")
+        window.minsize(700, 480)
+        window.transient(self.master)
+        container = ttk.Frame(window, padding=8)
+        container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+        editor = ttk.LabelFrame(container, text="NC 程序代码（保存后自动重新审查）")
+        editor.grid(row=0, column=0, sticky="nsew")
+        editor.rowconfigure(0, weight=1)
+        editor.columnconfigure(0, weight=1)
+        body = ttk.Frame(editor)
+        body.grid(row=0, column=0, sticky="nsew")
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        gutter = tk.Text(
+            body,
+            width=5,
+            padx=6,
+            takefocus=0,
+            borderwidth=0,
+            highlightthickness=0,
+            background="#f6f8fa",
+            foreground="#57606a",
+            font=("Consolas", 10),
+            state="disabled",
+            wrap="none",
+        )
+        gutter.grid(row=0, column=0, sticky="ns")
+        text = tk.Text(body, wrap="none", font=("Consolas", 10), undo=True)
+        text.grid(row=0, column=1, sticky="nsew")
+        ybar = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+        ybar.grid(row=0, column=2, sticky="ns")
+        xbar = ttk.Scrollbar(editor, orient="horizontal", command=text.xview)
+        xbar.grid(row=1, column=0, sticky="ew")
+        self.program_editor_gutter = gutter
+        self.program_editor_text = text
+
+        def update_line_numbers(_event=None):
+            gutter.configure(state="normal")
+            gutter.delete("1.0", "end")
+            count = int(text.index("end-1c").split(".")[0])
+            gutter.insert("1.0", "\n".join(str(n) for n in range(1, count + 1)))
+            gutter.configure(state="disabled")
+
+        def ysync(*args):
+            ybar.set(*args)
+            gutter.yview_moveto(args[0])
+
+        def on_wheel(event):
+            text.yview_scroll(-int(event.delta / 120), "units")
+            return "break"
+
+        text.configure(yscrollcommand=ysync, xscrollcommand=xbar.set)
+        text.bind("<<Modified>>", lambda _event: (update_line_numbers(), text.edit_modified(False))[1])
+        text.bind("<Configure>", update_line_numbers)
+        gutter.bind("<MouseWheel>", on_wheel)
+        text.insert("1.0", f.original_text)
+        update_line_numbers()
+        buttons = ttk.Frame(container)
+        buttons.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(buttons, text="修改保存后将重新生成预览并审查；正式写入仍需执行目录处理。").pack(side="left")
+
+        def save():
+            new_text = text.get("1.0", "end-1c")
+            window.destroy()
+            self.program_editor_window = None
+            if new_text == f.original_text:
+                return
+            f.original_text = new_text
+            reprocess_file(f, self.info(), self.config(), tools=self.program_tools.get(f.program, []))
+            row = next((str(i) for i, item in enumerate(self.scan_result.files) if item is f), None)
+            self.populate_file_tables()
+            if row is not None and self.keep_table.exists(row):
+                self.keep_table.selection_set(row)
+                self.keep_table.focus(row)
+            self.show_selected()
+            self.status.set(f"已保存 {f.program} 的代码编辑并重新审查。")
+
+        def close():
+            window.destroy()
+            self.program_editor_window = None
+
+        self.program_editor_save_command = save
+        ttk.Button(buttons, text="取消", command=close).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="保存并重新审查", command=save).pack(side="right")
+        window.protocol("WM_DELETE_WINDOW", close)
+        text.focus_set()
+
+    def process(self):
+        if not self.scan_result:
+            return
+        if not self.applied_info.drawing_number.strip() or not self.applied_info.part_version.strip():
+            messagebox.showerror("信息不完整", "图号和版次未通过“应用设置”提交，已放弃本次修改。", parent=self.master)
+            return
+        deletes = [f.source for f in self.scan_result.files if f.action == "delete"]
+        duplicates = [f for f in self.scan_result.files if f.action == "duplicate"]
+        mpfs = sum(f.kind == "mpf" and f.action != "duplicate" for f in self.scan_result.files)
+        apt_archives = sum(f.kind == "aptsource" and f.action == "move" for f in self.scan_result.files)
+        apt_deletes = sum(f.kind == "aptsource" and f.action == "delete" for f in self.scan_result.files)
+        intermediate_deletes = sum(f.kind != "aptsource" and f.action == "delete" for f in self.scan_result.files)
+        apt_summary = f"归档 {apt_archives} 个 APTSOURCE" if self.save_aptsource.get() else f"删除 {apt_deletes} 个 APTSOURCE"
+        summary = f"将处理 {mpfs} 个 MPF，{apt_summary}，处理 {len(duplicates)} 个重复文件，删除 {intermediate_deletes} 个中间文件。"
+        detail_lines = []
+        if duplicates:
+            detail_lines.append("【重复文件处理】")
+            for duplicate in duplicates:
+                detail_lines.extend((
+                    f"较旧文件：{duplicate.source}",
+                    f"采用最新文件：{duplicate.duplicate_winner}",
+                    f"目标文件：{Path(duplicate.duplicate_target).name}",
+                    "",
+                ))
+            detail_lines.append("最新文件成功写入后，较旧重复源文件将被清理。")
+        if deletes:
+            if detail_lines:
+                detail_lines.append("")
+            detail_lines.append("【待删除文件】")
+            detail_lines.extend(deletes)
+        if not self.confirm_processing(summary, detail_lines):
+            return
+        self.process_button.configure(state="disabled")
+        self.status.set("正在处理当前目录……")
+        def work():
+            report = process_plan(self.scan_result, str(self.workdir), self.config(), confirm_cleanup=True)
+            self.after(0, lambda: self.finish_process(report))
+        threading.Thread(target=work, daemon=True).start()
+
+    def confirm_processing(self, summary, detail_lines):
+        """Confirm processing without allowing long details to hide buttons."""
+        if not needs_detailed_confirmation(detail_lines):
+            detail = "\n\n" + "\n".join(detail_lines) if detail_lines else ""
+            return messagebox.askyesno("确认当前目录处理", summary + detail + "\n\n确定继续吗？", parent=self.master)
+
+        result = {"confirmed": False}
+        window = tk.Toplevel(self.master)
+        window.title("确认目录处理")
+        window.geometry("900x650")
+        window.minsize(700, 460)
+        window.transient(self.master)
+        window.grab_set()
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
+        ttk.Label(container, text=summary, font=("Microsoft YaHei UI", 10, "bold"), wraplength=840).grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        detail_frame = ttk.LabelFrame(container, text="处理明细")
+        detail_frame.grid(row=1, column=0, sticky="nsew")
+        text = self._text_with_scrollbars(detail_frame)
+        text.insert("1.0", "\n".join(detail_lines))
+        text.configure(state="disabled", font=("Microsoft YaHei UI", 9))
+        buttons = ttk.Frame(container)
+        buttons.grid(row=2, column=0, sticky="e", pady=(12, 0))
+
+        def close(confirmed=False):
+            result["confirmed"] = confirmed
+            window.destroy()
+
+        ttk.Button(buttons, text="取消", command=lambda: close(False)).pack(side="right", padx=(8, 0))
+        ttk.Button(buttons, text="确认执行", command=lambda: close(True)).pack(side="right")
+        window.protocol("WM_DELETE_WINDOW", lambda: close(False))
+        window.wait_window()
+        return result["confirmed"]
+
+    def finish_process(self, report):
+        self.report = report
+        self.status.set(f"处理完成：成功 {report.success}，失败 {report.failed}，移动 {report.moved}，删除 {report.deleted}。")
+        self.export_button.configure(state="normal")
+        messagebox.showinfo("处理完成", self.status.get() + "\n报告未自动生成；如有需要，请点击“导出报告”。", parent=self.master)
+        self.scan()
+
+    def export_report(self):
+        if not self.report:
+            return
+        try:
+            path = save_timestamped_report(self.report, self.data_dir, keep=3)
+        except OSError as exc:
+            messagebox.showerror("导出失败", f"无法将报告保存到：\n{self.data_dir}\n\n{exc}", parent=self.master)
+            return
+        messagebox.showinfo("导出完成", f"报告已自动保存到：\n{path}", parent=self.master)
+
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        style = ttk.Style()
+        style.theme_use("vista")
+        style.configure("Treeview", rowheight=24, font=("Microsoft YaHei UI", 9))
+        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
+        style.configure("TButton", padding=(8, 4))
+    except tk.TclError:
+        pass
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
