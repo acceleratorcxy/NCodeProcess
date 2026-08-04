@@ -156,8 +156,9 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 - **设计规格**：`docs/archive/superpowers/specs/`（同上，仅本地保留）
 - **发布说明**：`docs/NCodeProcess-发布说明.md`
 - **审查与待办**：`docs/NCodeProcess-审查与待办.md`
+- **测试指南**：`docs/NCodeProcess-测试指南.md`（测试架构、基线、隔离约定与添加测试的做法）
 - **流程文档**：`docs/NCodeProcess-更改测试打包提交流程.md`（仅本地维护，不入库，2026-08-05 起在 `.gitignore` 中）
-- **测试基线**：会话起始 132 项 → 当前 **170 项**，全量通过（conda python38）
+- **测试基线**：会话起始 132 项 → Batch 2 后 170 项 → 2026-08-05 合并精简后 **159 项**（覆盖不变），全量通过（conda python38）
 
 ### 2.6 隐私清洗（2026-08-05）
 

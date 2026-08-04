@@ -77,7 +77,7 @@
 
 ## 五、测试与验证
 
-- 测试基线：Batch 2 前 138 项 → 完成后 **170 项**，全量通过（conda python38 / Python 3.8.19）。
+- 测试基线：Batch 2 前 138 项 → 完成后 **170 项** → 2026-08-05 测试代码合并精简后 **159 项**（覆盖不变），全量通过（conda python38 / Python 3.8.19）。
 - 新增测试 32 项（Batch 2 29 + 布局 2 + 间距 1），全部遵循 TDD（先 RED 确认功能缺失，再实现转 GREEN）。
 - 默认值兼容：`required_fields`（全键）、`m03_position`（after-s）、4 个上下限（None）、`newline`（auto）等价现行为，存量测试零回归；`aux_checks` core 层默认空集、GUI 层默认启用（用户确认）。
 - 已知无害噪音：Tk teardown 偶发 `can't invoke "event" command` 提示；`test_cell_tooltip_hides_on_leave` 在全量负载下偶发失败、单独重跑即过（`when="tail"` 时序抖动）。
