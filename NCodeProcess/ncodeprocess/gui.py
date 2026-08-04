@@ -30,12 +30,10 @@ from .core import (
 )
 from .preferences import (
     KEY as PREFERENCES_KEY,
-    SETTING_DEFAULTS,
-    clear_settings,
-    load as load_preferences,
-    load_settings,
-    save as save_preferences,
-    save_settings,
+    REGISTRY_DEFAULTS,
+    clear_all,
+    load_all,
+    save_all,
 )
 
 
@@ -318,7 +316,7 @@ class App(ttk.Frame):
         super().__init__(master, padding=8)
         self.master.title("NCodeProcess " + __version__)
         self.settings_registry_key = settings_registry_key or PREFERENCES_KEY
-        self._loaded_settings = load_settings(self.settings_registry_key)
+        self._loaded_settings = load_all(self.settings_registry_key)
         self._configure_window_size()
         self.pack(fill="both", expand=True)
         self.workdir = application_directory()
@@ -942,7 +940,7 @@ class App(ttk.Frame):
         return text
 
     def load_saved_fields(self):
-        values = load_preferences()
+        values = load_all(self.settings_registry_key)
         for key, value in values.items():
             if key in self.info_vars:
                 self.info_vars[key].set(value)
@@ -950,7 +948,7 @@ class App(ttk.Frame):
         self.info_vars["date"].set(format_nc_date())
 
     def save_fields(self):
-        save_preferences({"bianzhi": self.info_vars["bianzhi"].get().strip(), "shenhe": self.info_vars["shenhe"].get().strip()})
+        save_all({"bianzhi": self.info_vars["bianzhi"].get().strip(), "shenhe": self.info_vars["shenhe"].get().strip()}, self.settings_registry_key)
         self.status.set("编制和审核/校对已保存到当前 Windows 用户设置。")
 
     def load_special_tools(self):
@@ -1089,7 +1087,7 @@ class App(ttk.Frame):
         self.scan()
 
     def _save_settings_values(self):
-        save_settings({
+        save_all({
             "encoding": self.encoding_var.get().strip(),
             "delete_extensions": self.delete_extensions_var.get().strip(),
             "allowed_name_pattern": self.allowed_name_pattern_var.get().strip(),
@@ -1102,7 +1100,7 @@ class App(ttk.Frame):
         }, self.settings_registry_key)
 
     def _apply_settings_defaults(self):
-        defaults = SETTING_DEFAULTS
+        defaults = REGISTRY_DEFAULTS
         self.encoding_var.set(defaults["encoding"])
         self.delete_extensions_var.set(defaults["delete_extensions"])
         self.allowed_name_pattern_var.set(defaults["allowed_name_pattern"])
@@ -1112,24 +1110,29 @@ class App(ttk.Frame):
         self.require_end_marker_var.set(defaults["require_end_marker"] == "1")
         self.require_m06_var.set(defaults["require_m06"] == "1")
         self.require_spindle_speed_var.set(defaults["require_spindle_speed"] == "1")
+        # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
+        self.info_vars["bianzhi"].set("")
+        self.info_vars["shenhe"].set("")
+        self.info_defaults["bianzhi"] = ""
+        self.info_defaults["shenhe"] = ""
 
     def _restore_default_settings(self):
-        """恢复全部默认值并立即写入注册表。"""
+        """恢复全部默认值并立即写入注册表（含编制/审核）。"""
         self._apply_settings_defaults()
-        self._save_settings_values()
+        save_all(dict(REGISTRY_DEFAULTS), self.settings_registry_key)
         self.settings_window.destroy()
         self.settings_window = None
         self.scan()
 
     def _clear_registry_settings(self):
-        """删除注册表中的程序设置值（编制/审核不受影响）并回到默认值。"""
+        """删除注册表中的全部值（含编制/审核）并回到默认值。"""
         if not messagebox.askyesno(
             "清除注册表",
-            "将删除 HKCU\\Software\\NCodeProcess 下的程序设置值（编制/审核不受影响），确定？",
+            "将删除 HKCU\\Software\\NCodeProcess 下的全部程序设置值（含编制/审核），确定？",
             parent=self.settings_window,
         ):
             return
-        clear_settings(self.settings_registry_key)
+        clear_all(self.settings_registry_key)
         self._apply_settings_defaults()
         self.settings_window.destroy()
         self.settings_window = None

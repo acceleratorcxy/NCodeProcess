@@ -13,7 +13,7 @@ from ncodeprocess.gui import (
     merge_drawing_choices,
     needs_detailed_confirmation,
 )
-from ncodeprocess.preferences import clear_settings, load_settings, save_settings
+from ncodeprocess.preferences import clear_all, load_all, save_all
 
 # 独立的注册表测试键，避免污染真实的 HKCU\Software\NCodeProcess。
 TEST_SETTINGS_KEY = r"Software\NCodeProcess_UnitTests_Gui"
@@ -959,9 +959,9 @@ class SettingsDialogTests(LayoutWidgetTests):
                 self.assertTrue(config.require_m06)
                 self.assertFalse(config.require_end_marker)
                 scan_mock.assert_called_once_with()
-            self.assertEqual(load_settings(TEST_SETTINGS_KEY)["encoding"], "gb18030")
+            self.assertEqual(load_all(TEST_SETTINGS_KEY)["encoding"], "gb18030")
         finally:
-            clear_settings(TEST_SETTINGS_KEY)
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_settings_dialog_cancel_discards(self):
@@ -1072,7 +1072,7 @@ class SettingsDialogTests(LayoutWidgetTests):
         root.withdraw()
         try:
             with patch.object(App, "scan", lambda _self: None):
-                save_settings({"encoding": "gb18030", "program_extensions": ".mpf,.nc", "require_m06": "1"}, TEST_SETTINGS_KEY)
+                save_all({"encoding": "gb18030", "program_extensions": ".mpf,.nc", "require_m06": "1"}, TEST_SETTINGS_KEY)
                 app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
             self.assertEqual(app.encoding_var.get(), "gb18030")
             self.assertEqual(app.program_extensions_var.get(), ".mpf,.nc")
@@ -1080,7 +1080,7 @@ class SettingsDialogTests(LayoutWidgetTests):
             # 未持久化的项使用默认值
             self.assertEqual(app.delete_extensions_var.get(), ".log, .moaptindexes")
         finally:
-            clear_settings(TEST_SETTINGS_KEY)
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_settings_dialog_saves_to_registry_on_confirm(self):
@@ -1092,57 +1092,63 @@ class SettingsDialogTests(LayoutWidgetTests):
                 app.encoding_var.set("gb18030")
                 app.program_extensions_var.set(".mpf,.nc")
                 app._confirm_settings()
-                saved = load_settings(TEST_SETTINGS_KEY)
+                saved = load_all(TEST_SETTINGS_KEY)
                 self.assertEqual(saved["encoding"], "gb18030")
                 self.assertEqual(saved["program_extensions"], ".mpf,.nc")
                 scan_mock.assert_called_once_with()
         finally:
-            clear_settings(TEST_SETTINGS_KEY)
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_restore_defaults_resets_and_persists(self):
         root, app = self._build_app(1286, 668)
         try:
             app.settings_registry_key = TEST_SETTINGS_KEY
-            save_settings({"encoding": "gb18030", "require_m06": "1"}, TEST_SETTINGS_KEY)
+            save_all({"encoding": "gb18030", "require_m06": "1", "bianzhi": "张工"}, TEST_SETTINGS_KEY)
             with patch.object(App, "scan") as scan_mock:
                 app.open_settings()
                 app._restore_default_settings()
             self.assertEqual(app.encoding_var.get(), "auto")
             self.assertFalse(app.require_m06_var.get())
-            self.assertEqual(load_settings(TEST_SETTINGS_KEY)["encoding"], "auto")
+            # 统一恢复默认：编制/审核也回到默认（空）
+            self.assertEqual(app.info_vars["bianzhi"].get(), "")
+            saved = load_all(TEST_SETTINGS_KEY)
+            self.assertEqual(saved["encoding"], "auto")
+            self.assertEqual(saved["bianzhi"], "")
             scan_mock.assert_called_once_with()
         finally:
-            clear_settings(TEST_SETTINGS_KEY)
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_clear_registry_confirmed_removes_values(self):
         root, app = self._build_app(1286, 668)
         try:
             app.settings_registry_key = TEST_SETTINGS_KEY
-            save_settings({"encoding": "gb18030"}, TEST_SETTINGS_KEY)
+            save_all({"encoding": "gb18030", "bianzhi": "张工"}, TEST_SETTINGS_KEY)
             with patch("ncodeprocess.gui.messagebox.askyesno", return_value=True), patch.object(App, "scan") as scan_mock:
                 app.open_settings()
                 app._clear_registry_settings()
-            self.assertEqual(load_settings(TEST_SETTINGS_KEY), {})
+            # 统一清除：程序设置与编制/审核一起删除
+            self.assertEqual(load_all(TEST_SETTINGS_KEY), {})
             self.assertEqual(app.encoding_var.get(), "auto")
+            self.assertEqual(app.info_vars["bianzhi"].get(), "")
             scan_mock.assert_called_once_with()
         finally:
-            clear_settings(TEST_SETTINGS_KEY)
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_clear_registry_cancelled_keeps_values(self):
         root, app = self._build_app(1286, 668)
         try:
             app.settings_registry_key = TEST_SETTINGS_KEY
-            save_settings({"encoding": "gb18030"}, TEST_SETTINGS_KEY)
+            save_all({"encoding": "gb18030"}, TEST_SETTINGS_KEY)
             with patch("ncodeprocess.gui.messagebox.askyesno", return_value=False):
                 app.open_settings()
                 app._clear_registry_settings()
-            self.assertEqual(load_settings(TEST_SETTINGS_KEY)["encoding"], "gb18030")
+            self.assertEqual(load_all(TEST_SETTINGS_KEY)["encoding"], "gb18030")
             self.assertIsNotNone(app.settings_window)
         finally:
-            clear_settings(TEST_SETTINGS_KEY)
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_config_injects_program_extensions(self):
