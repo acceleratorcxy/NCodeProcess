@@ -69,6 +69,10 @@ class Config:
     require_spindle_speed: bool = False
     allowed_name_pattern: str = r"^[A-Za-z0-9_一-鿿-]+$"
     encoding: str = "auto"
+    # 主程序文件的扩展名集合（小写，默认仅 .mpf），例如 {".mpf", ".nc", ".txt"}。
+    # 输出（重命名后）使用的扩展名单独配置，默认 .MPF，保持历史行为。
+    program_extensions: set = field(default_factory=lambda: {".mpf"})
+    program_output_extension: str = ".MPF"
 
 
 @dataclass
@@ -428,11 +432,11 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
             continue
         ext = path.suffix.lower()
         rel = str(path.relative_to(directory))
-        if ext == ".mpf":
+        if ext in config.program_extensions:
             try:
                 text, _, _ = _read_text_cached(path, config.encoding)
                 program = extract_program_name(path, text, config.allowed_name_pattern)
-                plan = FilePlan(rel, "mpf", program, str(directory / (program + ".MPF")) if program else None, "keep")
+                plan = FilePlan(rel, "mpf", program, str(directory / (program + config.program_output_extension)) if program else None, "keep")
                 plan.original_text = text
                 plan.modified_time = path.stat().st_mtime
                 drawing = extract_header_fields(text).get("DRAWING NUMBER", "").strip()
@@ -1105,7 +1109,7 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                     changes.append(m03_note)
                 f.output_text, f.changes = new, changes
                 f.stats, validation_issues = analyze_program(new, f.source, f.program, info, config)
-                f.target = str(directory / (f.program + ".MPF"))
+                f.target = str(directory / (f.program + config.program_output_extension))
                 f.issues.extend(header_issues)
                 f.issues.extend(validation_issues)
                 if Path(f.source).name != Path(f.target).name:

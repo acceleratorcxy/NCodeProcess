@@ -539,6 +539,36 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(mpf.program, "P")
         self.assertEqual(Path(mpf.target).name, "P.MPF")
 
+    def test_custom_program_extensions_recognized(self):
+        # 主程序扩展名可自定义：.NC/.txt 与 .MPF 一样被识别为主程序文件。
+        root = self.make_dir()
+        (root / "x_P.NC").write_text('MSG("PROGRAM:P")\nN1S100M03\nN2M30\n', encoding="utf-8")
+        (root / "x_Q.txt").write_text('MSG("PROGRAM:Q")\nN1S200M03\nN2M30\n', encoding="utf-8")
+        cfg = Config(g00_level="allow", program_extensions={".mpf", ".nc", ".txt"})
+        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        programs = sorted(f.program for f in plan.files if f.kind == "mpf")
+        self.assertEqual(programs, ["P", "Q"])
+        targets = sorted(Path(f.target).name for f in plan.files if f.kind == "mpf")
+        self.assertEqual(targets, ["P.MPF", "Q.MPF"])
+
+    def test_custom_program_extensions_default_only_mpf(self):
+        root = self.make_dir()
+        (root / "x_P.NC").write_text("N1S100M03\nN2M30\n", encoding="utf-8")
+        result = scan_directory(str(root), Config())
+        self.assertFalse(any(f.source.endswith(".NC") for f in result.files))
+
+    def test_custom_output_extension_applied(self):
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S100M03\nN2M30\n', encoding="utf-8")
+        cfg = Config(g00_level="allow", program_output_extension=".NC")
+        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        mpf = next(f for f in plan.files if f.kind == "mpf")
+        self.assertEqual(Path(mpf.target).name, "P.NC")
+        report = process_plan(plan, str(root), cfg)
+        self.assertEqual(report.success, 1)
+        self.assertTrue((root / "P.NC").exists())
+        self.assertFalse((root / "P.MPF").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
