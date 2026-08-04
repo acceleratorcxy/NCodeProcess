@@ -645,6 +645,40 @@ class CoreTests(unittest.TestCase):
                                   Config(g00_level="allow"))
         self.assertFalse(any(i.kind in ("feed-range", "spindle-range") for i in issues))
 
+    def test_newline_force_lf_converts_crlf_source(self):
+        # 强制 LF：CRLF 源文件处理后输出为 LF，不保留源 CRLF。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\r\nN1S1000M03\r\nN2M30\r\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow", newline="lf")
+        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        report = process_plan(plan, str(root), cfg)
+        self.assertEqual(report.success, 1)
+        data = (root / "P.MPF").read_bytes()
+        self.assertNotIn(b"\r\n", data)
+        self.assertIn(b"\n", data)
+
+    def test_newline_force_crlf_converts_lf_source(self):
+        # 强制 CRLF：LF 源文件处理后输出为 CRLF。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S1000M03\nN2M30\n', encoding="utf-8")
+        cfg = Config(g00_level="allow", newline="crlf")
+        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        report = process_plan(plan, str(root), cfg)
+        self.assertEqual(report.success, 1)
+        data = (root / "P.MPF").read_bytes()
+        self.assertIn(b"\r\n", data)
+        self.assertNotIn(b"\n", data.replace(b"\r\n", b""))
+
+    def test_newline_auto_preserves_source_style(self):
+        # 默认 auto：CRLF 源保持 CRLF（锁定现行为）。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\r\nN1S1000M03\r\nN2M30\r\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow")
+        plan = build_plan(scan_directory(str(root), cfg), ProgramInfo("A", "B", "D", "V", "M", "C", "DATE"), cfg)
+        report = process_plan(plan, str(root), cfg)
+        self.assertEqual(report.success, 1)
+        self.assertIn(b"\r\n", (root / "P.MPF").read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()

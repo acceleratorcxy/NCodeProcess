@@ -83,6 +83,8 @@ class Config:
     feed_max: Optional[float] = None
     spindle_min: Optional[float] = None
     spindle_max: Optional[float] = None
+    # 换行策略：auto（跟随源文件）/ crlf / lf。
+    newline: str = "auto"
 
 
 @dataclass
@@ -281,6 +283,15 @@ def read_text(path: Path, encoding: str = "auto") -> Tuple[str, str, str]:
     text, used = _decode(data, encoding)
     newline = "\r\n" if b"\r\n" in data else "\n"
     return text, used, newline
+
+
+def _effective_newline(text: str, config: Config) -> str:
+    """按换行策略返回输出使用的换行符：auto 跟随源文本，crlf/lf 强制指定。"""
+    if config.newline == "crlf":
+        return "\r\n"
+    if config.newline == "lf":
+        return "\n"
+    return "\r\n" if "\r\n" in text else "\n"
 
 
 def _read_text_cached(path: Path, encoding: str = "auto") -> Tuple[str, str, str]:
@@ -643,7 +654,7 @@ def _header_end(lines: Sequence[str]) -> int:
 
 
 def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, replace_tools: bool = False, filename: str = "") -> Tuple[str, List[str], List[Issue]]:
-    newline = "\r\n" if "\r\n" in text else "\n"
+    newline = _effective_newline(text, config)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     had_trailing = lines and lines[-1] == ""
     if had_trailing:
@@ -745,7 +756,7 @@ def add_initial_tool_change(text: str, tools: Sequence[ToolInfo], config: Config
     if not numbers:
         return text, False, ""
     number = min(numbers)
-    newline = "\r\n" if "\r\n" in text else "\n"
+    newline = _effective_newline(text, config)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     had_trailing = bool(lines and lines[-1] == "")
     if had_trailing:
@@ -776,7 +787,7 @@ def add_initial_tool_change(text: str, tools: Sequence[ToolInfo], config: Config
 def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
     if not config.auto_m03:
         return text, False, ""
-    newline = "\r\n" if "\r\n" in text else "\n"
+    newline = _effective_newline(text, config)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     start = _header_end(lines)
     m03_re = re.compile(r"(?<![A-Z])M0?3(?!\d)", re.I)

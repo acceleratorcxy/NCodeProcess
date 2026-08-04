@@ -610,6 +610,8 @@ class App(ttk.Frame):
         self.feed_max_var = tk.StringVar(value="")
         self.spindle_min_var = tk.StringVar(value="")
         self.spindle_max_var = tk.StringVar(value="")
+        # 换行策略（Batch 2，仅本次运行生效）：auto / crlf / lf。
+        self.newline_var = tk.StringVar(value="auto")
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
@@ -1041,6 +1043,7 @@ class App(ttk.Frame):
             "feed_max": self.feed_max_var.get(),
             "spindle_min": self.spindle_min_var.get(),
             "spindle_max": self.spindle_max_var.get(),
+            "newline": self.newline_var.get(),
         }
         win = tk.Toplevel(self.master)
         win.title("程序设置")
@@ -1107,6 +1110,11 @@ class App(ttk.Frame):
         ttk.Label(body, text="~").grid(row=14, column=2, sticky="w", pady=(6, 3))
         ttk.Entry(body, textvariable=self.spindle_max_var, width=8).grid(row=14, column=3, sticky="w", pady=(6, 3))
         ttk.Label(body, text="留空 = 不检查").grid(row=15, column=1, columnspan=3, sticky="w", pady=(0, 3))
+
+        newline_combo = ttk.Combobox(body, textvariable=self.newline_var, state="readonly", width=14,
+                                     values=("auto", "crlf", "lf"))
+        labeled(16, "换行策略", newline_combo)
+        ttk.Label(body, text="auto 跟随源文件；crlf/lf 强制").grid(row=16, column=2, sticky="w", padx=(6, 0))
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
@@ -1188,6 +1196,7 @@ class App(ttk.Frame):
         self.feed_max_var.set("")
         self.spindle_min_var.set("")
         self.spindle_max_var.set("")
+        self.newline_var.set("auto")
         # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
         self.info_vars["bianzhi"].set("")
         self.info_vars["shenhe"].set("")
@@ -1241,6 +1250,7 @@ class App(ttk.Frame):
         self.feed_max_var.set(snapshot.get("feed_max", self.feed_max_var.get()))
         self.spindle_min_var.set(snapshot.get("spindle_min", self.spindle_min_var.get()))
         self.spindle_max_var.set(snapshot.get("spindle_max", self.spindle_max_var.get()))
+        self.newline_var.set(snapshot.get("newline", self.newline_var.get()))
         self.settings_window.destroy()
         self.settings_window = None
 
@@ -1305,6 +1315,7 @@ class App(ttk.Frame):
             feed_max=feed_max,
             spindle_min=spindle_min,
             spindle_max=spindle_max,
+            newline=self.newline_var.get(),
         )
 
     def info(self):

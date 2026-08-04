@@ -1057,8 +1057,8 @@ class SettingsDialogTests(LayoutWidgetTests):
             win = app.settings_window
             win.update_idletasks()
             self.assertLessEqual(win.winfo_reqwidth(), 640)
-            # Batch 2 校验规则控件加入后对话框变高；Task F 将重构为 Notebook 两页并重新收紧高度。
-            self.assertLessEqual(win.winfo_reqheight(), 520)
+            # Batch 2 校验规则控件逐项加入导致对话框变高；Task F 将重构为 Notebook 两页并重新收紧高度。
+            self.assertLessEqual(win.winfo_reqheight(), 560)
 
             def collect_buttons(widget):
                 buttons = []
@@ -1244,6 +1244,15 @@ class SettingsDialogTests(LayoutWidgetTests):
                 app._confirm_settings()
                 err_mock.assert_called_once()
             self.assertIsNotNone(app.settings_window)  # 对话框未关闭
+        finally:
+            root.destroy()
+
+    def test_newline_var_roundtrip(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            self.assertEqual(app.newline_var.get(), "auto")
+            app.newline_var.set("lf")
+            self.assertEqual(app.config().newline, "lf")
         finally:
             root.destroy()
 
