@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import ncodeprocess.gui as gui
-from ncodeprocess.core import FilePlan, ProcessReport, ProgramInfo, ScanResult
+from ncodeprocess.core import FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ScanResult
 from ncodeprocess.gui import (
     App,
     compact_diff_rows,
@@ -1180,6 +1180,36 @@ class SettingsDialogTests(LayoutWidgetTests):
             self.assertEqual(config.program_extensions, {".mpf", ".nc"})
             self.assertEqual(config.program_output_extension, ".NC")
         finally:
+            root.destroy()
+
+    def test_required_fields_vars_exist_and_default_to_all(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            for name in ("required_bianzhi_var", "required_shenhe_var", "required_drawing_var", "required_part_var"):
+                self.assertTrue(getattr(app, name).get())
+            config = app.config()
+            self.assertEqual([key for key, _label, _required in FIELD_ORDER], config.required_fields)
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_toggles_required_field(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.settings_registry_key = TEST_SETTINGS_KEY
+            with patch.object(App, "scan") as scan_mock:
+                app.open_settings()
+                app.required_shenhe_var.set(False)
+                app._confirm_settings()
+                scan_mock.assert_called_once_with()
+            config = app.config()
+            self.assertNotIn("SHENHE", config.required_fields)
+            self.assertIn("BIANZHI", config.required_fields)
+            # 程序/机床/控制系统为固定必填，对话框不可取消
+            self.assertIn("PROGRAM", config.required_fields)
+            self.assertIn("NC MACHINE", config.required_fields)
+            self.assertIn("CONTROL SYSTEM", config.required_fields)
+        finally:
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
 

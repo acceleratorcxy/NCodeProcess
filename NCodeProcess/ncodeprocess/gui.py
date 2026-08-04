@@ -14,6 +14,7 @@ from typing import List, NamedTuple
 from . import __version__
 from .core import (
     Config,
+    FIELD_ORDER,
     ProgramInfo,
     ToolInfo,
     align_lines,
@@ -596,6 +597,12 @@ class App(ttk.Frame):
         self.require_end_marker_var = tk.BooleanVar(value=loaded.get("require_end_marker", "1") == "1")
         self.require_m06_var = tk.BooleanVar(value=loaded.get("require_m06", "0") == "1")
         self.require_spindle_speed_var = tk.BooleanVar(value=loaded.get("require_spindle_speed", "0") == "1")
+        # 必填 MSG 字段（Batch 2，仅本次运行生效）：默认全部必填；
+        # 程序/机床/控制系统固定必填，此处仅暴露 4 个可配置项。
+        self.required_bianzhi_var = tk.BooleanVar(value=True)
+        self.required_shenhe_var = tk.BooleanVar(value=True)
+        self.required_drawing_var = tk.BooleanVar(value=True)
+        self.required_part_var = tk.BooleanVar(value=True)
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
@@ -1018,6 +1025,10 @@ class App(ttk.Frame):
             "require_end_marker": self.require_end_marker_var.get(),
             "require_m06": self.require_m06_var.get(),
             "require_spindle_speed": self.require_spindle_speed_var.get(),
+            "required_bianzhi": self.required_bianzhi_var.get(),
+            "required_shenhe": self.required_shenhe_var.get(),
+            "required_drawing": self.required_drawing_var.get(),
+            "required_part": self.required_part_var.get(),
         }
         win = tk.Toplevel(self.master)
         win.title("程序设置")
@@ -1058,6 +1069,17 @@ class App(ttk.Frame):
         ttk.Checkbutton(body, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Checkbutton(body, text="要求刀具调用包含 M06", variable=self.require_m06_var).grid(row=8, column=0, columnspan=3, sticky="w")
         ttk.Checkbutton(body, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).grid(row=9, column=0, columnspan=3, sticky="w")
+
+        ttk.Label(body, text="必填 MSG 字段").grid(row=10, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        required_columns = (
+            ("编制", self.required_bianzhi_var),
+            ("审核", self.required_shenhe_var),
+            ("图号", self.required_drawing_var),
+            ("版次", self.required_part_var),
+        )
+        for col, (text, var) in enumerate(required_columns):
+            ttk.Checkbutton(body, text=text, variable=var).grid(row=10, column=1 + col, sticky="w", pady=(6, 3))
+        ttk.Label(body, text="程序/机床/控制系统固定必填").grid(row=11, column=1, columnspan=3, sticky="w", pady=(0, 3))
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
@@ -1116,6 +1138,11 @@ class App(ttk.Frame):
         self.require_end_marker_var.set(defaults["require_end_marker"] == "1")
         self.require_m06_var.set(defaults["require_m06"] == "1")
         self.require_spindle_speed_var.set(defaults["require_spindle_speed"] == "1")
+        # 必填 MSG 字段恢复默认：全部必填（Batch 2 仅本次运行生效）
+        self.required_bianzhi_var.set(True)
+        self.required_shenhe_var.set(True)
+        self.required_drawing_var.set(True)
+        self.required_part_var.set(True)
         # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
         self.info_vars["bianzhi"].set("")
         self.info_vars["shenhe"].set("")
@@ -1160,6 +1187,10 @@ class App(ttk.Frame):
         self.require_end_marker_var.set(snapshot.get("require_end_marker", self.require_end_marker_var.get()))
         self.require_m06_var.set(snapshot.get("require_m06", self.require_m06_var.get()))
         self.require_spindle_speed_var.set(snapshot.get("require_spindle_speed", self.require_spindle_speed_var.get()))
+        self.required_bianzhi_var.set(snapshot.get("required_bianzhi", self.required_bianzhi_var.get()))
+        self.required_shenhe_var.set(snapshot.get("required_shenhe", self.required_shenhe_var.get()))
+        self.required_drawing_var.set(snapshot.get("required_drawing", self.required_drawing_var.get()))
+        self.required_part_var.set(snapshot.get("required_part", self.required_part_var.get()))
         self.settings_window.destroy()
         self.settings_window = None
 
@@ -1190,6 +1221,12 @@ class App(ttk.Frame):
             delete_extensions = {".log", ".moaptindexes"}
             program_extensions = {".mpf"}
             program_output_extension = ".MPF"
+        required_flags = {
+            "BIANZHI": self.required_bianzhi_var.get(),
+            "SHENHE": self.required_shenhe_var.get(),
+            "DRAWING NUMBER": self.required_drawing_var.get(),
+            "PART VERSION": self.required_part_var.get(),
+        }
         return Config(
             recursive=self.recursive.get(),
             save_aptsource=self.save_aptsource.get(),
@@ -1207,6 +1244,7 @@ class App(ttk.Frame):
             require_spindle_speed=self.require_spindle_speed_var.get(),
             program_extensions=program_extensions,
             program_output_extension=program_output_extension,
+            required_fields=[key for key, _label, _required in FIELD_ORDER if required_flags.get(key, True)],
         )
 
     def info(self):

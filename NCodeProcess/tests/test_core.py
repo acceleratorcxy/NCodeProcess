@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from ncodeprocess.core import Config, FilePlan, ProcessReport, ProgramInfo, ToolInfo, add_m03, align_lines, apply_header, build_plan, calculate_stats, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ToolInfo, add_m03, align_lines, apply_header, build_plan, calculate_stats, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
 
 
 class CoreTests(unittest.TestCase):
@@ -568,6 +568,28 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(report.success, 1)
         self.assertTrue((root / "P.NC").exists())
         self.assertFalse((root / "P.MPF").exists())
+
+    def test_required_fields_can_omit_shhenhe(self):
+        # SHENHE 从必填列表移除后，缺失的 SHENHE 头部不再报 required-field；
+        # 默认配置（全部必填）下缺失仍报错，锁定现行为。
+        text = 'MSG("PROGRAM:P")\nN1S100M03\nN2M30\n'
+        info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+        omit_shenhe = [key for key, _label, _required in FIELD_ORDER if key != "SHENHE"]
+        issues = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow", required_fields=omit_shenhe))
+        self.assertFalse(any(i.kind == "required-field" and "SHENHE" in i.suggestion for i in issues))
+        default_issues = validate_program(text, "P.MPF", "P", info, Config(g00_level="allow"))
+        self.assertTrue(any(i.kind == "required-field" and "SHENHE" in i.suggestion for i in default_issues))
+
+    def test_required_fields_drive_header_insertion(self):
+        # 字段移出必填列表且值为空时，apply_header 不插入空 MSG 行；
+        # 默认配置下仍插入空 SHENHE 行，锁定现行为。
+        text = 'MSG("PROGRAM:P")\nN1S100M03\nN2M30\n'
+        info = ProgramInfo("A", "", "D", "V", "M", "C", "DATE")
+        omit_shenhe = [key for key, _label, _required in FIELD_ORDER if key != "SHENHE"]
+        out, _changes, _issues = apply_header(text, "P", info, Config(g00_level="allow", required_fields=omit_shenhe))
+        self.assertNotIn('MSG("SHENHE:', out)
+        out_default, _changes, _issues = apply_header(text, "P", info, Config(g00_level="allow"))
+        self.assertIn('MSG("SHENHE:")', out_default)
 
 
 if __name__ == "__main__":

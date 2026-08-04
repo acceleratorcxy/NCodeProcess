@@ -73,6 +73,9 @@ class Config:
     # 输出（重命名后）使用的扩展名单独配置，默认 .MPF，保持历史行为。
     program_extensions: set = field(default_factory=lambda: {".mpf"})
     program_output_extension: str = ".MPF"
+    # 必填的 MSG 头部字段键（默认全部 FIELD_ORDER 键）；PROGRAM/NC MACHINE/
+    # CONTROL SYSTEM 在 GUI 中固定必填，其余可按车间要求收紧或放宽。
+    required_fields: List[str] = field(default_factory=lambda: [key for key, _label, _required in FIELD_ORDER])
 
 
 @dataclass
@@ -681,10 +684,10 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
                     header[idx] = _msg_line(key, new_value, line.rstrip().endswith(";"))
                     changes.append(f"补全/更新 {upper}")
     field_insert: List[str] = []
-    for key, _, required in FIELD_ORDER:
+    for key, _label, _required in FIELD_ORDER:
         if key not in seen:
             value = fields[key]
-            if value or required:
+            if value or key in config.required_fields:
                 field_insert.append(_msg_line(key, value, semicolon))
                 changes.append(f"插入 {key}")
     tool_insert: List[str] = []
@@ -858,8 +861,8 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         if parsed:
             key, value = parsed
             header_keys.setdefault(key.upper(), (i + 1, value))
-    for key, _, required in FIELD_ORDER:
-        if required and (key not in header_keys or not header_keys[key][1].strip()):
+    for key, _label, _required in FIELD_ORDER:
+        if key in config.required_fields and (key not in header_keys or not header_keys[key][1].strip()):
             issues.append(Issue(filename, header_keys.get(key, (start + 1, ""))[0], "", "required-field", "error", f"填写 MSG {key}"))
     if header_keys.get("PROGRAM", (0, ""))[1].strip() not in ("", program):
         ln, raw = header_keys["PROGRAM"]
