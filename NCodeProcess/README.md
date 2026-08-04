@@ -20,6 +20,7 @@
 - [审查与待办](docs/NCodeProcess-审查与待办.md)
 - [程序理解与操作记录](docs/NCodeProcess-程序理解与操作记录.md)
 - [测试指南](docs/NCodeProcess-测试指南.md)
+- [发布安全说明](docs/NCodeProcess-发布安全说明.md)
 
 ## 界面与显示支持
 

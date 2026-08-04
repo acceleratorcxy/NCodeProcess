@@ -12,6 +12,7 @@
 - [审查与待办](docs/NCodeProcessReportViewer-审查与待办.md)
 - [程序理解与操作记录](docs/NCodeProcessReportViewer-程序理解与操作记录.md)
 - [测试指南](docs/NCodeProcessReportViewer-测试指南.md)
+- [发布安全说明](docs/NCodeProcessReportViewer-发布安全说明.md)
 
 ## 使用方法
 

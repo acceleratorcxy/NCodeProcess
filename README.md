@@ -43,4 +43,4 @@ powershell -ExecutionPolicy Bypass -File .\build_portable.ps1
 
 ## 文档
 
-两项目均在各自 `docs/` 下维护文档（需求、用户手册、发布说明、审查与待办、操作记录、测试指南），入口见各项目 README「项目文档」章节。
+两项目均在各自 `docs/` 下维护文档（需求、用户手册、发布说明、审查与待办、操作记录、测试指南、发布安全说明），入口见各项目 README「项目文档」章节。

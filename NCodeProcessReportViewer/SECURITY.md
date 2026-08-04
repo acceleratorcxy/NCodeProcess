@@ -1,22 +1,39 @@
 # NCodeProcessReportViewer 发布安全说明
 
-## 已启用的加固措施
+> **维护说明**：本文件纳入版本管理，是发布产物的安全加固说明。构建脚本 `build_portable.ps1`、PyInstaller 配置 `NCodeProcessReportViewer.spec` 或运行时加固钩子 `security_runtime_hook.py` 发生变更后，应同步核对并更新本文件对应章节（纳入「所有更改必须完善可能受影响的文档」约定）。
 
-- 使用 PyInstaller 单文件模式发布，不分发 Python 源码或普通 `.pyc` 文件。
-- 每次构建使用新的随机密钥，通过 PyInstaller 5.13.2 和 `tinyaes` 对 PYZ 字节码进行 AES-CTR 加密。
-- 使用 Python `-OO` 优化模式，并从发布包排除测试、调试器和开发工具模块。
-- 禁止窗口模式完整回溯；冻结程序会检测调试器、禁用 trace/profile 接口并持续检查后续附加。
-- 临时密钥和构建中间目录在构建完成后自动清理。
-- 发布包包含 `SHA256SUMS.txt`，并支持使用受信任代码签名证书进行 Authenticode SHA-256 签名。
+## 一、加固目标
 
-## 构建与签名
+发布物使用 PyInstaller 单文件模式分发，不提供 Python 源码或可单独运行的字节码文件；构建期对字节码加密、运行时反调试、发布物完整性校验等措施用于提高自动反编译、常规拆包和调试分析的**成本**。任何本地软件都无法绝对阻止逆向与内存分析，本文不承诺绝对防逆向（见第五章「安全边界」）。
+
+## 二、已启用的加固措施
+
+| # | 措施 | 实现位置 | 说明 |
+|---|---|---|---|
+| 1 | 单文件发布，不分发 Python 源码或普通 `.pyc` | `NCodeProcessReportViewer.spec`（EXE 单文件模式） | 源码打包为单一 EXE；便携包仅含 EXE 与说明/校验文件 |
+| 2 | 随机密钥 AES-CTR 加密 PYZ 字节码 | `build_portable.ps1` + `NCodeProcessReportViewer.spec` | 每次构建用 `RandomNumberGenerator` 生成 16 字节随机密钥（取前 16 个十六进制字符），经 PyInstaller 5.13.2 `PyiBlockCipher`（tinyaes 1.1.2）对 PYZ 字节码 AES-CTR 加密；每次构建密钥不同 |
+| 3 | 密钥仅存在于构建进程 | `build_portable.ps1` | 密钥写入构建进程环境变量 `NCODEPROCESS_PYI_KEY`，不落盘、不入库、不随发布包分发；构建结束即清除 |
+| 4 | `-OO` 优化构建 | `build_portable.ps1`（PyInstaller 参数含 `-OO`） | 移除断言与文档字符串等非运行期信息 |
+| 5 | 窗口模式禁止完整回溯 | `NCodeProcessReportViewer.spec`（`console=False` + `disable_windowed_traceback=True`） | 冻结程序出错时不显示完整 Python 回溯 |
+| 6 | 运行时反调试 | `security_runtime_hook.py`（作为 runtime_hook 注入） | 仅冻结构建生效，源码运行与测试不受影响：启动时清理 `PYTHONPATH`/`PYTHONHOME`/`PYTHONINSPECT`/`PYTHONBREAKPOINT` 等辅助变量；检测 `IsDebuggerPresent`/`CheckRemoteDebuggerPresent`，发现调试器即提示并退出（退出码 `0x5A`）；禁用 `sys.settrace`/`sys.setprofile`（含线程级）；后台 watchdog 每 3 秒轮询，检测运行期附加的调试器 |
+| 7 | 调试/测试模块裁剪 | `NCodeProcessReportViewer.spec`（excludes） | 排除 `pdb`、`doctest`、`unittest`、`test`、`idlelib`、`lib2to3` 等调试与开发模块 |
+| 8 | 未使用模块裁剪 | `NCodeProcessReportViewer.spec`（excludes） | 排除 `ssl`、`socket`、`xml`、`multiprocessing`、`decimal`、`bz2`/`lzma` 等查看器不使用的模块以减小体积；不影响报告解析、统计与可视化展示 |
+| 9 | UPX 压缩 | `NCodeProcessReportViewer.spec`（`upx=True`） | 对可执行文件进一步压缩，减小发布体积 |
+| 10 | 构建环境加固 | `build_portable.ps1` | 构建期设置 `PYTHONDONTWRITEBYTECODE=1`、`PYTHONHASHSEED=random`，`PYTHONUSERBASE` 指向项目内 `.pyuser`，避免污染用户目录 |
+| 11 | 临时构建痕迹清理 | `build_portable.ps1`（finally） | 构建结束删除 `.hardened-build` 工作目录并清除全部注入的环境变量 |
+| 12 | SHA-256 完整性记录 | `build_portable.ps1` | 便携包生成 `SHA256SUMS.txt`，记录 EXE 的 SHA-256 哈希，用于核对复制或传输过程中文件是否发生变化 |
+| 13 | Authenticode SHA-256 签名（可选） | `build_portable.ps1`（`Set-AuthenticodeSignature`） | 从当前用户证书库按证书指纹签名（SHA-256），可配时间戳服务器；签名失败即终止构建；已签名时额外生成 `AUTHENTICODE.txt` 签名状态记录 |
+
+## 三、构建与签名
+
+安装构建依赖并执行打包（在项目目录中）：
 
 ```powershell
 conda run -n <Python 3.8 环境名> python -m pip install -r requirements-build.txt
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1 -CondaEnvironment <Python 3.8 环境名>
 ```
 
-如已有代码签名证书：
+如已有代码签名证书，可使用当前用户证书库中的证书指纹签名：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1 `
@@ -25,13 +42,29 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1 `
   -TimestampServer "http://timestamp.digicert.com"
 ```
 
-可使用以下命令核对发布文件：
+发布产物位于 `dist`：
+
+- `NCodeProcessReportViewer.exe`：单文件可执行程序。
+- `NCodeProcessReportViewer-Package\`：便携目录，含 EXE、`README.md`、`SECURITY.md`、`SHA256SUMS.txt`；签名时另含 `AUTHENTICODE.txt`。
+- `NCodeProcessReportViewer-Windows7-Portable.zip`：便携目录的 ZIP 压缩包。
+
+未提供证书时仍会完成加密与反调试构建，但 EXE 的 Windows 发布者将显示为「未知」。不要把 PFX 密码、构建密钥或证书私钥写入源码、脚本或发布包。
+
+## 四、完整性验证
 
 ```powershell
 Get-FileHash .\NCodeProcessReportViewer.exe -Algorithm SHA256
 Get-AuthenticodeSignature .\NCodeProcessReportViewer.exe
 ```
 
-## 安全边界
+第一条命令的结果应与 `SHA256SUMS.txt` 一致；已签名版本的第二条命令状态应为 `Valid`。
 
-本地 Python/原生程序都无法绝对阻止逆向和内存分析。以上措施用于提高自动反编译、普通拆包和调试分析的成本。正式对外分发时仍建议使用受信任的代码签名证书、限制分发范围并保留版本和哈希记录。
+## 五、安全边界
+
+任何在用户计算机上运行的本地软件都无法绝对阻止逆向、内存转储或二进制补丁。本项目的措施用于显著增加自动反编译和常规拆包的成本，属于威慑性防护而非加密保证。涉及商业机密或授权控制时，仍应配合正式代码签名、最小范围分发、访问控制和版本追踪；不要把客户端中的静态密钥视为不可提取的长期秘密。
+
+## 六、维护约定
+
+1. 构建脚本、PyInstaller 配置或运行时加固钩子变更后，必须同步核对并更新本文件。
+2. 本文件随便携包对外分发：命令中的环境名、路径一律使用占位符，不得写入本机环境信息、密钥、证书信息或测试数据。
+3. 发布前核对本文件描述的加固措施与当前构建代码一致（见「所有更改必须完善可能受影响的文档」约定）。

@@ -75,6 +75,12 @@ NCodeProcessReportViewer/
 
 > 按项目全局约定（见 NCodeProcess 操作记录 2.8）：所有更改必须完善可能受影响的文档；本查看器改动时同步更新本文件与发布说明、需求文档、审查与待办、测试指南。
 
+### 2.4 发布安全说明整理（2026-08-05）
+
+- **处理**：依据构建代码（`build_portable.ps1`、`NCodeProcessReportViewer.spec`、`security_runtime_hook.py`）核对后，将根目录 `SECURITY.md` 整理为统一规范结构（六章：加固目标 / 已启用加固措施 13 项表 / 构建与签名 / 完整性验证 / 安全边界 / 维护约定），并新增 docs 文档 `docs/NCodeProcessReportViewer-发布安全说明.md`（文档信息表 + 六章），两者内容同步维护。
+- **同步更新**：README「项目文档」列表加入「发布安全说明」。
+- **约定**：纳入文档同步强制约定；构建脚本/spec/运行时钩子变化时，`SECURITY.md` 与 docs 版一并核对更新。
+
 ---
 
 ## 三、后续建议（可选）

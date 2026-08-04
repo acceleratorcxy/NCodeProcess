@@ -184,6 +184,28 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 - **README 对外规范**：README 面向外部用户，只写功能说明；不得包含本机环境名（如 conda 环境名）、绝对路径、测试数据（测试基线数字）、内部设计决策（入库/构建约定等）；打包/发布前按本地流程文档步骤 3/4 检查。
 - **落点**：详见本地流程文档注意事项 14「所有更改必须完善可能受影响的文档」；提交前审查（流程文档步骤 6）同步检查受影响文档是否已更新。
 
+### 2.9 发布安全说明整理（2026-08-05）
+
+- **背景**：两份 `SECURITY.md` 原本为简要清单，与构建代码（`build_portable.ps1`、各项目 `.spec`、`security_runtime_hook.py`）未逐项对应，查看器版较主项目版简略。
+- **处理**：依据当前构建代码逐项核对后，将主项目与查看器的 `SECURITY.md` 整理为统一规范结构（六章）：
+  1. 加固目标（对外定位：提高反编译/拆包/调试分析成本，不承诺绝对防逆向）；
+  2. 已启用的加固措施（13 项表格：单文件发布、随机密钥 AES-CTR 加密 PYZ、密钥仅存构建进程、`-OO` 优化、窗口模式禁完整回溯、运行时反调试钩子、调试/测试模块裁剪、未使用模块裁剪、UPX、构建环境加固、临时痕迹清理、SHA256SUMS、Authenticode 签名，每项标注实现位置）；
+  3. 构建与签名（命令、发布产物清单、证书注意事项）；
+  4. 完整性验证；
+  5. 安全边界；
+  6. 维护约定（纳入文档同步强制约定；对外文档规范：环境名/路径用占位符、不写本机信息）。
+- **核对要点**：AES-CTR（`PyiBlockCipher`/tinyaes 1.1.2、PyInstaller 5.13.2）、16 字符密钥（`RandomNumberGenerator` 16 字节 hex 前 16 位）、反调试（`IsDebuggerPresent`/`CheckRemoteDebuggerPresent`、`settrace`/`setprofile` 禁用、3 秒 watchdog、退出码 `0x5A`、仅 frozen 生效）、回溯抑制（`console=False` + `disable_windowed_traceback=True`）、excludes 清单、`finally` 清理 `.hardened-build` 与环境变量、便携包内容。
+- **约定**：`SECURITY.md` 已纳入「所有更改必须完善可能受影响的文档」范围；构建脚本/spec/运行时钩子变更后须同步核对本文。
+
+### 2.10 发布安全说明文档化（2026-08-05）
+
+- **处理**：按 docs 文档体系格式（维护说明块 + 文档信息表 + 章节结构），将两份 `SECURITY.md` 内容整理为 `docs/` 下的正式文档：
+  - `NCodeProcess/docs/NCodeProcess-发布安全说明.md`
+  - `NCodeProcessReportViewer/docs/NCodeProcessReportViewer-发布安全说明.md`
+- **内容**：文档信息表（名称/版本/日期/状态/适用范围/关联文件）+ 六章（加固目标、已启用加固措施 13 项表、构建与签名、完整性验证、安全边界、维护约定），与根目录 `SECURITY.md` 保持同步。
+- **同步更新**：两个项目 README 的「项目文档」列表、仓库根总 README 的文档说明均加入「发布安全说明」。
+- **约定**：docs 版为开发侧文档，根目录 `SECURITY.md` 随发布包分发，两者内容同步维护；构建脚本/spec/运行时钩子变化时两处一并核对。
+
 ---
 
 ## 三、后续建议（可选）
