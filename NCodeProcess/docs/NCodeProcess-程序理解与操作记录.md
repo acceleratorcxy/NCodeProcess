@@ -70,7 +70,7 @@ scan_directory(目录, Config) → build_plan(scan, ProgramInfo, Config)
 - **线程安全**：GUI 界面刷新通过 `self.after()` 回到主线程；启动延后回调在窗口销毁时安全取消。
 - **GUI 测试隔离**：`test_gui._build_app` 固定使用 `TEST_SETTINGS_KEY` 创建 App，避免本机真实注册表残留设置污染默认值断言。
 - **打包**：`build_portable.ps1` 每次生成临时 16 位 AES 键注入 PyInstaller 加密 PYZ；产出 `dist\NCodeProcess.exe`、`NCodeProcess-Package\`、`NCodeProcess-Windows7-Portable.zip` 及 `SHA256SUMS.txt`。
-- **推送**：直连 GitHub 常失败，可用 `git -c http.proxy=http://127.0.0.1:7890 push origin master` 单次注入代理（详见 `docs/NCodeProcess-更改测试打包提交流程.md`）。
+- **推送**：直连 GitHub 常失败，可用 `git -c http.proxy=http://<代理地址> push origin master` 单次注入代理（本机实际代理地址见本地流程文档 `docs/NCodeProcess-更改测试打包提交流程.md`）。
 
 ---
 
