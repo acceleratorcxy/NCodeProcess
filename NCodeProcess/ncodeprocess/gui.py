@@ -974,6 +974,85 @@ class App(ttk.Frame):
     def _set_drawing_choice(self, label):
         self.folder_choice_var.set(label)
 
+    def open_settings(self):
+        if getattr(self, "settings_window", None) is not None and self.settings_window.winfo_exists():
+            self.settings_window.lift()
+            return
+        self._settings_snapshot = {
+            "encoding": self.encoding_var.get(),
+            "delete_extensions": self.delete_extensions_var.get(),
+            "allowed_name_pattern": self.allowed_name_pattern_var.get(),
+            "aptsource_dir": self.aptsource_dir_var.get(),
+            "require_end_marker": self.require_end_marker_var.get(),
+            "require_m06": self.require_m06_var.get(),
+            "require_spindle_speed": self.require_spindle_speed_var.get(),
+        }
+        win = tk.Toplevel(self.master)
+        win.title("程序设置")
+        win.transient(self.master)
+        win.resizable(False, False)
+        body = ttk.Frame(win, padding=10)
+        body.pack(fill="both", expand=True)
+
+        def labeled(row, text, widget):
+            ttk.Label(body, text=text).grid(row=row, column=0, sticky="w", padx=(0, 6), pady=3)
+            widget.grid(row=row, column=1, sticky="w", pady=3)
+
+        encoding_combo = ttk.Combobox(body, textvariable=self.encoding_var, state="readonly", width=16,
+                                      values=("auto", "utf-8", "utf-8-sig", "gb18030", "cp1252"))
+        labeled(0, "文件编码", encoding_combo)
+        ttk.Label(body, text="自动识别或强制指定").grid(row=0, column=2, sticky="w", padx=(6, 0))
+
+        delete_entry = ttk.Entry(body, textvariable=self.delete_extensions_var, width=24)
+        labeled(1, "待删除扩展名", delete_entry)
+        ttk.Button(body, text="恢复默认", command=lambda: self.delete_extensions_var.set(".log, .moaptindexes")).grid(row=1, column=2, padx=(6, 0))
+        ttk.Label(body, text="逗号分隔，如 .log,.moaptindexes；留空则全部保留").grid(row=2, column=1, columnspan=2, sticky="w")
+
+        pattern_entry = ttk.Entry(body, textvariable=self.allowed_name_pattern_var, width=24)
+        labeled(3, "程序名允许字符", pattern_entry)
+        ttk.Button(body, text="恢复默认", command=lambda: self.allowed_name_pattern_var.set(r"^[A-Za-z0-9_一-鿿-]+$")).grid(row=3, column=2, padx=(6, 0))
+
+        apt_entry = ttk.Entry(body, textvariable=self.aptsource_dir_var, width=24)
+        labeled(4, "APTSOURCE 归档子目录", apt_entry)
+
+        ttk.Checkbutton(body, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(body, text="要求刀具调用包含 M06", variable=self.require_m06_var).grid(row=6, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(body, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).grid(row=7, column=0, columnspan=3, sticky="w")
+
+        actions = ttk.Frame(win, padding=(10, 0, 10, 10))
+        actions.pack(fill="x")
+        ttk.Button(actions, text="确定", command=self._confirm_settings).pack(side="right")
+        ttk.Button(actions, text="取消", command=self._cancel_settings).pack(side="right", padx=(0, 8))
+        win.bind("<Return>", lambda _event: self._confirm_settings())
+        win.bind("<Escape>", lambda _event: self._cancel_settings())
+        self.settings_window = win
+
+    def _parsed_delete_extensions(self):
+        return parse_delete_extensions(self.delete_extensions_var.get())
+
+    def _confirm_settings(self):
+        try:
+            self._parsed_delete_extensions()
+            re.compile(self.allowed_name_pattern_var.get().strip())
+        except (ValueError, re.error) as error:
+            messagebox.showerror("程序设置无效", str(error), parent=self.settings_window)
+            return
+        self.settings_window.destroy()
+        self.settings_window = None
+        self.scan()
+
+    def _cancel_settings(self):
+        snapshot = getattr(self, "_settings_snapshot", {})
+        self.encoding_var.set(snapshot.get("encoding", self.encoding_var.get()))
+        self.delete_extensions_var.set(snapshot.get("delete_extensions", self.delete_extensions_var.get()))
+        self.allowed_name_pattern_var.set(snapshot.get("allowed_name_pattern", self.allowed_name_pattern_var.get()))
+        self.aptsource_dir_var.set(snapshot.get("aptsource_dir", self.aptsource_dir_var.get()))
+        self.require_end_marker_var.set(snapshot.get("require_end_marker", self.require_end_marker_var.get()))
+        self.require_m06_var.set(snapshot.get("require_m06", self.require_m06_var.get()))
+        self.require_spindle_speed_var.set(snapshot.get("require_spindle_speed", self.require_spindle_speed_var.get()))
+        self.settings_window.destroy()
+        self.settings_window = None
+
     def apply_info(self):
         v = self.info_vars
         if not v["drawing"].get().strip() or not v["version"].get().strip():
@@ -993,7 +1072,26 @@ class App(ttk.Frame):
             self.save_special_tools()
 
     def config(self):
-        return Config(recursive=self.recursive.get(), save_aptsource=self.save_aptsource.get(), overwrite_fields=self.overwrite_fields.get(), auto_m03=self.auto_m03.get(), auto_tool_change=self.auto_tool_change.get(), defer_stats=False, g00_level=self.g00_level.get())
+        try:
+            delete_extensions = self._parsed_delete_extensions()
+        except ValueError:
+            delete_extensions = {".log", ".moaptindexes"}
+        return Config(
+            recursive=self.recursive.get(),
+            save_aptsource=self.save_aptsource.get(),
+            aptsource_dir=self.aptsource_dir_var.get().strip() or "aptsource",
+            overwrite_fields=self.overwrite_fields.get(),
+            auto_m03=self.auto_m03.get(),
+            auto_tool_change=self.auto_tool_change.get(),
+            defer_stats=False,
+            g00_level=self.g00_level.get(),
+            delete_extensions=delete_extensions,
+            allowed_name_pattern=self.allowed_name_pattern_var.get().strip(),
+            encoding=self.encoding_var.get().strip(),
+            require_end_marker=self.require_end_marker_var.get(),
+            require_m06=self.require_m06_var.get(),
+            require_spindle_speed=self.require_spindle_speed_var.get(),
+        )
 
     def info(self):
         return ProgramInfo(self.applied_info.bianzhi, self.applied_info.shenhe, self.applied_info.drawing_number, self.applied_info.part_version, "", "SIE840D", self.applied_info.date)

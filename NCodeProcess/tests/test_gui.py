@@ -936,6 +936,56 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
+    def test_settings_dialog_opens_and_confirm_applies(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            with patch.object(App, "scan") as scan_mock:
+                app.open_settings()
+                self.assertIsNotNone(app.settings_window)
+                app.encoding_var.set("gb18030")
+                app.delete_extensions_var.set(".log")
+                app.require_m06_var.set(True)
+                app.require_end_marker_var.set(False)
+                app._confirm_settings()
+                self.assertIsNone(app.settings_window)
+                config = app.config()
+                self.assertEqual(config.encoding, "gb18030")
+                self.assertEqual(config.delete_extensions, {".log"})
+                self.assertTrue(config.require_m06)
+                self.assertFalse(config.require_end_marker)
+                scan_mock.assert_called_once_with()
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_cancel_discards(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            app.encoding_var.set("gb18030")
+            app._cancel_settings()
+            self.assertEqual(app.config().encoding, "auto")
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_rejects_invalid_values(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            with patch("ncodeprocess.gui.messagebox.showerror") as err_mock:
+                app.delete_extensions_var.set("txt")
+                app._confirm_settings()
+                err_mock.assert_called_once()
+            self.assertIsNotNone(app.settings_window)  # 对话框未关闭
+            self.assertEqual(app.config().delete_extensions, {".log", ".moaptindexes"})
+
+            app.allowed_name_pattern_var.set("[")
+            with patch("ncodeprocess.gui.messagebox.showerror") as err_mock:
+                app._confirm_settings()
+                err_mock.assert_called_once()
+            self.assertIsNotNone(app.settings_window)
+        finally:
+            root.destroy()
+
 
 class StartupCallbackTests(unittest.TestCase):
     def test_destroy_cancels_startup_callbacks_before_replacing_root(self):
