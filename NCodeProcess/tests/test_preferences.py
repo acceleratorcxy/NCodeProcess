@@ -25,6 +25,13 @@ class PreferencesTests(unittest.TestCase):
             "program_extensions", "program_output_extension",
             "require_end_marker", "require_m06", "require_spindle_speed",
             "ask_backup",
+            "required_bianzhi", "required_shenhe", "required_drawing", "required_part",
+            "m03_position", "feed_min", "feed_max", "spindle_min", "spindle_max",
+            "newline",
+            "aux_m03_before_motion", "aux_m05_before_end", "aux_m08_before_cut", "aux_m09_before_end",
+            "feed_outlier_iqr_factor", "feed_outlier_low_ratio", "feed_outlier_high_ratio",
+            "multiple_spindle_warn",
+            "storage_backend",
         })
 
     def test_save_and_load_roundtrip(self):
@@ -104,7 +111,7 @@ class FileBackendPreferencesTests(unittest.TestCase):
     def test_save_falls_back_to_appdata_file_when_registry_unwritable(self):
         with self._unwritable_registry():
             backend, location = save_all({"encoding": "gb18030", "bianzhi": "张工"}, FILE_TEST_KEY)
-        self.assertEqual(backend, "file")
+        self.assertEqual(backend, "appdata")
         self.assertEqual(location, str(self.appdata_file))
         self.assertEqual(load_all(FILE_TEST_KEY), {"encoding": "gb18030", "bianzhi": "张工"})
 
@@ -114,6 +121,40 @@ class FileBackendPreferencesTests(unittest.TestCase):
             save_all({"require_m06": "1"}, FILE_TEST_KEY)
         self.assertEqual(load_all(FILE_TEST_KEY)["encoding"], "gb18030")
         self.assertEqual(load_all(FILE_TEST_KEY)["require_m06"], "1")
+
+    def test_save_explicit_appdata_backend_clears_other_backends(self):
+        # 显式选择 appdata：值只写 appdata 文件，注册表与 home 文件被清空。
+        save_all({"encoding": "gb18030", "require_m06": "1"}, FILE_TEST_KEY, backend="appdata")
+        loaded = load_all(FILE_TEST_KEY)
+        self.assertEqual(loaded.get("encoding"), "gb18030")
+        self.assertEqual(loaded.get("storage_backend"), "appdata")
+        self.assertFalse(self.home_file.exists())
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, FILE_TEST_KEY) as key:
+                winreg.QueryValueEx(key, "encoding")
+            self.fail("注册表不应残留 encoding")
+        except FileNotFoundError:
+            pass
+
+    def test_switch_backend_to_registry_clears_files(self):
+        # 从 appdata 切回注册表：appdata 文件被清空，值写入注册表。
+        save_all({"encoding": "gb18030"}, FILE_TEST_KEY, backend="appdata")
+        self.assertTrue(self.appdata_file.exists())
+        save_all({"encoding": "utf-8"}, FILE_TEST_KEY, backend="registry")
+        self.assertFalse(self.appdata_file.exists())
+        loaded = load_all(FILE_TEST_KEY)
+        self.assertEqual(loaded.get("encoding"), "utf-8")
+        self.assertEqual(loaded.get("storage_backend"), "registry")
+
+    def test_load_uses_selected_backend(self):
+        # appdata 文件声明 storage_backend=appdata 时，注册表残留不影响读取。
+        save_all({"encoding": "gb18030"}, FILE_TEST_KEY, backend="appdata")
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, FILE_TEST_KEY) as key:
+            winreg.SetValueEx(key, "encoding", 0, winreg.REG_SZ, "cp1252")
+        loaded = load_all(FILE_TEST_KEY)
+        self.assertEqual(loaded.get("encoding"), "gb18030")
 
     def test_clear_all_removes_file_settings(self):
         with self._unwritable_registry():
@@ -128,14 +169,14 @@ class FileBackendPreferencesTests(unittest.TestCase):
         with patch.dict(os.environ, {"APPDATA": str(blocker)}):
             with self._unwritable_registry():
                 backend, location = save_all({"encoding": "gb18030"}, FILE_TEST_KEY)
-        self.assertEqual(backend, "file")
+        self.assertEqual(backend, "home")
         self.assertEqual(location, str(self.home_file))
         self.assertEqual(load_all(FILE_TEST_KEY)["encoding"], "gb18030")
 
     def test_storage_backend_reports_file_when_registry_unwritable(self):
         with self._unwritable_registry():
             backend, location = storage_backend(FILE_TEST_KEY)
-        self.assertEqual(backend, "file")
+        self.assertEqual(backend, "appdata")
         self.assertEqual(location, str(self.appdata_file))
 
     def test_storage_backend_reports_registry_when_writable(self):

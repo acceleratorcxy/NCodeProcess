@@ -1,3 +1,4 @@
+import os
 import tempfile
 import tkinter as tk
 import unittest
@@ -1340,6 +1341,70 @@ class SettingsDialogTests(LayoutWidgetTests):
             self.assertEqual(config.feed_outlier_low_ratio, 0.1)
             self.assertEqual(config.feed_outlier_high_ratio, 3.0)
         finally:
+            root.destroy()
+
+    def test_settings_dialog_has_storage_backend_control_and_export_button(self):
+        # WP-11：基本设置页提供配置保存位置下拉与导出设置按钮。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            basic = app.settings_pages[0]
+            combo = next(
+                child for child in self._descendants(basic)
+                if child.winfo_class() == "TCombobox"
+                and str(child.cget("textvariable")) == str(app.storage_backend_var)
+            )
+            self.assertEqual(tuple(combo.cget("values")), ("registry", "appdata", "home"))
+            buttons = self._collect_buttons(app.settings_window)
+            self.assertIn("导出设置…", {button.cget("text") for button in buttons})
+        finally:
+            root.destroy()
+
+    def test_settings_loads_from_selected_appdata_backend(self):
+        # WP-11：storage_backend=appdata 时，启动从 appdata 文件加载 Batch 2 值。
+        import tempfile
+        from pathlib import Path as PathType
+        import ncodeprocess.preferences as prefs
+        with tempfile.TemporaryDirectory(prefix="ncp-gui-prefs-") as temp:
+            root_dir = PathType(temp)
+            appdata_dir = root_dir / "appdata"
+            with patch.dict(os.environ, {"APPDATA": str(appdata_dir)}), \
+                 patch.object(prefs.Path, "home", return_value=root_dir / "home"):
+                save_all({
+                    "feed_min": "100", "m03_position": "standalone",
+                    "required_bianzhi": "0", "storage_backend": "appdata",
+                }, TEST_SETTINGS_KEY, backend="appdata")
+                root = tk.Tk()
+                root.withdraw()
+                try:
+                    with patch.object(App, "scan", lambda _self: None):
+                        app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
+                    self.assertEqual(app.feed_min_var.get(), "100")
+                    self.assertEqual(app.m03_position_var.get(), "standalone")
+                    self.assertFalse(app.required_bianzhi_var.get())
+                    self.assertEqual(app.storage_backend_var.get(), "appdata")
+                finally:
+                    root.destroy()
+                clear_all(TEST_SETTINGS_KEY)
+
+    def test_confirm_settings_saves_batch2_values(self):
+        # WP-11：确定保存后，Batch 2 + WP-10 设置写入选定后端。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.settings_registry_key = TEST_SETTINGS_KEY
+            app.open_settings()
+            app.feed_min_var.set("150")
+            app.feed_outlier_iqr_var.set("4")
+            app.required_drawing_var.set(False)
+            with patch.object(App, "scan"):
+                app._confirm_settings()
+            loaded = load_all(TEST_SETTINGS_KEY)
+            self.assertEqual(loaded.get("feed_min"), "150")
+            self.assertEqual(loaded.get("feed_outlier_iqr_factor"), "4")
+            self.assertEqual(loaded.get("required_drawing"), "0")
+            self.assertEqual(loaded.get("storage_backend"), "registry")
+        finally:
+            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_required_field_checkbuttons_have_equal_spacing(self):

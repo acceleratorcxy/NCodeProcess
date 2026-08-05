@@ -664,32 +664,33 @@ class App(ttk.Frame):
         self.require_m06_var = tk.BooleanVar(value=loaded.get("require_m06", "0") == "1")
         self.require_spindle_speed_var = tk.BooleanVar(value=loaded.get("require_spindle_speed", "0") == "1")
         self.ask_backup_var = tk.BooleanVar(value=loaded.get("ask_backup", "1") == "1")
-        # 必填 MSG 字段（Batch 2，仅本次运行生效）：默认全部必填；
-        # 程序/机床/控制系统固定必填，此处仅暴露 4 个可配置项。
-        self.required_bianzhi_var = tk.BooleanVar(value=True)
-        self.required_shenhe_var = tk.BooleanVar(value=True)
-        self.required_drawing_var = tk.BooleanVar(value=True)
-        self.required_part_var = tk.BooleanVar(value=True)
-        # M03 补写位置策略（Batch 2，仅本次运行生效）：after-s / standalone。
-        self.m03_position_var = tk.StringVar(value="after-s")
-        # F/S 上下限（Batch 2，仅本次运行生效）：留空 = 不检查。
-        self.feed_min_var = tk.StringVar(value="")
-        self.feed_max_var = tk.StringVar(value="")
-        self.spindle_min_var = tk.StringVar(value="")
-        self.spindle_max_var = tk.StringVar(value="")
-        # 换行策略（Batch 2，仅本次运行生效）：auto / crlf / lf。
-        self.newline_var = tk.StringVar(value="auto")
-        # 辅助指令顺序规则（Batch 2，仅本次运行生效）：默认全部启用。
-        self.aux_m03_before_motion_var = tk.BooleanVar(value=True)
-        self.aux_m05_before_end_var = tk.BooleanVar(value=True)
-        self.aux_m08_before_cut_var = tk.BooleanVar(value=True)
-        self.aux_m09_before_end_var = tk.BooleanVar(value=True)
-        # 启发式校验阈值（WP-10，仅本次运行生效）：F 离群按工艺阶段分组
-        # （移动/进刀/切削）检测常见档位，无常见档位时回退 IQR 极端值标准。
-        self.feed_outlier_iqr_var = tk.StringVar(value="3")
-        self.feed_outlier_low_ratio_var = tk.StringVar(value="0.1")
-        self.feed_outlier_high_ratio_var = tk.StringVar(value="3")
-        self.multiple_spindle_var = tk.BooleanVar(value=True)
+        # 必填 MSG 字段（持久化）：默认全部必填；程序/机床/控制系统固定必填。
+        self.required_bianzhi_var = tk.BooleanVar(value=loaded.get("required_bianzhi", "1") == "1")
+        self.required_shenhe_var = tk.BooleanVar(value=loaded.get("required_shenhe", "1") == "1")
+        self.required_drawing_var = tk.BooleanVar(value=loaded.get("required_drawing", "1") == "1")
+        self.required_part_var = tk.BooleanVar(value=loaded.get("required_part", "1") == "1")
+        # M03 补写位置策略（持久化）：after-s / standalone。
+        self.m03_position_var = tk.StringVar(value=loaded.get("m03_position", "after-s"))
+        # F/S 上下限（持久化）：留空 = 不检查。
+        self.feed_min_var = tk.StringVar(value=loaded.get("feed_min", ""))
+        self.feed_max_var = tk.StringVar(value=loaded.get("feed_max", ""))
+        self.spindle_min_var = tk.StringVar(value=loaded.get("spindle_min", ""))
+        self.spindle_max_var = tk.StringVar(value=loaded.get("spindle_max", ""))
+        # 换行策略（持久化）：auto / crlf / lf。
+        self.newline_var = tk.StringVar(value=loaded.get("newline", "auto"))
+        # 辅助指令顺序规则（持久化）：默认全部启用。
+        self.aux_m03_before_motion_var = tk.BooleanVar(value=loaded.get("aux_m03_before_motion", "1") == "1")
+        self.aux_m05_before_end_var = tk.BooleanVar(value=loaded.get("aux_m05_before_end", "1") == "1")
+        self.aux_m08_before_cut_var = tk.BooleanVar(value=loaded.get("aux_m08_before_cut", "1") == "1")
+        self.aux_m09_before_end_var = tk.BooleanVar(value=loaded.get("aux_m09_before_end", "1") == "1")
+        # 启发式校验阈值（持久化）：F 离群按工艺阶段分组检测常见档位，
+        # 无常见档位时回退 IQR 极端值标准。
+        self.feed_outlier_iqr_var = tk.StringVar(value=loaded.get("feed_outlier_iqr_factor", "3"))
+        self.feed_outlier_low_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_low_ratio", "0.1"))
+        self.feed_outlier_high_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_high_ratio", "3"))
+        self.multiple_spindle_var = tk.BooleanVar(value=loaded.get("multiple_spindle_warn", "1") == "1")
+        # 配置保存位置（持久化）：registry / appdata / home，默认注册表。
+        self.storage_backend_var = tk.StringVar(value=loaded.get("storage_backend", "registry"))
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
@@ -1134,6 +1135,7 @@ class App(ttk.Frame):
             "feed_outlier_low_ratio": self.feed_outlier_low_ratio_var.get(),
             "feed_outlier_high_ratio": self.feed_outlier_high_ratio_var.get(),
             "multiple_spindle": self.multiple_spindle_var.get(),
+            "storage_backend": self.storage_backend_var.get(),
         }
         win = tk.Toplevel(self.master)
         win.title("程序设置")
@@ -1156,12 +1158,12 @@ class App(ttk.Frame):
         encoding_combo = ttk.Combobox(basic, textvariable=self.encoding_var, state="readonly", width=16,
                                       values=("auto", "utf-8", "utf-8-sig", "gb18030", "gbk", "gb2312", "cp1252"))
         labeled(basic, 0, "文件编码", encoding_combo)
-        ttk.Label(basic, text="自动识别或强制指定").grid(row=0, column=2, sticky="w", padx=(6, 0))
+        self._settings_help_label(basic, "文件编码", "auto=自动识别；也可强制指定 utf-8、utf-8-sig、gb18030、gbk、gb2312 或 cp1252。").grid(row=0, column=2, sticky="w", padx=(6, 0))
 
         delete_entry = ttk.Entry(basic, textvariable=self.delete_extensions_var, width=24)
         labeled(basic, 1, "待删除扩展名", delete_entry)
         ttk.Button(basic, text="恢复默认", command=lambda: self.delete_extensions_var.set(".log, .moaptindexes")).grid(row=1, column=2, padx=(6, 0))
-        ttk.Label(basic, text="逗号分隔，如 .log,.moaptindexes；留空则全部保留").grid(row=2, column=1, columnspan=2, sticky="w")
+        self._settings_help_label(basic, "待删除扩展名", "逗号分隔，如 .log,.moaptindexes；留空则全部保留。").grid(row=2, column=1, sticky="w", padx=(6, 0))
 
         pattern_entry = ttk.Entry(basic, textvariable=self.allowed_name_pattern_var, width=24)
         labeled(basic, 3, "程序名允许字符", pattern_entry)
@@ -1172,12 +1174,17 @@ class App(ttk.Frame):
 
         program_ext_entry = ttk.Entry(basic, textvariable=self.program_extensions_var, width=24)
         labeled(basic, 5, "主程序扩展名", program_ext_entry)
-        ttk.Label(basic, text="逗号分隔，如 .mpf,.nc,.txt").grid(row=5, column=2, sticky="w", padx=(6, 0))
+        self._settings_help_label(basic, "主程序扩展名", "逗号分隔，如 .mpf,.nc,.txt。").grid(row=5, column=2, sticky="w", padx=(6, 0))
 
         output_ext_entry = ttk.Entry(basic, textvariable=self.program_output_extension_var, width=24)
         labeled(basic, 6, "输出扩展名", output_ext_entry)
-        ttk.Label(basic, text="如 .MPF 或 .nc").grid(row=6, column=2, sticky="w", padx=(6, 0))
+        self._settings_help_label(basic, "输出扩展名", "如 .MPF 或 .nc。").grid(row=6, column=2, sticky="w", padx=(6, 0))
         ttk.Checkbutton(basic, text="处理前询问备份（关闭则不询问也不备份）", variable=self.ask_backup_var).grid(row=7, column=1, sticky="w", pady=3)
+        ttk.Label(basic, text="配置保存位置").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=3)
+        backend_combo = ttk.Combobox(basic, textvariable=self.storage_backend_var, state="readonly", width=10,
+                                     values=("registry", "appdata", "home"))
+        backend_combo.grid(row=8, column=1, sticky="w", pady=3)
+        self._settings_help_label(basic, "配置保存位置", "registry=注册表（默认）；appdata=用户数据目录 %APPDATA%\\NCodeProcess；home=用户主目录。切换保存位置后会清空另外两处可能残留的旧配置。").grid(row=8, column=2, sticky="w", padx=(6, 0))
 
         # ── 校验规则：结束标记 / G00 / 必填字段 / M03 / S·F / 换行 / 启发式阈值 / 辅助顺序 ──
         check_frame = ttk.Frame(rules)
@@ -1189,7 +1196,7 @@ class App(ttk.Frame):
         g00_combo = ttk.Combobox(rules, textvariable=self.g00_level, state="readonly", width=10,
                                  values=("error", "warning", "allow"))
         labeled(rules, 1, "G00 级别", g00_combo)
-        ttk.Label(rules, text="error 报错 / warning 提示 / allow 放行").grid(row=1, column=2, sticky="w", padx=(6, 0))
+        self._settings_help_label(rules, "G00 级别", "G00/G0 检查级别：error=报错阻止输出；warning=提示；allow=放行。").grid(row=1, column=2, sticky="w", padx=(6, 0))
 
         ttk.Label(rules, text="必填 MSG 字段").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(4, 3))
         required_frame = ttk.Frame(rules)
@@ -1205,7 +1212,7 @@ class App(ttk.Frame):
         m03_combo = ttk.Combobox(rules, textvariable=self.m03_position_var, state="readonly", width=14,
                                  values=("after-s", "standalone"))
         labeled(rules, 3, "M03 补写位置", m03_combo)
-        ttk.Label(rules, text="紧贴 S 数值后 / 独立行").grid(row=3, column=2, sticky="w", padx=(6, 0))
+        self._settings_help_label(rules, "M03 补写位置", "after-s=追加在首个 S 转速所在程序块末尾（分号之前）；standalone=在首条切削/运动指令前插入独立 M03 行。").grid(row=3, column=2, sticky="w", padx=(6, 0))
 
         ttk.Label(rules, text="F 上下限").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
         feed_frame = ttk.Frame(rules)
@@ -1224,7 +1231,7 @@ class App(ttk.Frame):
         newline_combo = ttk.Combobox(rules, textvariable=self.newline_var, state="readonly", width=14,
                                      values=("auto", "crlf", "lf"))
         labeled(rules, 7, "换行策略", newline_combo)
-        ttk.Label(rules, text="auto 跟随源文件；crlf/lf 强制").grid(row=7, column=2, sticky="w", padx=(6, 0))
+        self._settings_help_label(rules, "换行策略", "auto=跟随源文件；crlf=强制 CRLF；lf=强制 LF。").grid(row=7, column=2, sticky="w", padx=(6, 0))
 
         ttk.Label(rules, text="F 离群校验").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=(4, 2))
         feed_outlier_frame = ttk.Frame(rules)
@@ -1253,12 +1260,20 @@ class App(ttk.Frame):
         actions.pack(fill="x")
         ttk.Button(actions, text="恢复默认", command=self._restore_default_settings).pack(side="left")
         ttk.Button(actions, text="清除注册表", command=self._clear_registry_settings).pack(side="left", padx=(0, 8))
+        ttk.Button(actions, text="导出设置…", command=self._export_settings).pack(side="left")
         ttk.Button(actions, text="确定", command=self._confirm_settings).pack(side="right")
         ttk.Button(actions, text="取消", command=self._cancel_settings).pack(side="right", padx=(0, 8))
         win.bind("<Return>", lambda _event: self._confirm_settings())
         win.bind("<Escape>", lambda _event: self._cancel_settings())
         self._show_centered(win)
         self.settings_window = win
+
+    def _settings_help_label(self, parent, title, message):
+        """设置对话框的 ? 说明按钮：点击弹出说明，避免长文字挤压排版。"""
+        label = ttk.Label(parent, text="?", cursor="question_arrow", foreground="#1565c0",
+                          font=("TkDefaultFont", 9, "bold"))
+        label.bind("<Button-1>", lambda _event: messagebox.showinfo(title, message, parent=self.master))
+        return label
 
     def _parsed_delete_extensions(self):
         return parse_delete_extensions(self.delete_extensions_var.get())
@@ -1297,18 +1312,62 @@ class App(ttk.Frame):
         self.scan()
 
     def _save_settings_values(self):
-        save_all({
-            "encoding": self.encoding_var.get().strip(),
-            "delete_extensions": self.delete_extensions_var.get().strip(),
-            "allowed_name_pattern": self.allowed_name_pattern_var.get().strip(),
-            "aptsource_dir": self.aptsource_dir_var.get().strip() or "aptsource",
-            "program_extensions": self.program_extensions_var.get().strip(),
-            "program_output_extension": self._parsed_output_extension(),
-            "require_end_marker": "1" if self.require_end_marker_var.get() else "0",
-            "require_m06": "1" if self.require_m06_var.get() else "0",
-            "require_spindle_speed": "1" if self.require_spindle_speed_var.get() else "0",
-            "ask_backup": "1" if self.ask_backup_var.get() else "0",
-        }, self.settings_registry_key)
+        save_all(self._current_settings_values(), self.settings_registry_key, backend=self.storage_backend_var.get())
+
+    def _current_settings_values(self) -> dict:
+        """收集当前全部设置值（REGISTRY_KEYS → 字符串），供保存与导出复用。"""
+        value = self
+        return {
+            "bianzhi": value.info_vars["bianzhi"].get().strip(),
+            "shenhe": value.info_vars["shenhe"].get().strip(),
+            "encoding": value.encoding_var.get().strip(),
+            "delete_extensions": value.delete_extensions_var.get().strip(),
+            "allowed_name_pattern": value.allowed_name_pattern_var.get().strip(),
+            "aptsource_dir": value.aptsource_dir_var.get().strip() or "aptsource",
+            "program_extensions": value.program_extensions_var.get().strip(),
+            "program_output_extension": value._parsed_output_extension(),
+            "require_end_marker": "1" if value.require_end_marker_var.get() else "0",
+            "require_m06": "1" if value.require_m06_var.get() else "0",
+            "require_spindle_speed": "1" if value.require_spindle_speed_var.get() else "0",
+            "ask_backup": "1" if value.ask_backup_var.get() else "0",
+            "required_bianzhi": "1" if value.required_bianzhi_var.get() else "0",
+            "required_shenhe": "1" if value.required_shenhe_var.get() else "0",
+            "required_drawing": "1" if value.required_drawing_var.get() else "0",
+            "required_part": "1" if value.required_part_var.get() else "0",
+            "m03_position": value.m03_position_var.get(),
+            "feed_min": value.feed_min_var.get().strip(),
+            "feed_max": value.feed_max_var.get().strip(),
+            "spindle_min": value.spindle_min_var.get().strip(),
+            "spindle_max": value.spindle_max_var.get().strip(),
+            "newline": value.newline_var.get(),
+            "aux_m03_before_motion": "1" if value.aux_m03_before_motion_var.get() else "0",
+            "aux_m05_before_end": "1" if value.aux_m05_before_end_var.get() else "0",
+            "aux_m08_before_cut": "1" if value.aux_m08_before_cut_var.get() else "0",
+            "aux_m09_before_end": "1" if value.aux_m09_before_end_var.get() else "0",
+            "feed_outlier_iqr_factor": value.feed_outlier_iqr_var.get().strip(),
+            "feed_outlier_low_ratio": value.feed_outlier_low_ratio_var.get().strip(),
+            "feed_outlier_high_ratio": value.feed_outlier_high_ratio_var.get().strip(),
+            "multiple_spindle_warn": "1" if value.multiple_spindle_var.get() else "0",
+            "storage_backend": value.storage_backend_var.get(),
+        }
+
+    def _export_settings(self):
+        """选择导出路径，把当前全部设置导出为 JSON 文件。"""
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            title="导出程序设置",
+            defaultextension=".json",
+            filetypes=(("JSON 设置", "*.json"), ("所有文件", "*.*")),
+            parent=self.master,
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(json.dumps(self._current_settings_values(), ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("导出失败", f"无法写入导出文件：\n{path}\n\n{exc}", parent=self.master)
+            return
+        messagebox.showinfo("导出完成", f"程序设置已导出到：\n{path}", parent=self.master)
 
     def _apply_settings_defaults(self):
         defaults = REGISTRY_DEFAULTS
@@ -1322,26 +1381,26 @@ class App(ttk.Frame):
         self.require_m06_var.set(defaults["require_m06"] == "1")
         self.require_spindle_speed_var.set(defaults["require_spindle_speed"] == "1")
         self.ask_backup_var.set(defaults["ask_backup"] == "1")
-        # 必填 MSG 字段恢复默认：全部必填（Batch 2 仅本次运行生效）
-        self.required_bianzhi_var.set(True)
-        self.required_shenhe_var.set(True)
-        self.required_drawing_var.set(True)
-        self.required_part_var.set(True)
-        self.m03_position_var.set("after-s")
-        self.feed_min_var.set("")
-        self.feed_max_var.set("")
-        self.spindle_min_var.set("")
-        self.spindle_max_var.set("")
-        self.newline_var.set("auto")
+        self.required_bianzhi_var.set(defaults["required_bianzhi"] == "1")
+        self.required_shenhe_var.set(defaults["required_shenhe"] == "1")
+        self.required_drawing_var.set(defaults["required_drawing"] == "1")
+        self.required_part_var.set(defaults["required_part"] == "1")
+        self.m03_position_var.set(defaults["m03_position"])
+        self.feed_min_var.set(defaults["feed_min"])
+        self.feed_max_var.set(defaults["feed_max"])
+        self.spindle_min_var.set(defaults["spindle_min"])
+        self.spindle_max_var.set(defaults["spindle_max"])
+        self.newline_var.set(defaults["newline"])
         self.g00_level.set("error")
-        self.aux_m03_before_motion_var.set(True)
-        self.aux_m05_before_end_var.set(True)
-        self.aux_m08_before_cut_var.set(True)
-        self.aux_m09_before_end_var.set(True)
-        self.feed_outlier_iqr_var.set("3")
-        self.feed_outlier_low_ratio_var.set("0.1")
-        self.feed_outlier_high_ratio_var.set("3")
-        self.multiple_spindle_var.set(True)
+        self.aux_m03_before_motion_var.set(defaults["aux_m03_before_motion"] == "1")
+        self.aux_m05_before_end_var.set(defaults["aux_m05_before_end"] == "1")
+        self.aux_m08_before_cut_var.set(defaults["aux_m08_before_cut"] == "1")
+        self.aux_m09_before_end_var.set(defaults["aux_m09_before_end"] == "1")
+        self.feed_outlier_iqr_var.set(defaults["feed_outlier_iqr_factor"])
+        self.feed_outlier_low_ratio_var.set(defaults["feed_outlier_low_ratio"])
+        self.feed_outlier_high_ratio_var.set(defaults["feed_outlier_high_ratio"])
+        self.multiple_spindle_var.set(defaults["multiple_spindle_warn"] == "1")
+        # 保存位置保留用户当前选择（恢复默认不清空存储位置偏好）
         # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
         self.info_vars["bianzhi"].set("")
         self.info_vars["shenhe"].set("")
@@ -1351,7 +1410,7 @@ class App(ttk.Frame):
     def _restore_default_settings(self):
         """恢复全部默认值并立即写入注册表（含编制/审核）。"""
         self._apply_settings_defaults()
-        save_all(dict(REGISTRY_DEFAULTS), self.settings_registry_key)
+        save_all(dict(REGISTRY_DEFAULTS), self.settings_registry_key, backend=self.storage_backend_var.get())
         self.settings_window.destroy()
         self.settings_window = None
         self.scan()
@@ -1406,6 +1465,7 @@ class App(ttk.Frame):
         self.feed_outlier_low_ratio_var.set(snapshot.get("feed_outlier_low_ratio", self.feed_outlier_low_ratio_var.get()))
         self.feed_outlier_high_ratio_var.set(snapshot.get("feed_outlier_high_ratio", self.feed_outlier_high_ratio_var.get()))
         self.multiple_spindle_var.set(snapshot.get("multiple_spindle", self.multiple_spindle_var.get()))
+        self.storage_backend_var.set(snapshot.get("storage_backend", self.storage_backend_var.get()))
         self.settings_window.destroy()
         self.settings_window = None
 
