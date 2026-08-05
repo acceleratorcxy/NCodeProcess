@@ -96,6 +96,11 @@ class Config:
     #   m08-before-cut     M08 先于首次切削（warning）
     #   m09-before-end     M09 先于程序结束（warning，M09 未出现时不提示）
     aux_checks: set = field(default_factory=set)
+    # 强制应用：勾选后即使头部已有非空字段（含 PROGRAM/NC MACHINE/CONTROL SYSTEM/DATE）
+    # 也强制覆盖为新输入的信息。
+    force_apply: bool = False
+    # 处理前是否询问备份（GUI 基本设置可开关，持久化）。
+    ask_backup: bool = True
 
 
 @dataclass
@@ -757,7 +762,7 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
                 # These values are authoritative when they already exist in a
                 # reprocessed MPF. PROGRAM/NC MACHINE are loaded as program
                 # defaults; CONTROL SYSTEM/DATE must never be changed.
-                protect_existing = upper in ("PROGRAM", "NC MACHINE", "CONTROL SYSTEM", "DATE") and bool(value.strip())
+                protect_existing = not config.force_apply and upper in ("PROGRAM", "NC MACHINE", "CONTROL SYSTEM", "DATE") and bool(value.strip())
                 if not protect_existing and (not value.strip() or config.overwrite_fields) and new_value != value:
                     header[idx] = _msg_line(key, new_value, line.rstrip().endswith(";"))
                     changes.append(f"补全/更新 {upper}")

@@ -419,6 +419,23 @@ class CoreTests(unittest.TestCase):
         # overwrite can still update it.
         self.assertEqual(fields["PART VERSION"], "V2")
 
+    def test_force_apply_overwrites_protected_header_fields(self):
+        # 强制应用：PROGRAM/NC MACHINE/CONTROL SYSTEM/DATE 即使已有非空值也被覆盖。
+        text = (
+            'MSG("PROGRAM:OLD")\n'
+            'MSG("NC MACHINE:OLD")\n'
+            'MSG("CONTROL SYSTEM:OLD")\n'
+            'MSG("DATE:Jan 01 00:00:00 2026")\n'
+            'N1G1X10F1000S5000M03\nM30\n'
+        )
+        info = ProgramInfo("A", "B", "D", "V", "HASS", "SIE840D", "NEWDATE")
+        config = self._cfg(force_apply=True, overwrite_fields=True)
+        new, changes, issues = apply_header(text, "NEWPROG", info, config)
+        self.assertIn('MSG("PROGRAM:NEWPROG")', new)
+        self.assertIn('MSG("NC MACHINE:HASS")', new)
+        self.assertIn('MSG("CONTROL SYSTEM:SIE840D")', new)
+        self.assertIn('MSG("DATE:NEWDATE")', new)
+
     def test_optional_initial_tool_change_is_inserted_and_corrected(self):
         root = self.make_dir()
         (root / "x_P.MPF").write_text("N1T5M06;\nN2S100M03;\nN3T5;\nN4M30;\n", encoding="utf-8")

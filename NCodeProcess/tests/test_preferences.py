@@ -24,6 +24,7 @@ class PreferencesTests(unittest.TestCase):
             "encoding", "delete_extensions", "allowed_name_pattern", "aptsource_dir",
             "program_extensions", "program_output_extension",
             "require_end_marker", "require_m06", "require_spindle_speed",
+            "ask_backup",
         })
 
     def test_save_and_load_roundtrip(self):

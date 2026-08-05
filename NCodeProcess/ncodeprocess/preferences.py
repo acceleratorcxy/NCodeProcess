@@ -58,6 +58,7 @@ REGISTRY_DEFAULTS = {
     "require_end_marker": "1",
     "require_m06": "0",
     "require_spindle_speed": "0",
+    "ask_backup": "1",
 }
 REGISTRY_KEYS = tuple(REGISTRY_DEFAULTS)
 

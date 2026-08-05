@@ -1533,6 +1533,21 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_unnamed_mpfs_listed_first_in_keep_table(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plans = [
+                FilePlan("B.MPF", "mpf", None, None, "keep"),
+                FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep"),
+                FilePlan("C.MPF", "mpf", None, None, "keep"),
+            ]
+            app.scan_result = ScanResult("tmp", plans)
+            app.populate_file_tables()
+            rows = [app.keep_table.item(item, "values")[1] for item in app.keep_table.get_children()]
+            self.assertEqual(rows, ["待确认", "待确认", "A"])
+        finally:
+            root.destroy()
+
     def test_parsed_info_shows_encoding(self):
         root, app = self._build_app(1286, 668)
         try:

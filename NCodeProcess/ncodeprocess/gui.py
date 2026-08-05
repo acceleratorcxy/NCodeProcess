@@ -636,6 +636,7 @@ class App(ttk.Frame):
             self.info_vars[key] = var
             ttk.Entry(field, textvariable=var, width=10).grid(row=0, column=1, sticky="ew")
         self.overwrite_fields = tk.BooleanVar(value=False)
+        self.force_apply = tk.BooleanVar(value=False)
         self.auto_m03 = tk.BooleanVar(value=True)
         self.auto_tool_change = tk.BooleanVar(value=False)
         self.g00_level = tk.StringVar(value="error")
@@ -649,6 +650,7 @@ class App(ttk.Frame):
         self.require_end_marker_var = tk.BooleanVar(value=loaded.get("require_end_marker", "1") == "1")
         self.require_m06_var = tk.BooleanVar(value=loaded.get("require_m06", "0") == "1")
         self.require_spindle_speed_var = tk.BooleanVar(value=loaded.get("require_spindle_speed", "0") == "1")
+        self.ask_backup_var = tk.BooleanVar(value=loaded.get("ask_backup", "1") == "1")
         # 必填 MSG 字段（Batch 2，仅本次运行生效）：默认全部必填；
         # 程序/机床/控制系统固定必填，此处仅暴露 4 个可配置项。
         self.required_bianzhi_var = tk.BooleanVar(value=True)
@@ -672,17 +674,19 @@ class App(ttk.Frame):
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
-        options.columnconfigure(5, weight=1)
-        ttk.Button(options, text="应用设置", command=self.apply_info).grid(row=0, column=0, padx=3, sticky="w")
-        ttk.Button(options, text="保存编制/校对", command=self.save_fields).grid(row=0, column=1, padx=3, sticky="w")
-        ttk.Checkbutton(options, text="覆盖已有非空 MSG 字段", variable=self.overwrite_fields).grid(row=0, column=2, padx=3, sticky="w")
-        ttk.Checkbutton(options, text="自动补写 M03", variable=self.auto_m03).grid(row=0, column=3, padx=3, sticky="w")
-        ttk.Checkbutton(options, text="自动添加换刀指令", variable=self.auto_tool_change).grid(row=0, column=4, padx=3, sticky="w")
-        ttk.Label(options, text="机床：自动 HASS/2500B；控制系统：SIE840D").grid(row=0, column=5, padx=(8, 3), sticky="e")
+        options.columnconfigure(7, weight=1)
+        ttk.Button(options, text="全部应用", command=self.apply_info).grid(row=0, column=0, padx=3, sticky="w")
+        ttk.Button(options, text="应用所选", command=self.apply_selected).grid(row=0, column=1, padx=3, sticky="w")
+        ttk.Button(options, text="保存编制/校对", command=self.save_fields).grid(row=0, column=2, padx=3, sticky="w")
+        ttk.Checkbutton(options, text="强制应用", variable=self.force_apply).grid(row=0, column=3, padx=3, sticky="w")
+        ttk.Checkbutton(options, text="覆盖已有非空 MSG 字段", variable=self.overwrite_fields).grid(row=0, column=4, padx=3, sticky="w")
+        ttk.Checkbutton(options, text="自动补写 M03", variable=self.auto_m03).grid(row=0, column=5, padx=3, sticky="w")
+        ttk.Checkbutton(options, text="自动添加换刀指令", variable=self.auto_tool_change).grid(row=0, column=6, padx=3, sticky="w")
+        ttk.Label(options, text="机床：自动 HASS/2500B；控制系统：SIE840D").grid(row=0, column=7, padx=(8, 3), sticky="e")
 
         # G00 级别已移入程序设置对话框；此处仅保留自定义刀具类型一行。
         custom_type_row = ttk.Frame(info)
-        custom_type_row.grid(row=2, column=0, sticky="ew", padx=4)
+        custom_type_row.grid(row=3, column=0, sticky="ew", padx=4)
         ttk.Label(custom_type_row, text="自定义刀具类型").pack(side="left", padx=(0, 4))
         self.new_type_var = tk.StringVar()
         self.custom_tool_type_entry = ttk.Entry(custom_type_row, textvariable=self.new_type_var, width=20)
@@ -691,7 +695,7 @@ class App(ttk.Frame):
         self.add_tool_type_button.pack(side="left")
 
         drawing_choices = ttk.Frame(info)
-        drawing_choices.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 2))
+        drawing_choices.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 2))
         drawing_choices.columnconfigure(1, weight=1)
         self.folder_choice_var = tk.StringVar(value=self.folder_choices[3][0])
         ttk.Label(drawing_choices, text="图号候选").grid(row=0, column=0, padx=(0, 4), sticky="w")
@@ -1086,6 +1090,7 @@ class App(ttk.Frame):
             "require_end_marker": self.require_end_marker_var.get(),
             "require_m06": self.require_m06_var.get(),
             "require_spindle_speed": self.require_spindle_speed_var.get(),
+            "ask_backup": self.ask_backup_var.get(),
             "required_bianzhi": self.required_bianzhi_var.get(),
             "required_shenhe": self.required_shenhe_var.get(),
             "required_drawing": self.required_drawing_var.get(),
@@ -1144,6 +1149,7 @@ class App(ttk.Frame):
         output_ext_entry = ttk.Entry(basic, textvariable=self.program_output_extension_var, width=24)
         labeled(basic, 6, "输出扩展名", output_ext_entry)
         ttk.Label(basic, text="如 .MPF 或 .nc").grid(row=6, column=2, sticky="w", padx=(6, 0))
+        ttk.Checkbutton(basic, text="处理前询问备份（关闭则不询问也不备份）", variable=self.ask_backup_var).grid(row=7, column=1, sticky="w", pady=3)
 
         # ── 校验规则：G00 / 必填字段 / M03 / S/F / 换行 / 辅助顺序 ──
         ttk.Checkbutton(rules, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 0))
@@ -1259,6 +1265,7 @@ class App(ttk.Frame):
             "require_end_marker": "1" if self.require_end_marker_var.get() else "0",
             "require_m06": "1" if self.require_m06_var.get() else "0",
             "require_spindle_speed": "1" if self.require_spindle_speed_var.get() else "0",
+            "ask_backup": "1" if self.ask_backup_var.get() else "0",
         }, self.settings_registry_key)
 
     def _apply_settings_defaults(self):
@@ -1272,6 +1279,7 @@ class App(ttk.Frame):
         self.require_end_marker_var.set(defaults["require_end_marker"] == "1")
         self.require_m06_var.set(defaults["require_m06"] == "1")
         self.require_spindle_speed_var.set(defaults["require_spindle_speed"] == "1")
+        self.ask_backup_var.set(defaults["ask_backup"] == "1")
         # 必填 MSG 字段恢复默认：全部必填（Batch 2 仅本次运行生效）
         self.required_bianzhi_var.set(True)
         self.required_shenhe_var.set(True)
@@ -1332,6 +1340,7 @@ class App(ttk.Frame):
         self.require_end_marker_var.set(snapshot.get("require_end_marker", self.require_end_marker_var.get()))
         self.require_m06_var.set(snapshot.get("require_m06", self.require_m06_var.get()))
         self.require_spindle_speed_var.set(snapshot.get("require_spindle_speed", self.require_spindle_speed_var.get()))
+        self.ask_backup_var.set(snapshot.get("ask_backup", self.ask_backup_var.get()))
         self.required_bianzhi_var.set(snapshot.get("required_bianzhi", self.required_bianzhi_var.get()))
         self.required_shenhe_var.set(snapshot.get("required_shenhe", self.required_shenhe_var.get()))
         self.required_drawing_var.set(snapshot.get("required_drawing", self.required_drawing_var.get()))
@@ -1359,6 +1368,35 @@ class App(ttk.Frame):
         self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
         self.status.set("程序信息已应用，正在刷新预览……")
         self.scan()
+
+    def apply_selected(self):
+        """Apply the program-info fields only to the selected MPF rows."""
+        v = self.info_vars
+        if not v["drawing"].get().strip() or not v["version"].get().strip():
+            messagebox.showerror("信息不完整", "图号和版次为必填项。未应用设置，也不会修改任何 MPF 文件。", parent=self.master)
+            return
+        selection = self.keep_table.selection()
+        if not selection:
+            messagebox.showwarning("未选择程序", "请先在保留/归档文件表选择程序（可多选）。", parent=self.master)
+            return
+        self.applied_info = ProgramInfo(v["bianzhi"].get().strip(), v["shenhe"].get().strip(), v["drawing"].get().strip(), v["version"].get().strip(), "", "SIE840D", v["date"].get().strip())
+        self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
+        applied_plans = []
+        for iid in selection:
+            try:
+                plan_file = self.scan_result.files[int(iid)]
+            except (IndexError, TypeError, ValueError):
+                continue
+            if plan_file.kind == "mpf" and plan_file.program and plan_file.original_text is not None:
+                reprocess_file(plan_file, self.info(), self.config(), tools=self.program_tools.get(plan_file.program, []))
+                applied_plans.append(plan_file)
+        self.populate_file_tables()
+        for plan_file in applied_plans:
+            row = next((str(i) for i, item in enumerate(self.scan_result.files) if item is plan_file), None)
+            if row is not None and self.keep_table.exists(row):
+                self.keep_table.selection_add(row)
+        self.status.set(f"已应用程序信息到 {len(applied_plans)} 个所选程序。")
+        self.show_selected()
 
     def add_tool_type(self):
         value = self.new_type_var.get().strip()
@@ -1419,6 +1457,8 @@ class App(ttk.Frame):
             spindle_max=spindle_max,
             newline=self.newline_var.get(),
             aux_checks={name for name, enabled in aux_flags.items() if enabled},
+            force_apply=self.force_apply.get(),
+            ask_backup=self.ask_backup_var.get(),
         )
 
     def info(self):
@@ -1519,12 +1559,33 @@ class App(ttk.Frame):
         ).grid(row=0, column=0, sticky="w", pady=(0, 10))
         detail = ttk.Frame(container)
         detail.grid(row=1, column=0, sticky="nsew")
-        detail.columnconfigure(1, weight=1)
+        canvas = tk.Canvas(detail, highlightthickness=0)
+        ybar = ttk.Scrollbar(detail, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.columnconfigure(1, weight=1)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=ybar.set)
+        ybar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        def _update_scrollregion(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _stretch_inner(event):
+            canvas.itemconfigure(inner_id, width=event.width)
+
+        def _on_wheel(event):
+            canvas.yview_scroll(-int(event.delta / 120), "units")
+            return "break"
+
+        inner.bind("<Configure>", _update_scrollregion)
+        canvas.bind("<Configure>", _stretch_inner)
+        canvas.bind("<MouseWheel>", _on_wheel)
         vars_by_source = {}
         for row, plan_file in enumerate(unresolved):
-            ttk.Label(detail, text=plan_file.source).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+            ttk.Label(inner, text=plan_file.source).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
             var = tk.StringVar()
-            ttk.Entry(detail, textvariable=var).grid(row=row, column=1, sticky="ew", pady=2)
+            ttk.Entry(inner, textvariable=var).grid(row=row, column=1, sticky="ew", pady=2)
             vars_by_source[plan_file.source] = var
         buttons = ttk.Frame(container)
         buttons.grid(row=2, column=0, sticky="e", pady=(12, 0))
@@ -1547,7 +1608,13 @@ class App(ttk.Frame):
         for table in (self.keep_table, self.keep_issue_table, self.apt_table, self.delete_table):
             for item in table.get_children():
                 table.delete(item)
-        for idx, f in enumerate(self.scan_result.files):
+        # 未命名 MPF 置顶显示，便于先行确认；iid 仍与 scan_result.files 索引一致。
+        order = sorted(
+            range(len(self.scan_result.files)),
+            key=lambda index: (not (self.scan_result.files[index].kind == "mpf" and self.scan_result.files[index].program is None), index),
+        )
+        for idx in order:
+            f = self.scan_result.files[idx]
             errors = sum(i.severity == "error" for i in f.issues)
             warnings = sum(i.severity == "warning" for i in f.issues)
             if f.kind == "mpf":
@@ -1890,6 +1957,7 @@ class App(ttk.Frame):
                 body,
                 width=5,
                 padx=6,
+                pady=0,
                 takefocus=0,
                 borderwidth=0,
                 highlightthickness=0,
@@ -1900,7 +1968,7 @@ class App(ttk.Frame):
                 wrap="none",
             )
             gutter.grid(row=0, column=0, sticky="ns")
-            pane = tk.Text(body, wrap="none", font=("Consolas", 9), state="disabled")
+            pane = tk.Text(body, wrap="none", font=("Consolas", 9), state="disabled", borderwidth=0, highlightthickness=0, padx=2, pady=0)
             pane.grid(row=0, column=1, sticky="nsew")
             ybar = ttk.Scrollbar(body, orient="vertical", command=pane.yview)
             ybar.grid(row=0, column=2, sticky="ns")
@@ -2001,6 +2069,7 @@ class App(ttk.Frame):
             body,
             width=5,
             padx=6,
+            pady=0,
             takefocus=0,
             borderwidth=0,
             highlightthickness=0,
@@ -2011,7 +2080,7 @@ class App(ttk.Frame):
             wrap="none",
         )
         gutter.grid(row=0, column=0, sticky="ns")
-        text = tk.Text(body, wrap="none", font=("Consolas", 10), undo=True)
+        text = tk.Text(body, wrap="none", font=("Consolas", 10), undo=True, borderwidth=0, highlightthickness=0, padx=2, pady=0)
         text.grid(row=0, column=1, sticky="nsew")
         ybar = ttk.Scrollbar(body, orient="vertical", command=text.yview)
         ybar.grid(row=0, column=2, sticky="ns")
@@ -2104,7 +2173,7 @@ class App(ttk.Frame):
             detail_lines.extend(deletes)
         if not self.confirm_processing(summary, detail_lines):
             return
-        backup = self._backup_requested()
+        backup = self._backup_requested() if self.config().ask_backup else False
         self.process_button.configure(state="disabled")
         self.status.set("正在处理当前目录……")
         self._processing = True
