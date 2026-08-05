@@ -1185,7 +1185,12 @@ def reprocess_file(f: FilePlan, info: ProgramInfo, config: Config, *, tools: Seq
     if f.kind != "mpf" or not f.program or f.original_text is None:
         return
     effective = program_defaults(f.original_text, info)
-    effective.tools = list(tools or ())
+    if tools:
+        effective.tools = list(tools)
+    elif f.parsed_tools:
+        effective.tools = list(f.parsed_tools)
+    else:
+        effective.tools = extract_tools(f.original_text)
     f.output_text, f.changes, header_issues = apply_header(f.original_text, f.program, effective, config, replace_tools=True, filename=f.source)
     f.output_text, tool_changed, tool_note = add_initial_tool_change(f.output_text, effective.tools, config)
     if tool_changed:
@@ -1282,6 +1287,8 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                 f.output_text, f.changes = new, changes
                 f.stats, validation_issues = analyze_program(new, f.source, f.program, info, config)
                 f.target = str(directory / (f.program + config.program_output_extension))
+                # 缓存本次生效的刀具信息，供 reprocess_file/应用所选回退，避免刷掉刀具。
+                f.parsed_tools = list(effective_info.tools)
                 f.issues.extend(header_issues)
                 f.issues.extend(validation_issues)
                 if Path(f.source).name != Path(f.target).name:

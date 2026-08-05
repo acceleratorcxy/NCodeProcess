@@ -1548,7 +1548,7 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_apply_selected_with_force_updates_preview_without_writing(self):
+    def test_apply_selected_writes_selected_files_and_rescans(self):
         root, app = self._build_app(1286, 668)
         try:
             plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
@@ -1558,11 +1558,30 @@ class ScanLifecycleTests(unittest.TestCase):
             app.keep_table.selection_set("0")
             app.info_vars["drawing"].set("NEWDRAW")
             app.info_vars["version"].set("V9")
-            app.force_apply.set(True)
-            with patch.object(app, "scan") as scan_mock:
+            with patch.object(app, "scan") as scan_mock, \
+                 patch("ncodeprocess.gui._atomic_write") as atomic_write, \
+                 patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")):
                 app.apply_selected()
-            scan_mock.assert_not_called()
-            self.assertIn("NEWDRAW", plan.output_text or "")
+            atomic_write.assert_called_once()
+            scan_mock.assert_called_once()
+        finally:
+            root.destroy()
+
+    def test_apply_selected_keeps_existing_tool_rows(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nMSG("T1:DIA=10.000,TOOL_TYPE=圆鼻立铣刀")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.info_vars["drawing"].set("NEWDRAW")
+            app.info_vars["version"].set("V9")
+            with patch.object(app, "scan"), \
+                 patch("ncodeprocess.gui._atomic_write"), \
+                 patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")):
+                app.apply_selected()
+            self.assertIn('MSG("T1:DIA=10.000,TOOL_TYPE=圆鼻立铣刀")', plan.output_text or "")
         finally:
             root.destroy()
 

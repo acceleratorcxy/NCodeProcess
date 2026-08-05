@@ -129,6 +129,14 @@ class CoreTests(unittest.TestCase):
         self.assertIn("M03", f.output_text)
         self.assertFalse(any(i.kind == "spindle-start" for i in f.issues))
 
+    def test_reprocess_file_keeps_existing_tool_rows_when_none_supplied(self):
+        # 应用所选/重审时若不提供刀具，应保留 MPF 已有 Tn 或 APT 解析结果，不得刷空。
+        text = 'MSG("PROGRAM:P")\nMSG("T1:DIA=10.000,TOOL_TYPE=圆鼻立铣刀")\nN1G1X10F1000S5000M03\nM30\n'
+        plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+        plan.original_text = text
+        reprocess_file(plan, DEFAULT_INFO, self._cfg(), tools=[])
+        self.assertIn('MSG("T1:DIA=10.000,TOOL_TYPE=圆鼻立铣刀")', plan.output_text or "")
+
     def test_align_lines_tags_changed_and_equal_rows(self):
         rows = align_lines("A\nB\nC\nD", "A\nB\nX\nD")
         self.assertEqual(
