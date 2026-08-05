@@ -1615,6 +1615,41 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_apply_selected_preview_shows_new_value_even_without_overwrite(self):
+        # 程序已有旧图号，未勾选覆盖时预览也应展示表单新值（覆盖效果），文件不写。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nMSG("DRAWING NUMBER:OLD")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.info_vars["drawing"].set("NEWDRAW")
+            app.info_vars["version"].set("V9")
+            app.overwrite_fields.set(False)
+            with patch.object(app, "scan"), patch("ncodeprocess.gui._atomic_write") as atomic_write:
+                app.apply_selected()
+            atomic_write.assert_not_called()
+            values = [app.info_table.item(item, "values") for item in app.info_table.get_children()]
+            self.assertTrue(
+                any(str(value[0]) == "处理后/DRAWING NUMBER" and str(value[1]) == "NEWDRAW" for value in values),
+                f"预览未显示新图号: {values}",
+            )
+        finally:
+            root.destroy()
+
+    def test_apply_info_scans_with_overwrite_preview(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.info_vars["drawing"].set("NEWDRAW")
+            app.info_vars["version"].set("V9")
+            with patch.object(app, "scan") as scan_mock:
+                app.apply_info()
+            kwargs = scan_mock.call_args.kwargs
+            self.assertEqual(kwargs.get("overwrite_fields"), True)
+        finally:
+            root.destroy()
+
     def test_finish_scan_restores_selection_and_refreshes_preview(self):
         root, app = self._build_app(1286, 668)
         try:

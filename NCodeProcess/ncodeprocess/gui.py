@@ -1373,7 +1373,7 @@ class App(ttk.Frame):
         self.applied_info = ProgramInfo(v["bianzhi"].get().strip(), v["shenhe"].get().strip(), v["drawing"].get().strip(), v["version"].get().strip(), "", "SIE840D", v["date"].get().strip())
         self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
         self.status.set("程序信息已应用，正在刷新预览……")
-        self.scan()
+        self.scan(overwrite_fields=True)
 
     def _show_overwrite_help(self):
         messagebox.showinfo(
@@ -1397,6 +1397,8 @@ class App(ttk.Frame):
             return
         self.applied_info = ProgramInfo(v["bianzhi"].get().strip(), v["shenhe"].get().strip(), v["drawing"].get().strip(), v["version"].get().strip(), "", "SIE840D", v["date"].get().strip())
         self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
+        preview_config = self.config()
+        preview_config.overwrite_fields = True   # 预览始终按表单新值覆盖可编辑字段，展示修改效果
         applied_plans = []
         for iid in selection:
             try:
@@ -1404,7 +1406,7 @@ class App(ttk.Frame):
             except (IndexError, TypeError, ValueError):
                 continue
             if plan_file.kind == "mpf" and plan_file.program and plan_file.original_text is not None:
-                reprocess_file(plan_file, self.info(), self.config(), tools=self.program_tools.get(plan_file.program, []))
+                reprocess_file(plan_file, self.info(), preview_config, tools=self.program_tools.get(plan_file.program, []))
                 applied_plans.append(plan_file)
         if not applied_plans:
             return
@@ -1421,7 +1423,7 @@ class App(ttk.Frame):
             self.status.set(f"已应用并写入 {len(applied_plans)} 个文件，正在重新扫描……")
             self.scan()
         else:
-            self.status.set(f"已生成 {len(applied_plans)} 个程序的预览（未勾选“覆盖已有非空 MSG 字段”，未写入文件）。")
+            self.status.set(f"已生成 {len(applied_plans)} 个程序的预览（显示表单新值；未勾选“覆盖已有非空 MSG 字段”，未写入文件）。")
         # 立即用内存预览刷新表格与右侧信息（含新的头部/刀具），再后台扫描确认。
         self.populate_file_tables()
         for plan_file in applied_plans:
@@ -1495,7 +1497,7 @@ class App(ttk.Frame):
     def info(self):
         return ProgramInfo(self.applied_info.bianzhi, self.applied_info.shenhe, self.applied_info.drawing_number, self.applied_info.part_version, "", "SIE840D", self.applied_info.date)
 
-    def scan(self):
+    def scan(self, *, overwrite_fields=None):
         self.process_button.configure(state="disabled")
         self.all_stats_button.configure(state="disabled")
         if self.all_stats_window is not None and self.all_stats_window.winfo_exists():
@@ -1505,6 +1507,9 @@ class App(ttk.Frame):
         self._scan_generation += 1
         generation = self._scan_generation
         config = self.config()
+        if overwrite_fields is not None:
+            # 预览模式：始终按表单值覆盖可编辑字段生成预览（显示修改效果）。
+            config.overwrite_fields = overwrite_fields
         info = self.info()
         def work():
             result = build_plan(scan_directory(str(self.workdir), config), info, config, self.program_tools)
