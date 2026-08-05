@@ -400,6 +400,17 @@ class CoreTests(unittest.TestCase):
             "ncodeprocess-report-20260101_000004.json",
         ])
 
+    def test_process_plan_reports_progress(self):
+        root = self.make_dir()
+        (root / "A.MPF").write_text("%\nN1G1X0Y0Z0F1000S5000\nM30\n", encoding="utf-8")
+        config = self._cfg(require_end_marker=False)
+        scan = build_plan(scan_directory(str(root), config), DEFAULT_INFO, config)
+        progress = []
+        process_plan(scan, str(root), config, progress_callback=lambda done, total, name: progress.append((done, total, name)))
+        self.assertEqual(progress[-1][0], progress[-1][1])
+        self.assertEqual(progress[-1][2], "A.MPF")
+        self.assertEqual([done for done, _total, _name in progress], list(range(1, len(progress) + 1)))
+
     def test_apt_drawing_candidates_from_filename_and_productname(self):
         text = (
             "$$ FILENAME  D0354F31311-201.CATProcess\n"

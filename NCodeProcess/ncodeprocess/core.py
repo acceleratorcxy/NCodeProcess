@@ -1292,7 +1292,7 @@ def _atomic_write(path: Path, text: str, encoding: str):
             tmp_path.unlink()
 
 
-def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Optional[Config] = None, *, confirm_cleanup: bool = True) -> ProcessReport:
+def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Optional[Config] = None, *, confirm_cleanup: bool = True, progress_callback=None) -> ProcessReport:
     config = config or Config()
     src_dir = Path(scan.input_dir).resolve()
     dst_dir = Path(output_dir or scan.input_dir).resolve()
@@ -1301,7 +1301,10 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
     dst_dir.mkdir(parents=True, exist_ok=True)
     successful_targets = set()
     ordered_files = sorted(scan.files, key=lambda item: item.action == "duplicate")
-    for f in ordered_files:
+    total = len(ordered_files)
+    for index, f in enumerate(ordered_files, start=1):
+        if progress_callback is not None:
+            progress_callback(index, total, f.source)
         if f.stats is None and f.output_text is not None:
             f.stats = calculate_stats(f.output_text)
         diff = []

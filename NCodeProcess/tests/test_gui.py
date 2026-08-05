@@ -1396,6 +1396,18 @@ class ScanLifecycleTests(LayoutWidgetTests):
         app._safe_after(0, lambda: None)   # 不应抛 tk.TclError
         app._safe_after(50, lambda: None)
 
+    def test_finish_process_clears_progress_state(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app._processing = True
+            app._process_progress = (1, 2, "A.MPF")
+            with patch("ncodeprocess.gui.messagebox.showinfo"):
+                app.finish_process(ProcessReport("in", "out", "start"))
+            self.assertFalse(app._processing)
+            self.assertIsNone(app._process_progress)
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

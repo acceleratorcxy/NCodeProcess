@@ -328,6 +328,9 @@ class App(ttk.Frame):
         self.legacy_special_tools_path = self.workdir / "NCPostProcessData" / "special_tools.json"
         self.scan_result = None
         self._scan_generation = 0
+        self._processing = False
+        self._process_progress = None
+        self._process_progress_lock = threading.Lock()
         self.report = None
         self.info_vars = {}
         self.info_defaults = {key: "" for key in ("bianzhi", "shenhe", "drawing", "version", "date")}
@@ -1978,10 +1981,24 @@ class App(ttk.Frame):
             return
         self.process_button.configure(state="disabled")
         self.status.set("正在处理当前目录……")
+        self._processing = True
+        self._safe_after(100, self._poll_process_progress)
         def work():
-            report = process_plan(self.scan_result, str(self.workdir), self.config(), confirm_cleanup=True)
-            self._safe_after(0, lambda: self.finish_process(report))
+            def report(done, total, name):
+                with self._process_progress_lock:
+                    self._process_progress = (done, total, name)
+            result = process_plan(self.scan_result, str(self.workdir), self.config(), confirm_cleanup=True, progress_callback=report)
+            self._safe_after(0, lambda: self.finish_process(result))
         threading.Thread(target=work, daemon=True).start()
+
+    def _poll_process_progress(self):
+        with self._process_progress_lock:
+            progress = self._process_progress
+        if progress is not None:
+            done, total, name = progress
+            self.status.set(f"正在处理当前目录……（{done}/{total}）{name}")
+        if self._process_progress is not None or self._processing:
+            self._safe_after(100, self._poll_process_progress)
 
     def confirm_processing(self, summary, detail_lines):
         """Confirm processing without allowing long details to hide buttons."""
@@ -2021,6 +2038,9 @@ class App(ttk.Frame):
 
     def finish_process(self, report):
         self.report = report
+        self._processing = False
+        with self._process_progress_lock:
+            self._process_progress = None
         self.status.set(f"处理完成：成功 {report.success}，失败 {report.failed}，移动 {report.moved}，删除 {report.deleted}。")
         self.export_button.configure(state="normal")
         messagebox.showinfo("处理完成", self.status.get() + "\n报告未自动生成；如有需要，请点击“导出报告”。", parent=self.master)
