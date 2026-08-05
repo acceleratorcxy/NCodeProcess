@@ -412,6 +412,14 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 **测试基线**：208 项 → 新增 2 项（reprocess 保留刀具、应用所选写入并重扫）→ **210 项**，全量通过。
 
+### 2.27 强制应用覆盖逻辑修复（2026-08-05）
+
+用户测试发现严重逻辑问题：勾选「强制应用」后点「应用所选」，文件未被更改、预览无变化。根因：`apply_header` 覆盖条件为 `not value.strip() or config.overwrite_fields`，`force_apply` 只解除了受保护字段（PROGRAM/NC MACHINE/CONTROL SYSTEM/DATE）的保护，**普通字段仍被「覆盖已有非空 MSG 字段」未勾选时挡住**，导致 output_text 未变 → 预览不变、写入无变化（提交 `50d7ebe`）。
+
+修复：覆盖条件纳入 `config.force_apply` —— 勾选强制应用后所有字段无条件按表单新值覆盖（`config.force_apply or not value.strip() or config.overwrite_fields`），无需另勾选「覆盖已有非空 MSG 字段」。
+
+**测试基线**：210 项 → 新增 1 项（强制应用未勾选覆盖标志时也覆盖可编辑字段）→ **211 项**，全量通过。
+
 ---
 
 ## 三、后续建议（可选）
