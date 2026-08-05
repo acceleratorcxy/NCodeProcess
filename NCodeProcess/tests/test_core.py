@@ -209,6 +209,51 @@ class CoreTests(unittest.TestCase):
         tools = extract_tools(text)
         self.assertEqual(tools[0].tool_type, "")
 
+    def test_sample_apt_round_nose_ball_and_flat_mills_are_ordinary(self):
+        # 样例刀具说明：圆鼻/球头/平底立铣刀（D20R3/D10R5/D10R0）→ 普通立铣刀。
+        # 使用样例真实格式：CUTTER 5 参 + TOOLNO 第 3 参圆角 + 第 5 参 120。
+        cases = (
+            ("CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\nTOOLNO/1,   20.000000,    3.000000,,  120.000000,$\n", "20.000", "3.000"),
+            ("CUTTER/ 10.000000,  5.000000,  0.000000,  5.000000,  0.000000,$\nTOOLNO/6,   10.000000,    5.000000,,  120.000000,$\n", "10.000", "5.000"),
+            ("CUTTER/ 10.000000,  0.000000,  5.000000,  0.000000,  0.000000,$\nTOOLNO/14,   10.000000,    0.000000,,  120.000000,$\n", "10.000", "0.000"),
+        )
+        for text, dia, coner in cases:
+            with self.subTest(text=text.splitlines()[0]):
+                tool = extract_tools(text)[0]
+                self.assertEqual(tool.dia, dia)
+                self.assertEqual(tool.tool_coner, coner)
+                self.assertEqual(tool.tool_type, "普通立铣刀")
+                self.assertEqual(tool.tool_angle, "")
+
+    def test_sample_apt_reverse_taper_mill_with_angle(self):
+        # 样例 D12R3A2 反锥立铣刀：CUTTER 直径 12、TOOLNO 名义直径 10.467、包含角 -4。
+        text = ("CUTTER/ 12.000000,  3.000000,  3.000000,  3.000000,  0.000000,$\n"
+                "TOOLNO/4,   10.467000,    3.000000,   -4.000000,  120.000000,$\n")
+        tool = extract_tools(text)[0]
+        self.assertEqual(tool.dia, "12.000")
+        self.assertEqual(tool.tool_coner, "3.000")
+        self.assertEqual(tool.tool_type, "反锥立铣刀")
+        self.assertEqual(tool.tool_angle, "-2.000")
+
+    def test_sample_apt_drill_and_center_drill_with_continuation(self):
+        # 样例钻头（D5.2）与中心钻（D2.5）：TOOLNO 第 4 参为 118/120（>100 触发钻类），
+        # 续行第 2 参为钻尖高度、第 4 参为刀具类型码；两者皆空时为中心钻。
+        drill = ("CUTTER/  5.200000,  0.000000,  2.600000,  1.501111, 30.000000,$\n"
+                 "TOOLNO/9,    5.200000,,  120.000000,  120.000000,$\n"
+                 "45.000000,    1.501000,   35.000000,2,    0.000000,NOTE\n")
+        tool = extract_tools(drill)[0]
+        self.assertEqual(tool.tool_type, "钻头")
+        self.assertEqual(tool.tool_angle, "")
+        self.assertEqual(tool.dia, "5.200")
+
+        center = ("CUTTER/  2.500000,  0.000000,  1.250000,  0.751076, 31.000000,$\n"
+                  "TOOLNO/13,    2.500000,,  118.000000,  120.000000,$\n"
+                  "5.000000,,   11.000000,,    0.000000,NOTE\n")
+        tool = extract_tools(center)[0]
+        self.assertEqual(tool.tool_type, "中心钻")
+        self.assertEqual(tool.tool_angle, "")
+        self.assertEqual(tool.dia, "2.500")
+
     def test_code_part_strips_parenthesised_comment(self):
         self.assertEqual(code_part("N1G1X10 (comment)"), "N1G1X10 ")
         self.assertEqual(code_part("N1G1X10"), "N1G1X10")
