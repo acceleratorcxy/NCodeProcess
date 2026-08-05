@@ -1,2 +1,4 @@
 pyinstaller==5.13.2
 tinyaes==1.1.2
+# 可选：UPX 3.96（构建期 EXE 压缩）。将 upx.exe 置于 tools\upx\ 下，
+# build_portable.ps1 会自动将其加入 PATH 供 PyInstaller 使用；缺失时跳过压缩。

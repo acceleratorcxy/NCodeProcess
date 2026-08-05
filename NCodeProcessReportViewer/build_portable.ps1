@@ -36,11 +36,16 @@ try {
     New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
     $spec = Join-Path $root 'NCodeProcessReportViewer.spec'
-    $pyInstallerArgs = @(
-        '-OO', '-m', 'PyInstaller', '--noconfirm', '--clean',
-        '--distpath', $dist, '--workpath', $workPath, $spec
-    )
-    conda run -n $CondaEnvironment python @pyInstallerArgs
+      $pyInstallerArgs = @(
+          '-OO', '-m', 'PyInstaller', '--noconfirm', '--clean',
+          '--distpath', $dist, '--workpath', $workPath, $spec
+      )
+      # WP-S3: optional UPX support - add tools\upx to PATH when present so PyInstaller compresses.
+      $upxDir = Join-Path $root 'tools\upx'
+      if (Test-Path (Join-Path $upxDir 'upx.exe')) {
+          $env:PATH = "$upxDir;$env:PATH"
+      }
+      conda run -n $CondaEnvironment python @pyInstallerArgs
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 
     $exe = Join-Path $dist 'NCodeProcessReportViewer.exe'

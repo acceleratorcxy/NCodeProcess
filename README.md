@@ -41,6 +41,8 @@ python -m unittest discover -s tests -v
 powershell -ExecutionPolicy Bypass -File .\build_portable.ps1
 ```
 
+> 构建说明：发布构建使用 `-OO` 优化、随机 PYZ 加密密钥与随机 hash seed，因此同一源码每次打包的产物**不可逐字节复现**（属防破解/防提取的有意设计）；完整性校验以发布包内 `SHA256SUMS.txt` 为准，不要用「与历史 EXE 字节一致」判断构建是否成功。
+
 ## 文档
 
 两项目均在各自 `docs/` 下维护文档（需求、用户手册、发布说明、审查与待办、操作记录、测试指南、发布安全说明），入口见各项目 README「项目文档」章节。
