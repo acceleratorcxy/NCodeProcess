@@ -11,7 +11,7 @@
 **关联文档：**
 - 需求基线：`NCodeProcess-需求文档.md`（V1.1，第 13 节待确认事项、FR-07.2/07.3、第 15 节实施状态）
 - 待办来源：`NCodeProcess-审查与待办.md`、`NCodeProcessReportViewer-审查与待办.md`
-- 测试基线：`NCodeProcess-测试指南.md`（229 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
+- 测试基线：`NCodeProcess-测试指南.md`（235 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
 - 前置工作：Batch 1 / Batch 2 计划（已完成，见 `docs/archive/superpowers/plans/`）
 
 ---
@@ -21,7 +21,7 @@
 | 编号 | 决策 | 选项 | 影响 | 建议 |
 |---|---|---|---|---|
 | D1 | M03「紧贴 S 数值之后」的确切口径（需求文档第 13 节唯一 ⏳） | A：维持现状（`after-s`=块尾插入 `...S2000F1000M03`），同步修改需求文档 FR-05.4 文字描述；B：改为真正紧贴 S 值（`...S2000M03F1000`），修改 `add_m03` 与相关测试 | WP-03 | ✅ **已确认（2026-08-05）：方案 A，维持现状**；WP-03 仅修订需求文档 FR-05.4 与审查待办文字口径，不改 `add_m03` 代码 |
-| D2 | Batch 2 配置（必填字段/M03 位置/F·S 上下限/辅助顺序/换行）是否持久化 | A：维持「仅本次运行生效」（与需求第 8 节一致）；B：扩展 `REGISTRY_DEFAULTS` + preferences 测试 + GUI 默认值 | WP-11 | 维持 A，除非车间明确要求重启后保留 |
+| D2 | Batch 2 配置（必填字段/M03 位置/F·S 上下限/辅助顺序/换行）是否持久化 | A：维持「仅本次运行生效」（与需求第 8 节一致）；B：扩展 `REGISTRY_DEFAULTS` + preferences 测试 + GUI 默认值 | WP-11 | ✅ **已确认（2026-08-05）：选 B 并扩展**——用户要求全部设置持久化，保存位置可选（注册表默认/AppData/用户主目录）、切换清空残留、支持导出 |
 | D3 | 机床行程 X/Y/Z 检查（FR-07.3） | 维持暂不实施 / 恢复规划 | 无（若恢复则新增 WP） | 维持暂不实施 |
 | D4 | 计划文档的跟踪方式 | 本计划入库（`docs/superpowers/plans/` 未被 .gitignore 忽略），完成后归档至 `docs/archive/superpowers/plans/`（git 移除跟踪） | WP-17 | 按项目历史惯例：活动计划入库、完成归档 |
 
@@ -588,6 +588,8 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 - 若 D2 选 B：`REGISTRY_DEFAULTS` 扩展 6 组 Batch 2 键；`load_all`/`save_all`/`clear_all` 自动覆盖；`App.__init__` 与 `_apply_settings_defaults` 从加载值初始化；更新 `tests/test_preferences.py` 与 `tests/test_gui.py` 默认值断言。
 - 若 D2 选 A：关闭本 WP，在文档记录决策。
 
+> ✅ **已完成（2026-08-05）**：D2 确认选 B 并扩展。`REGISTRY_DEFAULTS` 扩展 Batch 2 + WP-10 全部键（必填字段 4、M03 位置、F/S 上下限 4、换行、辅助顺序 4、F 离群 IQR/低值/高值比例、多 S 警告）与 `storage_backend`；保存位置支持注册表（默认）/AppData/用户主目录，`save_all(backend=...)` 显式切换时清空其他两处残留；`load_all` 按 `storage_backend` 键定位读取，无显式选择时保持注册表优先、降级文件；设置对话框新增「配置保存位置」下拉与「导出设置…」（选择路径导出 JSON）；GUI 全部相关变量从存储初始化。测试 +6 项（preferences 后端选择 3 + GUI 3），基线 229 → 235，全量通过。
+
 ### WP-12: 细节清理（MSG 缩进/单实例/杀软）
 
 - `apply_header` 替换 MSG 行时保留原行缩进（FR-4.2.5）。
@@ -631,7 +633,7 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 2. **Python 3.8 兼容**：代码与测试避免 3.9+ 语法；测试必须用 conda Python 3.8 环境运行。
 3. **提交规范**：小步提交，提交信息含 `feat/fix/refactor/docs` 前缀与中文说明；不提交构建产物（`build/`、`dist/`、`Publish/`）、样例目录、`NCodeProcessData/`。
 4. **隐私审核**：提交前检查本机路径/用户名/邮箱/代理地址，一律通用化（占位符）。
-5. **测试基线**：主工具 229 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
+5. **测试基线**：主工具 235 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
 6. **文档同步**：见 WP-17，任何变更不得遗漏受影响文档。
 7. **执行确认**：每个 WP/Task 启动前须经用户确认（见「〇、决策点」的执行确认流程），不得擅自连续执行多个工作包。**提交顺序（2026-08-05 用户要求）**：改动完成并全量回归通过后先打包 EXE 供用户测试；用户确认后再统一提交 git（可一次或分批提交），未获确认不得提交。
 
