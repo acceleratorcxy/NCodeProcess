@@ -1113,7 +1113,7 @@ class App(ttk.Frame):
 
         # ── 基本设置：编码 / 扩展名 / 允许字符 / APTSOURCE ──
         encoding_combo = ttk.Combobox(basic, textvariable=self.encoding_var, state="readonly", width=16,
-                                      values=("auto", "utf-8", "utf-8-sig", "gb18030", "cp1252"))
+                                      values=("auto", "utf-8", "utf-8-sig", "gb18030", "gbk", "gb2312", "cp1252"))
         labeled(basic, 0, "文件编码", encoding_combo)
         ttk.Label(basic, text="自动识别或强制指定").grid(row=0, column=2, sticky="w", padx=(6, 0))
 
@@ -1536,6 +1536,7 @@ class App(ttk.Frame):
         self.info_table.insert("", "end", values=("源文件", f.source))
         self.info_table.insert("", "end", values=("规范程序名", f.program or ""))
         self.info_table.insert("", "end", values=("目标文件", f.target or ""))
+        self.info_table.insert("", "end", values=("文件编码", f.encoding or ""))
         existing_fields = extract_header_fields(f.original_text or "")
         header_mapping = {
             "bianzhi": "BIANZHI",

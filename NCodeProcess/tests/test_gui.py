@@ -1405,6 +1405,12 @@ class ScanLifecycleTests(unittest.TestCase):
         root.update_idletasks()
         return root, app
 
+    @staticmethod
+    def _descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from ScanLifecycleTests._descendants(child)
+
     def test_finish_scan_ignores_stale_generation(self):
         root, app = self._build_app(1286, 668)
         try:
@@ -1485,6 +1491,35 @@ class ScanLifecycleTests(unittest.TestCase):
             with patch("ncodeprocess.gui.messagebox.askyesno", return_value=True) as ask:
                 self.assertTrue(app._backup_requested())
             ask.assert_called_once()
+        finally:
+            root.destroy()
+
+    def test_parsed_info_shows_encoding(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "P", "target", "keep")
+            plan.original_text = "%\nM30\n"
+            plan.output_text = plan.original_text
+            plan.encoding = "gbk"
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            values = [app.info_table.item(item, "values")[1] for item in app.info_table.get_children()]
+            self.assertIn("gbk", values)
+        finally:
+            root.destroy()
+
+    def test_encoding_combo_includes_gbk_and_gb2312(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            combo_values = set()
+            for widget in self._descendants(app.settings_window):
+                if widget.winfo_class() == "TCombobox":
+                    combo_values.update(widget.cget("values"))
+            self.assertIn("gbk", combo_values)
+            self.assertIn("gb2312", combo_values)
         finally:
             root.destroy()
 

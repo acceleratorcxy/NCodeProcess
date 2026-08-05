@@ -207,6 +207,7 @@ class FilePlan:
     # Cached source metadata used to avoid rereading/reparsing APT files.
     parsed_tools: List[ToolInfo] = field(default_factory=list)
     modified_time: float = 0.0
+    encoding: str = ""
     overwrite_target: bool = False
     duplicate_winner: str = ""
     duplicate_target: str = ""
@@ -278,11 +279,16 @@ def save_timestamped_report(report: ProcessReport, directory: Path, keep: int = 
 
 
 def _decode(data: bytes, forced: str = "auto") -> Tuple[str, str]:
+    if b"\x00" in data:
+        raise UnicodeDecodeError(
+            "unknown", data, 0, len(data),
+            "数据包含 NUL 字节，疑似二进制或 UTF-16 文件，无法按文本解码",
+        )
     if forced and forced.lower() != "auto":
         return data.decode(forced), forced
     if data.startswith(b"\xef\xbb\xbf"):
         return data.decode("utf-8-sig"), "utf-8-sig"
-    for enc in ("utf-8", "gb18030", "cp1252"):
+    for enc in ("utf-8", "gb2312", "gbk", "gb18030", "cp1252"):
         try:
             return data.decode(enc), enc
         except UnicodeDecodeError:
@@ -321,17 +327,17 @@ def _read_text_cached(path: Path, encoding: str = "auto") -> Tuple[str, str, str
     return result
 
 
-def _read_prefix(path: Path, encoding: str = "auto", limit: int = 131072) -> str:
+def _read_prefix(path: Path, encoding: str = "auto", limit: int = 131072) -> Tuple[str, str]:
     """Read only a small file prefix for metadata that is defined in headers."""
     with path.open("rb") as stream:
         data = stream.read(limit)
     try:
-        return _decode(data, encoding)[0]
+        return _decode(data, encoding)
     except UnicodeDecodeError:
         # A prefix can end in the middle of a multibyte character.  Header
         # records are ASCII, so ignoring that incomplete trailing character is
         # safe and avoids loading a multi-megabyte APT source unnecessarily.
-        return data.decode("utf-8", errors="ignore")
+        return data.decode("utf-8", errors="ignore"), ""
 
 
 def _extract_apt_tools_from_path(path: Path, encoding: str = "auto") -> List[ToolInfo]:
@@ -469,10 +475,11 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
         rel = str(path.relative_to(directory))
         if ext in config.program_extensions:
             try:
-                text, _, _ = _read_text_cached(path, config.encoding)
+                text, used_encoding, _ = _read_text_cached(path, config.encoding)
                 program = extract_program_name(path, text, config.allowed_name_pattern)
                 plan = FilePlan(rel, "mpf", program, str(directory / (program + config.program_output_extension)) if program else None, "keep")
                 plan.original_text = text
+                plan.encoding = used_encoding
                 plan.modified_time = path.stat().st_mtime
                 drawing = extract_header_fields(text).get("DRAWING NUMBER", "").strip()
                 drawing_label = "MPF提取"
@@ -488,8 +495,10 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
         elif ext == ".aptsource":
             program = extract_program_name(path, None, config.allowed_name_pattern)
             apt_prefix = ""
+            plan = FilePlan(rel, "aptsource", program, None, "move", original_text=None, parsed_tools=[], modified_time=path.stat().st_mtime)
             try:
-                apt_prefix = _read_prefix(path, config.encoding)
+                apt_prefix, apt_encoding = _read_prefix(path, config.encoding)
+                plan.encoding = apt_encoding
                 for label, value in extract_drawing_candidates(apt_prefix):
                     source_label = "APT提取"
                     if (source_label, value) not in drawing_seen:
@@ -500,7 +509,7 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
             # Full APT parsing is deferred to build_plan, which selects only
             # the newest source for each program.  This keeps repeated scans
             # fast when the archive contains many historical APT files.
-            files.append(FilePlan(rel, "aptsource", program, None, "move", original_text=None, parsed_tools=[], modified_time=path.stat().st_mtime))
+            files.append(plan)
         elif ext in config.delete_extensions:
             files.append(FilePlan(rel, "intermediate", None, None, "delete"))
         else:
@@ -1326,7 +1335,7 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
         diff = []
         if f.original_text is not None and f.output_text is not None and f.original_text != f.output_text:
             diff = list(difflib.unified_diff(f.original_text.splitlines(), f.output_text.splitlines(), fromfile=f.source + " (before)", tofile=(Path(f.target).name if f.target else f.source) + " (after)", lineterm=""))
-        item = {"file": f.source, "action": f.action, "program": f.program, "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None}
+        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None}
         errors = [x for x in f.issues if x.severity == "error"]
         report.warnings += sum(x.severity == "warning" for x in f.issues)
         report.errors += len(errors)

@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ToolInfo, add_m03, align_lines, apply_header, build_plan, calculate_stats, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ToolInfo, _decode, add_m03, align_lines, apply_header, build_plan, calculate_stats, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
@@ -443,6 +443,48 @@ class CoreTests(unittest.TestCase):
         with patch("ncodeprocess.core.os.access", return_value=False):
             scan = scan_directory(str(root), self._cfg(require_end_marker=False))
         self.assertTrue(any("只读" in warning for warning in scan.warnings))
+
+    def test_decode_identifies_gb2312_gbk_and_gb18030(self):
+        # GB2312 只含常用汉字；GBK 覆盖更多汉字；GB18030 支持 4 字节扩展区。
+        self.assertEqual(_decode("你好".encode("gb2312"))[1], "gb2312")
+        self.assertEqual(_decode("镕".encode("gbk"))[1], "gbk")
+        self.assertEqual(_decode("\U00020000".encode("gb18030"))[1], "gb18030")
+        # é 后接空格不构成合法 GBK/GB2312 双字节，应回退到 cp1252
+        self.assertEqual(_decode("é ".encode("cp1252"))[1], "cp1252")
+
+    def test_decode_rejects_nul_bytes(self):
+        with self.assertRaises(UnicodeDecodeError):
+            _decode(b"%\x00N1G1X0Y0\nM30\n")
+
+    def test_forced_gbk_and_gb2312_decode(self):
+        text, used = _decode("你好".encode("gb2312"), forced="gbk")
+        self.assertEqual(text, "你好")
+        self.assertEqual(used, "gbk")
+        text, used = _decode("你好".encode("gb2312"), forced="gb2312")
+        self.assertEqual(text, "你好")
+        self.assertEqual(used, "gb2312")
+
+    def test_scan_records_detected_encoding(self):
+        root = self.make_dir()
+        (root / "A.MPF").write_bytes('MSG("PROGRAM:A")\n镕\nM30\n'.encode("gbk"))
+        scan = scan_directory(str(root), self._cfg())
+        plan = self._mpf(scan)
+        self.assertEqual(plan.encoding, "gbk")
+
+    def test_scan_marks_nul_mpf_as_encoding_error(self):
+        root = self.make_dir()
+        (root / "A.MPF").write_bytes(b"%\x00N1G1X0\nM30\n")
+        scan = scan_directory(str(root), self._cfg())
+        plan = self._mpf(scan)
+        self.assertTrue(any(issue.kind == "encoding" for issue in plan.issues))
+
+    def test_report_records_file_encoding(self):
+        root = self.make_dir()
+        (root / "A.MPF").write_text("%\nN1G1X0Y0Z0F1000S5000M03\nM30\n", encoding="utf-8")
+        config = self._cfg(require_end_marker=False)
+        scan = build_plan(scan_directory(str(root), config), DEFAULT_INFO, config)
+        report = process_plan(scan, str(root), config)
+        self.assertEqual(report.files[0].get("encoding"), "utf-8")
 
     def test_apt_drawing_candidates_from_filename_and_productname(self):
         text = (
