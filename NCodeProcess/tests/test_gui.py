@@ -1390,6 +1390,12 @@ class ScanLifecycleTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
+    def test_safe_after_does_not_raise_after_destroy(self):
+        root, app = self._build_app(1286, 668)
+        root.destroy()
+        app._safe_after(0, lambda: None)   # 不应抛 tk.TclError
+        app._safe_after(50, lambda: None)
+
 
 if __name__ == "__main__":
     unittest.main()

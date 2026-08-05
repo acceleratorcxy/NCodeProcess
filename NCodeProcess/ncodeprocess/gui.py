@@ -407,6 +407,13 @@ class App(ttk.Frame):
         self.validation_column_width = profile.validation_width
         self.ui_font_family = actual_family
 
+    def _safe_after(self, ms, callback):
+        """线程回调安全出口：窗口销毁后 Tk 的 after 会抛 TclError，统一吞掉。"""
+        try:
+            return self.after(ms, callback)
+        except tk.TclError:
+            return None
+
     def _schedule_startup_callback(self, delay, callback):
         """Schedule a startup callback that can be cancelled with this App."""
         after_id = None
@@ -1384,10 +1391,7 @@ class App(ttk.Frame):
         info = self.info()
         def work():
             result = build_plan(scan_directory(str(self.workdir), config), info, config, self.program_tools)
-            try:
-                self.after(0, lambda: self.finish_scan(result, generation))
-            except tk.TclError:
-                pass
+            self._safe_after(0, lambda: self.finish_scan(result, generation))
         threading.Thread(target=work, daemon=True).start()
 
     def finish_scan(self, result, generation=None):
@@ -1976,7 +1980,7 @@ class App(ttk.Frame):
         self.status.set("正在处理当前目录……")
         def work():
             report = process_plan(self.scan_result, str(self.workdir), self.config(), confirm_cleanup=True)
-            self.after(0, lambda: self.finish_process(report))
+            self._safe_after(0, lambda: self.finish_process(report))
         threading.Thread(target=work, daemon=True).start()
 
     def confirm_processing(self, summary, detail_lines):
