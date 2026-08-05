@@ -11,7 +11,7 @@
 
 - **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `Python 3.8 环境`，3.8.19）。
 - **目录**：`tests/`（与 `ncodeprocess/` 同级），模块划分与源码分层一一对应。
-- **当前基线**：**185 项全部通过**（2026-08-05 合并精简后 159 项；WP-01 +4、WP-02 +4、WP-04 +5、WP-05 +8、二级页面修复 +2、WP-06 注释边界/圆角比较 +3 项后为 185 项），全量运行约 35 秒。
+- **当前基线**：**188 项全部通过**（2026-08-05 合并精简后 159 项；WP-01 +4、WP-02 +4、WP-04 +5、WP-05 +8、二级页面修复 +2、WP-06 注释边界/圆角比较 +3、样例刀具识别回归 +3 项后为 188 项），全量运行约 35 秒。
 - **运行命令**（cwd 为 `NCodeProcess` 项目目录）：
 
 | 场景 | 命令 |
@@ -54,7 +54,7 @@
    - `LayoutWidgetTests`（`SettingsDialogTests` 继承）：`_build_app(w, h)`、`_descendants(widget)`、`_collect_buttons(widget)`、`_relative_x_to_root(widget, root)`、`_column_total`。
    - 成对/同模式场景用 `subTest` 表驱动合并（如 `test_fit_column_widths_cases`、`test_feed_limits_check_both_ends`、`test_drill_types_detected_independent_of_diameter`），减少重复同时保留全部断言。
 5. **Python 3.8 兼容**：测试代码同样避免 3.9+ 语法（如 `str.removeprefix`、`dict |` 合并）。
-6. **运行与验证**：改动后先跑目标模块，再跑全量回归；保持基线 **185 项全绿**。
+6. **运行与验证**：改动后先跑目标模块，再跑全量回归；保持基线 **188 项全绿**。
 
 ## 六、与其他文档的关系
 
