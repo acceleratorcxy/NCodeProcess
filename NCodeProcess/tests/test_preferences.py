@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -31,6 +32,8 @@ class PreferencesTests(unittest.TestCase):
             "aux_m03_before_motion", "aux_m05_before_end", "aux_m08_before_cut", "aux_m09_before_end",
             "feed_outlier_iqr_factor", "feed_outlier_low_ratio", "feed_outlier_high_ratio",
             "multiple_spindle_warn",
+            "max_file_size", "max_files",
+            "retract_z_threshold",
             "storage_backend",
         })
 
@@ -40,6 +43,18 @@ class PreferencesTests(unittest.TestCase):
         self.assertEqual(loaded["encoding"], "gb18030")
         self.assertEqual(loaded["require_m06"], "1")
         self.assertEqual(loaded["bianzhi"], "张工")
+
+    def test_max_limits_vars_roundtrip(self):
+        # WP-C1：文件大小/数量上限持久化 roundtrip。
+        save_all({"max_file_size": "1048576", "max_files": "500"}, TEST_KEY)
+        loaded = load_all(TEST_KEY)
+        self.assertEqual(loaded.get("max_file_size"), "1048576")
+        self.assertEqual(loaded.get("max_files"), "500")
+
+    def test_retract_z_threshold_var_roundtrip(self):
+        # WP-C9：抬刀高度阈值持久化 roundtrip。
+        save_all({"retract_z_threshold": "20"}, TEST_KEY)
+        self.assertEqual(load_all(TEST_KEY).get("retract_z_threshold"), "20")
 
     def test_load_missing_key_returns_empty(self):
         self.assertEqual(load_all(TEST_KEY), {})
@@ -148,13 +163,21 @@ class FileBackendPreferencesTests(unittest.TestCase):
         self.assertEqual(loaded.get("storage_backend"), "registry")
 
     def test_load_uses_selected_backend(self):
-        # appdata 文件声明 storage_backend=appdata 时，注册表残留不影响读取。
+        # WP-R2：按存在性检测——注册表有残留配置时优先采用注册表。
         save_all({"encoding": "gb18030"}, FILE_TEST_KEY, backend="appdata")
         import winreg
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, FILE_TEST_KEY) as key:
             winreg.SetValueEx(key, "encoding", 0, winreg.REG_SZ, "cp1252")
         loaded = load_all(FILE_TEST_KEY)
+        self.assertEqual(loaded.get("encoding"), "cp1252")
+
+    def test_load_detects_backend_by_existing_config(self):
+        # WP-R2：配置文件无 storage_backend 键时，按存在性检测定位（appdata 有值即用）。
+        self.appdata_file.parent.mkdir(parents=True, exist_ok=True)
+        self.appdata_file.write_text(json.dumps({"encoding": "gb18030"}), encoding="utf-8")
+        loaded = load_all(FILE_TEST_KEY)
         self.assertEqual(loaded.get("encoding"), "gb18030")
+        self.assertEqual(storage_backend(FILE_TEST_KEY)[0], "appdata")
 
     def test_clear_all_removes_file_settings(self):
         with self._unwritable_registry():

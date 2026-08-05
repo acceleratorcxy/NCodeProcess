@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ToolInfo, _decode, add_initial_tool_change, add_m03, align_lines, apply_header, build_plan, calculate_stats, code_part, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _decode, add_initial_tool_change, add_m03, align_lines, apply_header, build_plan, calculate_stats, code_part, emit_event, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
@@ -454,6 +454,22 @@ class CoreTests(unittest.TestCase):
         # PART VERSION is a preselected/editable parameter, so an explicit
         # overwrite can still update it.
         self.assertEqual(fields["PART VERSION"], "V2")
+
+    def test_apply_header_preserves_existing_msg_indent(self):
+        # FR-4.2.5：替换已有 MSG 行时保留原行缩进。
+        text = '  MSG("PROGRAM:P")\n    MSG("BIANZHI:OLD")\nN1S100M03\nN2M30\n'
+        info = ProgramInfo("NEW", "B", "D", "V", "M", "C", "DATE")
+        out, _changes, _issues = apply_header(text, "P", info, self._cfg(overwrite_fields=True))
+        self.assertIn('  MSG("PROGRAM:P")', out)
+        self.assertIn('    MSG("BIANZHI:NEW")', out)
+
+    def test_apply_header_uses_existing_indent_for_inserted_fields(self):
+        # FR-4.2.5：插入缺失字段时沿用头部已有 MSG 行的缩进。
+        text = '    MSG("PROGRAM:P")\nN1S100M03\nN2M30\n'
+        info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+        out, _changes, _issues = apply_header(text, "P", info, self._cfg())
+        self.assertIn('    MSG("DRAWING NUMBER:D")', out)
+        self.assertIn('    MSG("BIANZHI:A")', out)
 
     def test_optional_initial_tool_change_is_inserted_and_corrected(self):
         root = self.make_dir()
@@ -1136,6 +1152,298 @@ class CoreTests(unittest.TestCase):
         issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
                                   self._cfg())
         self.assertFalse(any(i.kind == "aux-order" for i in issues))
+
+    def test_m04_blocks_auto_m03_and_reports_direction_error(self):
+        # WP-A1：正文以 M04 反转启动主轴时，禁止自动补写 M03，并报方向错误。
+        cfg = self._cfg(auto_m03=True, m03_position="after-s")
+        text = "N10 S5000 M04;\nN20 X10 Y10 F500;\n"
+        out, changed, note = add_m03(text, cfg)
+        self.assertFalse(changed)
+        self.assertNotIn("M03", out)
+        issues = validate_program(out, "t.MPF", "T", DEFAULT_INFO, cfg)
+        direction = [i for i in issues if i.kind == "spindle-direction"]
+        self.assertTrue(direction)
+        self.assertEqual(direction[0].severity, "error")
+
+    def test_m03_and_m04_same_block_is_mutually_exclusive(self):
+        # WP-A1：同一程序段同时包含 M03 与 M04，主轴正转与反转互斥。
+        cfg = self._cfg(auto_m03=False)
+        issues = validate_program("N10 S5000 M03 M04;\n", "t.MPF", "T", DEFAULT_INFO, cfg)
+        self.assertTrue(any(i.kind == "mutually-exclusive-m" for i in issues))
+
+    def test_initial_tool_change_skipped_when_multiple_tools_configured(self):
+        # WP-A2：刀具列表 >1 时跳过自动换刀改写，并返回跳过提示。
+        tools = [ToolInfo(1, "10"), ToolInfo(2, "10")]
+        cfg = self._cfg(auto_tool_change=True)
+        text = "N10 G90;\nT2M6;\nN20 X10 Y10 F500;\nN30 M30;\n"
+        out, changed, note = add_initial_tool_change(text, tools, cfg)
+        self.assertFalse(changed)
+        self.assertNotIn("T1M6", out)
+        self.assertIn("多把刀具", note)
+
+    def test_auto_tool_change_skipped_warning_when_multiple_t_references(self):
+        # WP-A2：正文引用多个 T 号时，启用自动换刀会给出警告。
+        cfg = self._cfg(auto_tool_change=True)
+        text = '%\nMSG("PROGRAM:P")\nN10 T1M6\nN20 G1X10F500\nN30 T2M6\nN40 M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, cfg)
+        self.assertTrue(any(i.kind == "auto-tool-change-skipped" and i.severity == "warning" for i in issues))
+
+    def test_build_plan_marks_auto_tool_change_skipped_reason(self):
+        # WP-A2：build_plan 记录多刀跳过原因，note 进入 changes（预览/报告可见）。
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes(
+            'MSG("PROGRAM:P")\nMSG("T1:DIA=10.")\nMSG("T2:DIA=12.")\n'
+            'N1T1M6\nN2G1X10F500\nN3T2M6\nN4M30\n'.encode("utf-8"))
+        cfg = self._cfg(auto_tool_change=True)
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        mpf = self._mpf(plan)
+        self.assertTrue(mpf.auto_tool_change_skipped)
+        self.assertTrue(any("多把刀具" in change for change in mpf.changes))
+
+    def test_m06_inside_comment_does_not_satisfy_requirement(self):
+        # WP-B3：括号注释与分号注释中的 M06 均不满足 require_m06 检查。
+        cfg = self._cfg(require_m06=True)
+        for body in (
+            "N10 T1;\nN20 (M06);\nN30 M30;\n",   # 括号注释
+            "N10 T1;\nN20 ; M06\nN30 M30;\n",    # 分号注释
+        ):
+            with self.subTest(body=body):
+                issues = validate_program(body, "t.MPF", "T", DEFAULT_INFO, cfg)
+                self.assertTrue(any(i.kind == "tool-change" for i in issues))
+
+    def test_real_m06_outside_comment_satisfies_requirement(self):
+        cfg = self._cfg(require_m06=True)
+        issues = validate_program("N10 T1;\nN20 M06;\nN30 M30;\n", "t.MPF", "T", DEFAULT_INFO, cfg)
+        self.assertFalse(any(i.kind == "tool-change" for i in issues))
+
+    def test_program_field_updates_when_overwrite_enabled(self):
+        # WP-B2：PROGRAM 不保护，勾选覆盖时头部 PROGRAM 与程序名对齐。
+        text = 'MSG("PROGRAM:OLD")\nMSG("NC MACHINE:2500B")\nN1S100M03\nN2M30\n'
+        info = ProgramInfo("A", "B", "D", "V", "2500B", "SIE840D", "DATE")
+        out, _changes, _issues = apply_header(text, "NEW", info, Config(overwrite_fields=True))
+        self.assertIn('MSG("PROGRAM:NEW")', out)
+
+    def test_nc_machine_and_control_system_never_overwritten(self):
+        # WP-B2：NC MACHINE/CONTROL SYSTEM 已有非空值即使勾选覆盖也不改。
+        text = 'MSG("NC MACHINE:CUSTOM")\nMSG("CONTROL SYSTEM:CUSTOM_CTRL")\nN1S100M03\nN2M30\n'
+        info = ProgramInfo("A", "B", "D", "V", "NEW_MACHINE", "NEW_CTRL", "DATE")
+        out, _changes, _issues = apply_header(text, "P", info, Config(overwrite_fields=True))
+        self.assertIn('MSG("NC MACHINE:CUSTOM")', out)
+        self.assertIn('MSG("CONTROL SYSTEM:CUSTOM_CTRL")', out)
+
+    def test_date_auto_updates_when_program_changes(self):
+        # WP-B2：程序发生实际变更时 DATE 自动更新为变更发生时间。
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes(
+            'MSG("PROGRAM:P")\nMSG("DATE:OLD_DATE")\nMSG("BIANZHI:")\nN1S100M03\nN2M30\n'.encode("utf-8"))
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        mpf = self._mpf(plan)
+        self.assertIn("更新 DATE", mpf.changes)
+        self.assertIn(format_nc_date(), mpf.output_text)
+
+    def test_date_unchanged_when_no_program_changes(self):
+        # WP-B2：程序无变更时 DATE 保留原值。
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes(
+            'MSG("PROGRAM:P")\nMSG("BIANZHI:A")\nMSG("SHENHE:B")\nMSG("DRAWING NUMBER:D")\nMSG("PART VERSION:V")\n'
+            'MSG("NC MACHINE:M")\nMSG("CONTROL SYSTEM:C")\nMSG("DATE:OLD_DATE")\nN1S100M03\nN2M30\n'.encode("utf-8"))
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        mpf = self._mpf(plan)
+        self.assertNotIn("更新 DATE", mpf.changes)
+        self.assertIn("OLD_DATE", mpf.output_text)
+
+    def test_max_files_limit_stops_scan(self):
+        # WP-C1：扫描文件数量超过上限时停止并提示。
+        root = self.make_dir()
+        for index in range(4):
+            (root / f"P{index}.MPF").write_bytes(f'MSG("PROGRAM:P{index}")\nN1M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow", max_files=2)
+        result = scan_directory(str(root), cfg)
+        self.assertLessEqual(len(result.files), 2)
+        self.assertTrue(any("文件数量超过上限" in warning for warning in result.warnings))
+
+    def test_max_file_size_skips_oversized_mpf(self):
+        # WP-C1：超过单文件大小上限的 MPF 跳过并报 file-too-large。
+        root = self.make_dir()
+        (root / "BIG.MPF").write_bytes(b"X" * 2000)
+        (root / "OK.MPF").write_bytes('MSG("PROGRAM:OK")\nN1M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow", max_file_size=1024)
+        result = scan_directory(str(root), cfg)
+        big = next(f for f in result.files if f.source == "BIG.MPF")
+        self.assertEqual(big.action, "error")
+        self.assertTrue(any(i.kind == "file-too-large" for i in big.issues))
+        self.assertTrue(any(f.source == "OK.MPF" for f in result.files))
+
+    def test_recursive_scan_skips_nested_aptsource_directories(self):
+        # WP-C5：递归扫描时任意深度的 aptsource/NCodeProcessData 目录均被忽略。
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes('MSG("PROGRAM:P")\nN1M30\n'.encode("utf-8"))
+        nested = root / "sub" / "aptsource"
+        nested.mkdir(parents=True)
+        (nested / "Q.MPF").write_bytes('MSG("PROGRAM:Q")\nN1M30\n'.encode("utf-8"))
+        data = root / "a" / "b" / "NCodeProcessData"
+        data.mkdir(parents=True)
+        (data / "R.MPF").write_bytes('MSG("PROGRAM:R")\nN1M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow", recursive=True)
+        result = scan_directory(str(root), cfg)
+        sources = {f.source for f in result.files}
+        self.assertIn("P.MPF", sources)
+        self.assertNotIn(str((nested / "Q.MPF").relative_to(root)), sources)
+        self.assertNotIn(str((data / "R.MPF").relative_to(root)), sources)
+
+    def test_retract_z_threshold_configurable(self):
+        # WP-C9：抬刀高度阈值可配置；默认 20，低于阈值的正 Z 归切削阶段。
+        body = "\n".join(f"N{i}G1X{i}Y{i}Z-10F1000" for i in range(1, 9))
+        text = body + "\nN9G1X1Y1Z12F8000\nN10M30\n"
+        # 默认阈值 20：Z12 归切削阶段，8000 为孤立高值 → 报警告。
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(i.kind == "feed-outlier" for i in issues))
+        # 阈值 10：Z12 归移动阶段，移动组仅 1 个样本（跳过）→ 不报。
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg(retract_z_threshold=10.0))
+        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
+
+
+class RuntimeLogTests(unittest.TestCase):
+    def make_dir(self):
+        return Path(tempfile.mkdtemp(prefix="ncodeprocess-log-"))
+
+    def test_emit_records_event_with_level_event_and_message(self):
+        reset_runtime_log()
+        emit_event("info", "scan_start", "开始扫描目录：测试目录")
+        snapshot = runtime_log().snapshot()
+        self.assertEqual(len(snapshot), 1)
+        entry = snapshot[0]
+        self.assertEqual(entry["level"], "info")
+        self.assertEqual(entry["event"], "scan_start")
+        self.assertEqual(entry["message"], "开始扫描目录：测试目录")
+        self.assertTrue(entry["time"])
+        self.assertIn("detail", entry)
+
+    def test_ring_buffer_keeps_latest_and_appends_truncation_notice(self):
+        log = RuntimeLog(max_events=5)
+        for index in range(7):
+            log.emit("info", "process_file", f"文件 {index}")
+        snapshot = log.snapshot()
+        self.assertEqual(len(snapshot), 6)  # 5 条保留 + 1 条截断说明
+        self.assertEqual(snapshot[0]["message"], "文件 2")
+        notice = snapshot[-1]
+        self.assertEqual(notice["level"], "warning")
+        self.assertEqual(notice["event"], "warning")
+        self.assertIn("已截断", notice["message"])
+
+    def test_pipeline_emits_expected_events(self):
+        reset_runtime_log()
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes('MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow")
+        scan = scan_directory(str(root), cfg)
+        plan = build_plan(scan, DEFAULT_INFO, cfg)
+        process_plan(plan, str(root), cfg, backup=True)
+        events = [entry["event"] for entry in runtime_log().snapshot()]
+        for expected in ("scan_start", "scan_finish", "plan_built", "process_start",
+                         "process_file", "process_finish", "backup_created"):
+            self.assertIn(expected, events)
+
+    def test_scan_warning_event_emitted_when_no_mpf(self):
+        reset_runtime_log()
+        root = self.make_dir()
+        scan_directory(str(root), Config())
+        events = [entry["event"] for entry in runtime_log().snapshot()]
+        self.assertIn("scan_warning", events)
+
+    def test_report_embeds_runtime_log_and_log_path(self):
+        # WP-R4：报告内嵌 runtime_log，log_path 恒为空（不再生成磁盘日志文件）。
+        reset_runtime_log()
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes('MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow")
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg)
+        self.assertTrue(report.runtime_log)
+        self.assertEqual(report.log_path, "")
+
+    def test_save_timestamped_report_emits_export_events(self):
+        reset_runtime_log()
+        report = ProcessReport("in", "out", "2026-08-05T10:00:00")
+        save_timestamped_report(report, self.make_dir())
+        events = [entry["event"] for entry in runtime_log().snapshot()]
+        self.assertIn("export_start", events)
+        self.assertIn("export_finish", events)
+
+    def test_export_report_does_not_create_log_file(self):
+        # WP-R4：导出报告只生成单个 JSON，不生成 logs 目录与磁盘日志文件。
+        reset_runtime_log()
+        report = ProcessReport("in", "out", "2026-08-05T10:00:00")
+        root = self.make_dir()
+        save_timestamped_report(report, root)
+        self.assertEqual(report.log_path, "")
+        self.assertFalse((root / "logs").exists())
+
+
+class ReportMetadataTests(unittest.TestCase):
+    """报告内容规范第 12 节建议新增字段（顶层元数据 + files[].target/program_name_source）。"""
+
+    def make_dir(self):
+        return Path(tempfile.mkdtemp(prefix="ncodeprocess-meta-"))
+
+    def test_report_includes_section12_metadata(self):
+        reset_runtime_log()
+        root = self.make_dir()
+        (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow")
+        scan = scan_directory(str(root), cfg)
+        plan = build_plan(scan, DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg, generator="cli", confirmations=["已确认：执行目录处理"])
+        self.assertTrue(report.app_version)
+        self.assertEqual(report.report_schema_version, 1)
+        self.assertEqual(report.generator, "cli")
+        self.assertGreaterEqual(report.elapsed_seconds, 0.0)
+        self.assertEqual(report.scan_warnings, scan.warnings)
+        self.assertEqual(report.archive_stamp, scan.archive_stamp)
+        self.assertEqual(report.user_confirmations, ["已确认：执行目录处理"])
+        for key in ("encoding", "g00_level", "m03_position", "newline", "aux_checks", "feed_outlier_iqr_factor"):
+            self.assertIn(key, report.config_snapshot)
+
+    def test_config_snapshot_includes_wp_c1_c9_keys(self):
+        # WP-R1：config_snapshot 补全 WP-C1/C9 新增配置键，保证结果可复现。
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes('MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow", max_file_size=2048, max_files=500,
+                     retract_z_threshold=12.0, ask_backup=False)
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg)
+        for key in ("max_file_size", "max_files", "retract_z_threshold", "ask_backup"):
+            self.assertIn(key, report.config_snapshot)
+        self.assertEqual(report.config_snapshot["max_file_size"], 2048)
+        self.assertEqual(report.config_snapshot["max_files"], 500)
+        self.assertEqual(report.config_snapshot["retract_z_threshold"], 12.0)
+        self.assertFalse(report.config_snapshot["ask_backup"])
+
+    def test_report_files_include_target_and_program_name_source(self):
+        root = self.make_dir()
+        (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        (root / "y_Q.MPF").write_bytes('N1G1X1F100\nN2M30\n'.encode("utf-8"))
+        (root / "P.aptsource").write_text("APT", encoding="utf-8")
+        cfg = Config(g00_level="allow", save_aptsource=True)
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg)
+        by_name = {item["program"]: item for item in report.files}
+        self.assertEqual(by_name["P"]["program_name_source"], "MSG")
+        self.assertTrue(by_name["P"]["target"].endswith("P.MPF"))
+        self.assertEqual(by_name["Q"]["program_name_source"], "文件名")
+        apt = next(item for item in report.files if item["action"] == "move")
+        self.assertTrue(apt["target"].endswith(".aptsource"))
+
+    def test_program_name_source_detects_pprint(self):
+        root = self.make_dir()
+        (root / "apt_named.MPF").write_bytes('PPRINT PROGNAME Z99\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow")
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        mpf = next(f for f in plan.files if f.kind == "mpf")
+        self.assertEqual(mpf.program, "Z99")
+        self.assertEqual(mpf.program_name_source, "PPRINT")
 
 
 if __name__ == "__main__":

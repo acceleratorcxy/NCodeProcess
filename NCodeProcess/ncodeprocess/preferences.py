@@ -37,7 +37,8 @@
     storage_backend         保存位置          "registry"
 
 统一操作：
-  load_all()   读取全部已持久化的值；按 storage_backend 键定位后端，无显式选择时注册表优先、文件兜底
+  load_all()   读取全部已持久化的值；按「存在性检测」定位后端——注册表→appdata→home 顺序，
+               第一个有已持久化值的位置即为保存位置（哪个位置有配置，哪个位置就是保存位置）
   save_all()   写入传入的值（只覆盖传入的值名）；backend 显式指定时切换保存位置并清空其他两处残留；返回 (backend, location)
   clear_all()  删除全部值（注册表、appdata、用户主目录三处一起清除）
   storage_backend()  查询当前保存设置将使用的后端（registry / appdata / home）
@@ -89,6 +90,11 @@ REGISTRY_DEFAULTS = {
     "feed_outlier_low_ratio": "0.1",
     "feed_outlier_high_ratio": "3",
     "multiple_spindle_warn": "1",
+    # WP-C1：单文件大小上限（字节）与单次扫描文件数上限（留空 = 不限制）。
+    "max_file_size": "",
+    "max_files": "",
+    # WP-C9：抬刀高度阈值（Z 达到该值视为移动/退刀阶段）。
+    "retract_z_threshold": "20",
     # 用户显式选择的保存位置：registry / appdata / home；无此键时按可用性降级。
     "storage_backend": "registry",
 }
@@ -131,15 +137,6 @@ def _read_settings_file(path) -> Dict[str, str]:
     except (OSError, ValueError):
         return {}
     return {name: str(data[name]) for name in REGISTRY_KEYS if name in data}
-
-
-def _load_settings_file(key: str) -> Dict[str, str]:
-    """读取后备设置文件中的全部值；按候选顺序取第一个存在的文件。"""
-    for candidate in _settings_file_candidates(key):
-        values = _read_settings_file(candidate)
-        if values:
-            return values
-    return {}
 
 
 def _write_settings_file(values: Dict[str, str], key: str) -> Path:
@@ -203,12 +200,16 @@ def _read_backend(backend: str, key: str) -> Dict[str, str]:
 
 
 def _selected_backend(key: str) -> str:
-    """定位用户显式选择的保存位置：注册表→appdata→home 顺序找 storage_backend 键。"""
+    """按存在性检测保存位置：注册表→appdata→home，第一个「有已持久化值」的后端即保存位置。
+
+    显式切换（save_all backend=...）会在目标后端写入全部键（含 storage_backend），因此该
+    后端必然被检测到；多后端同时残留（历史遗留/外部放置）时按此顺序优先，与「哪个位置
+    有配置，哪个位置就是保存位置」的要求一致。
+    """
     for backend in BACKENDS:
         values = _read_backend(backend, key)
-        if "storage_backend" in values:
-            value = values["storage_backend"]
-            return value if value in BACKENDS else backend
+        if values:
+            return backend
     return "registry"
 
 
@@ -276,16 +277,8 @@ def storage_backend(key: str = KEY):
 
 
 def load_all(key: str = KEY) -> Dict[str, str]:
-    """读取全部已持久化的值。
-
-    有 storage_backend 键时按选定后端读取；否则注册表优先、后备文件兜底。
-    """
-    selected = _selected_backend(key)
-    values = _read_backend(selected, key)
-    if selected == "registry":
-        # 兼容旧行为：注册表不可写时曾回退文件，文件里可能有旧值。
-        values.update(_load_settings_file(key))
-    return values
+    """读取全部已持久化的值：按存在性检测选中的后端读取（单选，不跨后端合并）。"""
+    return _read_backend(_selected_backend(key), key)
 
 
 def save_all(values: Dict[str, str], key: str = KEY, backend: Optional[str] = None):

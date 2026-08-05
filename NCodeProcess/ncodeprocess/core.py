@@ -9,7 +9,8 @@ import shutil
 import sys
 import tempfile
 import threading
-from collections import Counter
+import traceback
+from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +30,8 @@ FIELD_ORDER = [
 DEFAULT_DELETE_EXTENSIONS = {".log", ".moaptindexes"}
 LEGACY_DATA_DIR_NAMES = {"ncpostprocessdata"}
 REPORT_PREFIXES = ("ncodeprocess-report", "ncpostprocess-report")
-PROGRAM_RE = re.compile(r"^[A-Za-z0-9_一-鿿-]+$")
+# 程序名允许字符默认正则（WP-D2 模块常量；用户可在设置中自定义，Config.allowed_name_pattern 优先生效）。
+DEFAULT_NAME_PATTERN = r"^[A-Za-z0-9_一-鿿-]+$"
 MSG_RE = re.compile(r'^\s*MSG\s*\(\s*["\'](.*?)["\']\s*\)\s*;?\s*$', re.I)
 PPRINT_RE = re.compile(r"\bPPRINT\s+PROGNAME\s+([A-Za-z0-9_-]+)", re.I)
 NUM = r"[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[Ee][+-]?\d+)?"
@@ -39,14 +41,21 @@ G00_RE = re.compile(r"(?<![A-Z])G0{1,2}(?=\s|[XYZFIJKS]|;|$)", re.I)
 END_LINE_RE = re.compile(r"^%\s*;?$", re.I)
 END_CODE_RE = re.compile(r"(?<![A-Z])M(?:30|02)(?!\d)", re.I)
 M03_RE = re.compile(r"(?<![A-Z])M0?3(?!\d)", re.I)
+M04_RE = re.compile(r"(?<![A-Z])M0?4(?!\d)", re.I)
 M06_RE = re.compile(r"(?<![A-Z])M0?6(?!\d)", re.I)
 M05_RE = re.compile(r"(?<![A-Z])M0?5(?!\d)", re.I)
 M08_RE = re.compile(r"(?<![A-Z])M0?8(?!\d)", re.I)
 M09_RE = re.compile(r"(?<![A-Z])M0?9(?!\d)", re.I)
+# WP-P1：供 add_m03 / add_initial_tool_change 复用的模块级正则，避免每次调用重复编译。
+S_RE = re.compile(r"(?<![A-Z])S\s*" + NUM, re.I)
+MOTION_ANY_RE = re.compile(r"(?<![A-Z])(?:G0*[0-3]|[XYZ]\s*" + NUM + r")", re.I)
+TOOL_REF_RE = re.compile(r"(?<![A-Z])T\d+(?!\d)", re.I)
+STANDALONE_CHANGE_RE = re.compile(r"^\s*(?:N\d+\s*)?T\d+\s*M0?6\s*;?\s*$", re.I)
 # 切削/进给运动：G1/G2/G3 或 X/Y/Z 坐标（G0 为快速定位，不计入切削）。
 CUT_RE = re.compile(r"(?<![A-Z])(?:G0*[123](?!\d)|[XYZ]\s*" + NUM + r")", re.I)
-# Z 值达到该阈值视为抬刀高度（移动/退刀阶段），微小正 Z（如 Z0.1）属切削面。
-RETRACT_Z_THRESHOLD = 5.0
+# Z 值达到该阈值视为抬刀高度（移动/退刀阶段），低于该值的正 Z（如 Z5/Z15）仍属切削面。
+# 默认 20 由用户确认（WP-C9），可通过 Config.retract_z_threshold 调整。
+RETRACT_Z_THRESHOLD = 20.0
 TOOL_CALL_RE = re.compile(r"(?<![A-Z])T(\d+)(?!\d)", re.I)
 MOTION_RE = re.compile(r"(?<![A-Z])G0*([0-3])(?!\d)", re.I)
 INVALID_ADDR_RE = re.compile(r"(?<![A-Za-z])([GTMFSXYZIJ])\s*(?=$|[;\s])", re.I)
@@ -72,10 +81,9 @@ class Config:
     g00_level: str = "error"  # error, warning, allow
     auto_m03: bool = True
     auto_tool_change: bool = False
-    defer_stats: bool = False
     parallel_workers: int = 4
     require_spindle_speed: bool = False
-    allowed_name_pattern: str = r"^[A-Za-z0-9_一-鿿-]+$"
+    allowed_name_pattern: str = DEFAULT_NAME_PATTERN
     encoding: str = "auto"
     # 主程序文件的扩展名集合（小写，默认仅 .mpf），例如 {".mpf", ".nc", ".txt"}。
     # 输出（重命名后）使用的扩展名单独配置，默认 .MPF，保持历史行为。
@@ -113,6 +121,11 @@ class Config:
     multiple_spindle_warn: bool = True
     # 处理前是否询问备份（GUI 基本设置可开关，持久化）。
     ask_backup: bool = True
+    # WP-C1：单文件大小上限（字节）与单次扫描文件数上限（0 = 不限制，需求 9.4）。
+    max_file_size: int = 0
+    max_files: int = 0
+    # WP-C9：抬刀高度阈值（Z 达到该值视为移动/退刀阶段），可配置并持久化。
+    retract_z_threshold: float = RETRACT_Z_THRESHOLD
 
 
 @dataclass
@@ -228,6 +241,10 @@ class FilePlan:
     overwrite_target: bool = False
     duplicate_winner: str = ""
     duplicate_target: str = ""
+    # 程序名来源：MSG / PPRINT / 文件名 / 手动确认（报告内容规范第 12 节）。
+    program_name_source: str = ""
+    # WP-A2：多刀程序跳过自动添加换刀指令的原因（空 = 未跳过）。
+    auto_tool_change_skipped: str = ""
 
 
 @dataclass
@@ -256,11 +273,33 @@ class ProcessReport:
     errors: int = 0
     files: List[dict] = field(default_factory=list)
     backup_dir: str = ""
+    # WP-C6：本次运行事件子集（内存环形缓冲快照）与完整磁盘日志路径。
+    runtime_log: List[dict] = field(default_factory=list)
+    log_path: str = ""
+    # 报告内容规范第 12 节建议新增字段。
+    app_version: str = ""
+    report_schema_version: int = 1
+    config_snapshot: dict = field(default_factory=dict)
+    user_confirmations: List[str] = field(default_factory=list)
+    scan_warnings: List[str] = field(default_factory=list)
+    archive_stamp: str = ""
+    elapsed_seconds: float = 0.0
+    generator: str = ""
 
     def to_dict(self):
         return asdict(self)
 
+    def refresh_runtime_log(self) -> None:
+        """导出/结束处理前刷新运行时事件快照（含导出事件与 log_path）。"""
+        self.runtime_log = runtime_log().snapshot()
+        # WP-R4：不再生成磁盘日志文件，log_path 恒为空；运行日志完整内嵌 runtime_log。
+        self.log_path = ""
+
     def write_json(self, path: Path):
+        # 导出时内嵌本次会话缓冲的最新快照，保证报告包含导出开始事件。
+        self.refresh_runtime_log()
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
 
     def write_csv(self, path: Path):
@@ -276,6 +315,88 @@ class ProcessReport:
             writer.writerows(rows)
 
 
+# --- 运行日志（WP-C6；WP-R3/R4 仅内存缓冲，日志内嵌报告 runtime_log）---
+MAX_LOG_EVENTS = 500
+
+
+@dataclass
+class RuntimeEvent:
+    """单条运行日志事件：时间 / 级别 / 事件类型 / 中文描述 / 附加上下文。"""
+
+    time: str
+    level: str
+    event: str
+    message: str
+    detail: str = ""
+
+    def to_dict(self):
+        return {
+            "time": self.time,
+            "level": self.level,
+            "event": self.event,
+            "message": self.message,
+            "detail": self.detail,
+        }
+
+
+class RuntimeLog:
+    """内存环形缓冲的统一事件源（CLI/GUI 共用）。
+
+    - 内存缓冲保留最近 max_events 条（默认 500），超限丢弃最旧事件并累计丢弃数；
+    - snapshot() 供报告内嵌；发生丢弃时追加一条截断说明（含 log_path）；
+    - 不生成任何磁盘日志文件（WP-R4）：最终报告即单个 JSON，运行日志完整内嵌其中。
+    """
+
+    def __init__(self, max_events: int = MAX_LOG_EVENTS):
+        self._events: "deque[RuntimeEvent]" = deque(maxlen=max_events)
+        self._dropped = 0
+        self._lock = threading.Lock()
+
+    def emit(self, level: str, event: str, message: str, detail: str = "") -> None:
+        entry = RuntimeEvent(datetime.now().isoformat(timespec="seconds"), level, event, message, detail)
+        with self._lock:
+            if len(self._events) == self._events.maxlen:
+                self._dropped += 1
+            self._events.append(entry)
+
+    def snapshot(self) -> List[dict]:
+        with self._lock:
+            entries = [entry.to_dict() for entry in self._events]
+            if self._dropped:
+                entries.append({
+                    "time": datetime.now().isoformat(timespec="seconds"),
+                    "level": "warning",
+                    "event": "warning",
+                    "message": f"运行日志已截断：报告内嵌日志仅保留最近 {self._events.maxlen} 条事件",
+                    "detail": "",
+                })
+            return entries
+
+    def clear(self) -> None:
+        with self._lock:
+            self._events.clear()
+            self._dropped = 0
+
+
+# 模块级共享事件源：core 内部埋点直接调用 emit_event；GUI/CLI 启动时 attach 磁盘日志。
+_runtime_log = RuntimeLog()
+
+
+def runtime_log() -> RuntimeLog:
+    return _runtime_log
+
+
+def reset_runtime_log() -> RuntimeLog:
+    """清空并替换共享事件源（测试隔离与程序启动时调用）。"""
+    global _runtime_log
+    _runtime_log = RuntimeLog()
+    return _runtime_log
+
+
+def emit_event(level: str, event: str, message: str, detail: str = "") -> None:
+    _runtime_log.emit(level, event, message, detail)
+
+
 def save_timestamped_report(report: ProcessReport, directory: Path, keep: int = 3, now: Optional[datetime] = None) -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -285,13 +406,18 @@ def save_timestamped_report(report: ProcessReport, directory: Path, keep: int = 
     while path.exists():
         path = directory / ("ncodeprocess-report-" + stamp + "-" + str(suffix) + ".json")
         suffix += 1
+    # WP-R4：导出报告不生成任何磁盘日志文件，运行日志完整内嵌报告 runtime_log。
+    emit_event("info", "export_start", f"开始导出报告：{directory}")
     report.write_json(path)
     reports = sorted(directory.glob("ncodeprocess-report-*.json"), key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+    removed = 0
     for old in reports[max(1, keep):]:
         try:
             old.unlink()
+            removed += 1
         except OSError:
             pass
+    emit_event("info", "export_finish", f"报告已导出：{path.name}；清理旧报告 {removed} 份")
     return path
 
 
@@ -390,13 +516,23 @@ def _first_lines(text: str, limit: int) -> List[str]:
     return [line.rstrip("\r") for line in text.split("\n", limit)[:limit]]
 
 
-def _safe_name(name: str, pattern: str = Config().allowed_name_pattern) -> bool:
+def _safe_name(name: str, pattern: str = DEFAULT_NAME_PATTERN) -> bool:
     return bool(name and re.match(pattern, name) and not any(c in name for c in '\\/:*?"<>|'))
 
 
 def code_part(line: str) -> str:
-    """Return the NC code before any parenthesised comment."""
-    return line.split("(", 1)[0]
+    """Return the NC code part, stripping comments in both common forms.
+
+    Parenthesised comments ``( ... )`` are removed entirely; anything after a
+    semicolon is treated as a trailing comment (the semicolon itself is kept
+    as the block terminator).  Instructions inside either comment form are
+    therefore never treated as real commands by parsing and validation.
+    """
+    if "(" in line:
+        line = line.split("(", 1)[0]
+    if ";" in line:
+        line = line.split(";", 1)[0] + ";"
+    return line
 
 
 def _quantile(sorted_values: Sequence[float], q: float) -> float:
@@ -410,7 +546,8 @@ def _quantile(sorted_values: Sequence[float], q: float) -> float:
     return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * fraction
 
 
-def extract_program_name(path: Path, text: Optional[str] = None, pattern: str = Config().allowed_name_pattern) -> Optional[str]:
+def _program_name_and_source(path: Path, text: Optional[str] = None, pattern: str = DEFAULT_NAME_PATTERN) -> Tuple[Optional[str], str]:
+    """提取程序名并返回来源标记：MSG / PPRINT / 文件名（报告内容规范第 12 节）。"""
     if text:
         for line in _first_lines(text, 80):
             m = MSG_RE.match(line)
@@ -418,20 +555,25 @@ def extract_program_name(path: Path, text: Optional[str] = None, pattern: str = 
                 payload = m.group(1)
                 key, sep, value = payload.partition(":")
                 if sep and key.strip().upper() == "PROGRAM" and _safe_name(value.strip(), pattern):
-                    return value.strip()
+                    return value.strip(), "MSG"
             m = PPRINT_RE.search(line)
             if m and _safe_name(m.group(1), pattern):
-                return m.group(1)
+                return m.group(1), "PPRINT"
     stem = path.stem
     if stem.upper().endswith("_I"):
         stem = stem[:-2]
     if "_" in stem:
         candidate = stem.rsplit("_", 1)[1]
         if _safe_name(candidate, pattern):
-            return candidate
+            return candidate, "文件名"
     if _safe_name(stem, pattern):
-        return stem
-    return None
+        return stem, "文件名"
+    return None, ""
+
+
+def extract_program_name(path: Path, text: Optional[str] = None, pattern: str = DEFAULT_NAME_PATTERN) -> Optional[str]:
+    name, _source = _program_name_and_source(path, text, pattern)
+    return name
 
 
 def _iter_files(directory: Path, recursive: bool) -> Iterable[Path]:
@@ -485,20 +627,28 @@ def extract_drawing_candidates(text: str) -> List[Tuple[str, str]]:
 
 def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResult:
     config = config or Config()
+    emit_event("info", "scan_start", f"开始扫描目录：{input_dir}")
     directory = Path(input_dir).resolve()
     files: List[FilePlan] = []
     warnings: List[str] = []
     drawing_candidates: List[Tuple[str, str]] = []
     drawing_seen = set()
     if not directory.is_dir():
+        emit_event("warning", "scan_warning", f"输入目录不存在：{directory}")
         return ScanResult(str(directory), [], [f"输入目录不存在: {directory}"])
     if not os.access(directory, os.W_OK):
         warnings.append("当前目录只读：处理写入、移动、删除与报告导出可能失败，请先开放目录写权限")
     running_exe = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
+    scanned = 0
     for path in sorted(_iter_files(directory, config.recursive)):
+        scanned += 1
+        if config.max_files and scanned > config.max_files:
+            warnings.append(f"扫描文件数量超过上限 {config.max_files}，已停止扫描，请调整「文件数量上限」或清理目录")
+            break
         relative_parts = path.relative_to(directory).parts
         ignored_directories = {config.aptsource_dir.lower(), config.data_dir_name.lower()} | LEGACY_DATA_DIR_NAMES
-        if relative_parts and relative_parts[0].lower() in ignored_directories:
+        # WP-C5：递归扫描时任意深度的数据/归档目录均被忽略（如 sub/aptsource/、a/b/NCodeProcessData/）。
+        if any(part.lower() in ignored_directories for part in relative_parts[:-1]):
             continue
         if running_exe and path.resolve() == running_exe:
             continue
@@ -508,9 +658,16 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
         rel = str(path.relative_to(directory))
         if ext in config.program_extensions:
             try:
+                if config.max_file_size and path.stat().st_size > config.max_file_size:
+                    plan = FilePlan(rel, "mpf", None, None, "error")
+                    plan.issues.append(Issue(rel, 1, "", "file-too-large", "error",
+                                             f"文件大小 {path.stat().st_size} 字节超过上限 {config.max_file_size} 字节，已跳过处理"))
+                    files.append(plan)
+                    continue
                 text, used_encoding, _ = _read_text_cached(path, config.encoding)
-                program = extract_program_name(path, text, config.allowed_name_pattern)
+                program, name_source = _program_name_and_source(path, text, config.allowed_name_pattern)
                 plan = FilePlan(rel, "mpf", program, str(directory / (program + config.program_output_extension)) if program else None, "keep")
+                plan.program_name_source = name_source
                 plan.original_text = text
                 plan.encoding = used_encoding
                 plan.modified_time = path.stat().st_mtime
@@ -522,19 +679,23 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
                 if not program:
                     plan.issues.append(Issue(rel, 1, "", "program-name", "error", "请手动确认程序名"))
             except UnicodeError as e:
+                emit_event("error", "error", f"读取文件失败：{rel}", detail=str(e))
                 plan = FilePlan(rel, "mpf", None, None, "error")
                 plan.issues.append(Issue(rel, 1, "", "encoding", "error", str(e)))
             except PermissionError as e:
+                emit_event("error", "error", f"无权限读取文件：{rel}", detail=str(e))
                 plan = FilePlan(rel, "mpf", None, None, "error")
                 plan.issues.append(Issue(rel, 1, "", "permission", "error", f"无权限读取文件：{e}"))
             except OSError as e:
+                emit_event("error", "error", f"读取文件失败：{rel}", detail=str(e))
                 plan = FilePlan(rel, "mpf", None, None, "error")
                 plan.issues.append(Issue(rel, 1, "", "io", "error", f"读取文件失败：{e}"))
             files.append(plan)
         elif ext == ".aptsource":
-            program = extract_program_name(path, None, config.allowed_name_pattern)
+            program, name_source = _program_name_and_source(path, None, config.allowed_name_pattern)
             apt_prefix = ""
             plan = FilePlan(rel, "aptsource", program, None, "move", original_text=None, parsed_tools=[], modified_time=path.stat().st_mtime)
+            plan.program_name_source = name_source
             try:
                 apt_prefix, apt_encoding = _read_prefix(path, config.encoding)
                 plan.encoding = apt_encoding
@@ -557,7 +718,11 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
             continue
     if not any(f.kind == "mpf" for f in files):
         warnings.append("目录中未找到 MPF 文件")
-    return ScanResult(str(directory), files, warnings, datetime.now().strftime("%Y%m%d_%H%M%S"), drawing_candidates)
+    for warning in warnings:
+        emit_event("warning", "scan_warning", warning)
+    result = ScanResult(str(directory), files, warnings, datetime.now().strftime("%Y%m%d_%H%M%S"), drawing_candidates)
+    emit_event("info", "scan_finish", f"扫描完成：{len(files)} 个文件，MPF {sum(f.kind == 'mpf' for f in files)} 个")
+    return result
 
 
 def _parse_msg(line: str) -> Optional[Tuple[str, str]]:
@@ -786,6 +951,12 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
     # warnings so the GUI validation table and report warning counts show them.
     issues: List[Issue] = []
     seen: Dict[str, int] = {}
+    # FR-04.2.5: 头部已有 MSG 行的缩进作为新增/替换行的缩进参考，避免丢失缩进。
+    msg_indent = ""
+    for line in header:
+        if _parse_msg(line):
+            msg_indent = line[:len(line) - len(line.lstrip())]
+            break
     semicolon = any(l.rstrip().endswith(";") for l in header if _parse_msg(l))
     if not semicolon and not any(_parse_msg(l) for l in header):
         semicolon = any(l.rstrip().endswith(";") for l in body[:20] if l.strip())
@@ -810,19 +981,20 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
                 seen[upper] = idx
             if upper in fields:
                 new_value = fields[upper]
-                # These values are authoritative when they already exist in a
-                # reprocessed MPF. PROGRAM/NC MACHINE are loaded as program
-                # defaults; CONTROL SYSTEM/DATE must never be changed.
-                protect_existing = upper in ("PROGRAM", "NC MACHINE", "CONTROL SYSTEM", "DATE") and bool(value.strip())
+                # WP-B2：NC MACHINE/CONTROL SYSTEM 已有非空值永久保护；DATE 由
+                # build_plan/reprocess_file 层按“程序发生变更”自动更新；PROGRAM
+                # 不保护，程序名修改统一走「修改程序名」流程，勾选覆盖时头部与程序名对齐。
+                protect_existing = upper in ("NC MACHINE", "CONTROL SYSTEM", "DATE") and bool(value.strip())
                 if not protect_existing and (not value.strip() or config.overwrite_fields) and new_value != value:
-                    header[idx] = _msg_line(key, new_value, line.rstrip().endswith(";"))
+                    indent = line[:len(line) - len(line.lstrip())]
+                    header[idx] = indent + _msg_line(key, new_value, line.rstrip().endswith(";"))
                     changes.append(f"补全/更新 {upper}")
     field_insert: List[str] = []
     for key, _label, _required in FIELD_ORDER:
         if key not in seen:
             value = fields[key]
             if value or key in config.required_fields:
-                field_insert.append(_msg_line(key, value, semicolon))
+                field_insert.append(msg_indent + _msg_line(key, value, semicolon))
                 changes.append(f"插入 {key}")
     tool_insert: List[str] = []
     for tool in sorted(info.tools, key=lambda t: t.number):
@@ -832,7 +1004,7 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
         key = f"T{tool.number}"
         if key.upper() in skip_tools:
             continue
-        line = _msg_line(key, payload.split(":", 1)[1], semicolon)
+        line = msg_indent + _msg_line(key, payload.split(":", 1)[1], semicolon)
         if key in seen:
             # Replace only when caller supplied tool information; values remain editable.
             header[seen[key]] = line
@@ -857,6 +1029,27 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
     if had_trailing:
         result_lines.append("")
     return newline.join(result_lines), changes, issues
+
+
+def update_header_date(text: str, date_value: str) -> Tuple[str, bool]:
+    """Replace the header DATE MSG row with the given value (WP-B2).
+
+    Returns ``(text, changed)``.  The original text is returned unchanged when
+    the DATE row already carries the requested value or no DATE row exists.
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    end = _header_end(lines)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    for idx in range(end):
+        parsed = _parse_msg(lines[idx])
+        if parsed and parsed[0].upper() == "DATE":
+            if parsed[1].strip() == date_value:
+                return text, False
+            indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+            semicolon = lines[idx].rstrip().endswith(";")
+            lines[idx] = indent + _msg_line("DATE", date_value, semicolon)
+            return newline.join(lines), True
+    return text, False
 
 
 def _find_body_start(text: str) -> int:
@@ -888,16 +1081,27 @@ def add_initial_tool_change(text: str, tools: Sequence[ToolInfo], config: Config
     body = lines[start:]
     while body and not body[0].strip():
         body.pop(0)
+    # WP-A2：多刀程序不具备自动添加换刀指令条件，跳过改写并给出明确提示。
+    if len(tools) > 1:
+        return text, False, "程序包含多把刀具，不具备自动添加换刀指令条件，已跳过生成，请人工确认换刀流程"
+    referenced = set()
+    for line in body:
+        code = code_part(line)
+        referenced.update(int(match.group(1)) for match in TOOL_CALL_RE.finditer(code))
+    if len(referenced) > 1:
+        return (
+            text, False,
+            "程序引用多把刀具（" + "、".join("T" + str(number) for number in sorted(referenced)) +
+            "），不具备自动添加换刀指令条件，已跳过生成，请人工确认换刀流程",
+        )
 
-    tool_ref = re.compile(r"(?<![A-Z])T\d+(?!\d)", re.I)
-    standalone_change = re.compile(r"^\s*(?:N\d+\s*)?T\d+\s*M0?6\s*;?\s*$", re.I)
     corrected = []
     for line in body:
-        if standalone_change.match(line):
+        if STANDALONE_CHANGE_RE.match(line):
             continue
         # 只替换括号注释前的代码部分，注释中的 T 号（如 (T2 备用)）保持原样。
         code, separator, comment = line.partition("(")
-        corrected.append(tool_ref.sub("T" + str(number), code) + (separator + comment if separator else ""))
+        corrected.append(TOOL_REF_RE.sub("T" + str(number), code) + (separator + comment if separator else ""))
 
     semicolon = any(line.rstrip().endswith(";") for line in corrected[:30] if line.strip())
     command = "T{}M6{}".format(number, ";" if semicolon else "")
@@ -914,16 +1118,17 @@ def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
     newline = _effective_newline(text, config)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     start = _header_end(lines)
-    m03_re = re.compile(r"(?<![A-Z])M0?3(?!\d)", re.I)
     for line in lines[start:]:
         if _parse_msg(line) or line.strip() in ("", "%"):
             continue
         code = code_part(line)
-        if m03_re.search(code):
+        if M03_RE.search(code):
+            return text, False, ""
+        if M04_RE.search(code):
+            # WP-A1：正文以 M04 反转启动主轴时，禁止自动补写 M03（正反转冲突）。
             return text, False, ""
     if config.m03_position == "standalone":
         return _insert_standalone_m03(text, lines, start, newline)
-    s_re = re.compile(r"(?<![A-Z])S\s*" + NUM, re.I)
     for idx in range(start, len(lines)):
         line = lines[idx]
         if _parse_msg(line):
@@ -931,7 +1136,7 @@ def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
         # Search only the code part: an S value inside a parenthetical
         # comment is not a spindle command and must not capture M03.
         code = code_part(line)
-        if not s_re.search(code):
+        if not S_RE.search(code):
             continue
         if ";" in code:
             before, after = line.split(";", 1)
@@ -954,12 +1159,11 @@ def _insert_standalone_m03(text: str, lines: Sequence[str], start: int, newline:
     """
     semicolon = any(line.rstrip().endswith(";") for line in lines[start:] if line.strip())
     command = "M03;" if semicolon else "M03"
-    motion_re = re.compile(r"(?<![A-Z])(?:G0*[0-3]|[XYZ]\s*" + NUM + r")", re.I)
     for idx in range(start, len(lines)):
         code = code_part(lines[idx])
         if _parse_msg(lines[idx]) or not code.strip():
             continue
-        if motion_re.search(code):
+        if MOTION_ANY_RE.search(code):
             lines.insert(idx, command)
             return newline.join(lines), True, f"第 {idx + 1} 行前插入独立 M03"
     for idx in range(start, len(lines)):
@@ -1038,6 +1242,7 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     has_end = False
     has_s = False
     has_m03 = False
+    has_m06 = False
     tool_numbers = set()
     header_tool_numbers = set()
     for key in header_keys:
@@ -1045,8 +1250,12 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         if header_match:
             header_tool_numbers.add(int(header_match.group(1)))
     spindle_values: List[Tuple[int, str, float, str]] = []
+    # WP-P1：F 离群阶段收集并入主遍历（原第二遍循环删除）。
+    stage_feeds: Dict[str, List[Tuple[int, str, float, str]]] = {"move": [], "plunge": [], "cut": []}
+    current_z: Optional[float] = None
     first_cut: Optional[int] = None
     m03_pos: Optional[int] = None
+    m04_pos: Optional[int] = None
     m05_pos: Optional[int] = None
     m08_pos: Optional[int] = None
     m09_pos: Optional[int] = None
@@ -1078,7 +1287,27 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             level = config.g00_level.lower()
             if level != "allow":
                 issues.append(Issue(filename, i, raw_line, "G00", level, "按设置移除 G00/G0 或改为警告"))
-        for parameter in ADDR_RE.finditer(code):
+        parameters = list(ADDR_RE.finditer(code))
+        z_value = None
+        has_xy = False
+        for parameter in parameters:
+            parameter_key = parameter.group(1).upper()
+            if parameter_key == "Z":
+                try:
+                    z_value = float(parameter.group(2))
+                except ValueError:
+                    pass
+            elif parameter_key in "XY":
+                has_xy = True
+        if z_value is not None:
+            current_z = z_value
+        if g00_matches or (current_z is not None and current_z >= config.retract_z_threshold):
+            stage = "move"
+        elif z_value is not None and not has_xy:
+            stage = "plunge"
+        else:
+            stage = "cut"
+        for parameter in parameters:
             key = parameter.group(1).upper()
             raw_value = parameter.group(2)
             value = float(raw_value)
@@ -1099,6 +1328,8 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                     issues.append(Issue(filename, i, raw_line, "feed-range", "error", f"F 值 {raw_value} 低于下限 {config.feed_min:g}"))
                 if config.feed_max is not None and value > config.feed_max:
                     issues.append(Issue(filename, i, raw_line, "feed-range", "error", f"F 值 {raw_value} 超过上限 {config.feed_max:g}"))
+                if value > 0:
+                    stage_feeds[stage].append((i, raw_value, value, raw_line))
             else:
                 spindle_values.append((i, raw_value, value, raw_line))
                 has_s = True
@@ -1112,6 +1343,10 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             has_m03 = True
             if m03_pos is None:
                 m03_pos = i
+        if not has_m06 and "M" in upper_code and M06_RE.search(code):
+            has_m06 = True
+        if m04_pos is None and "M" in upper_code and M04_RE.search(code):
+            m04_pos = i
         if first_cut is None and CUT_RE.search(code):
             first_cut = i
         if "M" in upper_code:
@@ -1123,6 +1358,8 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                 m09_pos = i
             if M03_RE.search(code) and M05_RE.search(code):
                 issues.append(Issue(filename, i, raw_line, "mutually-exclusive-m", "error", "同一程序段同时包含 M03 与 M05，主轴正转与停止互斥"))
+            if M03_RE.search(code) and M04_RE.search(code):
+                issues.append(Issue(filename, i, raw_line, "mutually-exclusive-m", "error", "同一程序段同时包含 M03 与 M04，主轴正转与反转互斥"))
             if M08_RE.search(code) and M09_RE.search(code):
                 issues.append(Issue(filename, i, raw_line, "mutually-exclusive-m", "error", "同一程序段同时包含 M08 与 M09，冷却开启与关闭互斥"))
         if "T" in upper_code:
@@ -1141,15 +1378,22 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         issues.append(Issue(filename, start + 1, "", "spindle-speed", "error", "切削前应有 S 转速"))
     if not has_m03:
         if config.auto_m03:
-            # FR-05.6: automatic insertion was enabled but the body still has
-            # no M03, so the insert failed.  Report it as an error that blocks
-            # output until the operator fixes the program or disables the
-            # option, instead of a silently skipped warning.
-            issues.append(Issue(filename, start + 1, "", "spindle-start", "error", "自动补写 M03 失败：正文缺少可插入 M03 的指令位置，请手动补写 M03"))
+            # WP-A1：正文以 M04 反转启动时禁止补写 M03（正反转冲突），按错误阻止输出；
+            # 否则仍按 FR-05.6 报告补写失败。
+            if m04_pos is not None:
+                issues.append(Issue(filename, m04_pos, lines[m04_pos - 1], "spindle-direction", "error",
+                                    "正文以 M04 反转启动主轴，已禁止自动补写 M03，请人工确认旋转方向与主轴指令"))
+            else:
+                issues.append(Issue(filename, start + 1, "", "spindle-start", "error", "自动补写 M03 失败：正文缺少可插入 M03 的指令位置，请手动补写 M03"))
         else:
             issues.append(Issue(filename, start + 1, "", "spindle-start", "warning", "正文中未找到 M03"))
-    if config.require_m06 and tool_numbers and not M06_RE.search("\n".join(lines[start:])):
+    if config.require_m06 and tool_numbers and not has_m06:
         issues.append(Issue(filename, start + 1, "", "tool-change", "error", "存在刀具调用但缺少 M06"))
+    # WP-A2：启用自动添加换刀时，多刀程序无法自动生成首刀换刀指令，按警告提示人工确认。
+    configured_tools = getattr(info, "tools", None) or []
+    if config.auto_tool_change and (len(tool_numbers) > 1 or len(configured_tools) > 1):
+        issues.append(Issue(filename, start + 1, "", "auto-tool-change-skipped", "warning",
+                            "程序引用多把刀具，自动添加换刀指令已对该程序禁用并跳过，请人工确认换刀逻辑"))
     for number in sorted(tool_numbers - header_tool_numbers):
         issues.append(Issue(filename, start + 1, "", "tool-number-missing", "warning", f"正文调用 T{number} 但头部没有对应的 T{number} MSG 刀具信息，请确认"))
     # 辅助指令顺序规则（仅当相关指令都出现且顺序错误时报告）。
@@ -1168,39 +1412,7 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     # 组内出现 ≥2 次的值构成“常见档位”，只检查组内出现 1 次的孤立值是否低于
     # 最低常见档位 × low_ratio 或高于最高常见档位 × high_ratio；
     # 组内无常见档位（F 值连续变化）时回退 IQR 极端值标准（k=3）。
-    stage_feeds: Dict[str, List[Tuple[int, str, float, str]]] = {"move": [], "plunge": [], "cut": []}
-    current_z: Optional[float] = None
-    for i, raw_line in enumerate(lines[start:], start=start + 1):
-        code = code_part(raw_line)
-        z_value = None
-        has_xy = False
-        for m in ADDR_RE.finditer(code):
-            key = m.group(1).upper()
-            if key == "Z":
-                try:
-                    z_value = float(m.group(2))
-                except ValueError:
-                    pass
-            elif key in "XY":
-                has_xy = True
-        if z_value is not None:
-            current_z = z_value
-        if G00_RE.search(code) or (current_z is not None and current_z >= RETRACT_Z_THRESHOLD):
-            stage = "move"
-        elif z_value is not None and not has_xy:
-            stage = "plunge"
-        else:
-            stage = "cut"
-        for m in ADDR_RE.finditer(code):
-            if m.group(1).upper() != "F":
-                continue
-            try:
-                value = float(m.group(2))
-            except ValueError:
-                continue
-            if value > 0:
-                stage_feeds[stage].append((i, m.group(2), value, raw_line))
-
+    # 阶段收集已在主遍历完成（WP-P1），此处仅做离群判定。
     stage_labels = {"move": "移动/退刀", "plunge": "进刀", "cut": "切削"}
     for stage, items in stage_feeds.items():
         if len(items) < 3:
@@ -1304,11 +1516,18 @@ def reprocess_file(f: FilePlan, info: ProgramInfo, config: Config, *, tools: Seq
         effective.tools = extract_tools(f.original_text)
     f.output_text, f.changes, header_issues = apply_header(f.original_text, f.program, effective, config, replace_tools=True, filename=f.source)
     f.output_text, tool_changed, tool_note = add_initial_tool_change(f.output_text, effective.tools, config)
-    if tool_changed:
+    if tool_note:
         f.changes.append(tool_note)
+        if not tool_changed:
+            f.auto_tool_change_skipped = tool_note
     f.output_text, m03_changed, m03_note = add_m03(f.output_text, config)
     if m03_changed:
         f.changes.append(m03_note)
+    # WP-B2：程序发生实际变更时 DATE 自动更新为变更发生时间。
+    if f.changes:
+        f.output_text, date_changed = update_header_date(f.output_text, format_nc_date())
+        if date_changed:
+            f.changes.append("更新 DATE")
     f.stats, validation_issues = analyze_program(f.output_text, f.source, f.program, effective, config)
     f.issues = header_issues + validation_issues
 
@@ -1372,6 +1591,7 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
             auto_tools[program] = (mtime, tools)
         except Exception:
             auto_tools[program] = (mtime, [])
+    emit_event("info", "plan_built", f"生成处理计划：{len(scan.files)} 个文件，MPF {sum(f.kind == 'mpf' for f in scan.files)} 个")
     def process_mpf(f: FilePlan):
         if f.kind == "mpf" and f.program and f.original_text is not None:
             try:
@@ -1390,11 +1610,18 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                     effective_info.tools = list(tool_overrides.get(f.program, [])) or extract_tools(f.original_text)
                 new, changes, header_issues = apply_header(f.original_text, f.program, effective_info, config, replace_tools=replace_tools, filename=f.source)
                 new, tool_changed, tool_note = add_initial_tool_change(new, effective_info.tools, config)
-                if tool_changed:
+                if tool_note:
                     changes.append(tool_note)
+                    if not tool_changed:
+                        f.auto_tool_change_skipped = tool_note
                 new, m03_changed, m03_note = add_m03(new, config)
                 if m03_changed:
                     changes.append(m03_note)
+                # WP-B2：程序发生实际变更时 DATE 自动更新为变更发生时间。
+                if changes:
+                    new, date_changed = update_header_date(new, format_nc_date())
+                    if date_changed:
+                        changes.append("更新 DATE")
                 f.output_text, f.changes = new, changes
                 f.stats, validation_issues = analyze_program(new, f.source, f.program, info, config)
                 f.target = str(directory / (f.program + config.program_output_extension))
@@ -1487,12 +1714,168 @@ def _atomic_write(path: Path, text: str, encoding: str):
             tmp_path.unlink()
 
 
-def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Optional[Config] = None, *, confirm_cleanup: bool = True, progress_callback=None, backup: bool = False) -> ProcessReport:
+def _app_version() -> str:
+    """延迟读取包版本号，避免 core 与 __init__ 相互导入造成循环依赖。"""
+    try:
+        from . import __version__ as version
+        return str(version)
+    except Exception:
+        return ""
+
+
+def _iso_seconds_delta(start: str, end: str) -> float:
+    """计算两个 ISO 8601 时间戳（seconds 精度）之间的秒数；解析失败返回 0。"""
+    try:
+        return (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _config_snapshot(config: Config) -> dict:
+    """导出处理时生效的关键配置（不含编制/审核等业务数据），保证结果可复现。"""
+    return {
+        "encoding": config.encoding,
+        "recursive": config.recursive,
+        "save_aptsource": config.save_aptsource,
+        "overwrite_fields": config.overwrite_fields,
+        "g00_level": config.g00_level,
+        "auto_m03": config.auto_m03,
+        "auto_tool_change": config.auto_tool_change,
+        "m03_position": config.m03_position,
+        "feed_min": config.feed_min,
+        "feed_max": config.feed_max,
+        "spindle_min": config.spindle_min,
+        "spindle_max": config.spindle_max,
+        "newline": config.newline,
+        "required_fields": list(config.required_fields),
+        "aux_checks": sorted(config.aux_checks),
+        "feed_outlier_iqr_factor": config.feed_outlier_iqr_factor,
+        "feed_outlier_low_ratio": config.feed_outlier_low_ratio,
+        "feed_outlier_high_ratio": config.feed_outlier_high_ratio,
+        "multiple_spindle_warn": config.multiple_spindle_warn,
+        "require_end_marker": config.require_end_marker,
+        "require_m06": config.require_m06,
+        "require_spindle_speed": config.require_spindle_speed,
+        "max_file_size": config.max_file_size,
+        "max_files": config.max_files,
+        "retract_z_threshold": config.retract_z_threshold,
+        "ask_backup": config.ask_backup,
+    }
+
+
+def _exec_duplicate(f, item, report, src_dir, dst_dir, config, scan, same_tree, successful_targets, confirm_cleanup):
+    """处理重复目标文件：最新文件已成功写入后，按确认口径清理较旧源文件。"""
+    source = src_dir / f.source
+    planned = Path(f.duplicate_target)
+    if f.kind == "mpf":
+        target = (dst_dir / planned.name) if not same_tree else planned
+    else:
+        target = (dst_dir / config.aptsource_dir / scan.archive_stamp / planned.name) if not same_tree else planned
+    target_key = os.path.normcase(os.path.abspath(str(target)))
+    if target_key not in successful_targets:
+        report.skipped += 1
+        item["status"] = "duplicate-retained"
+        item["runtime_error"] = "最新文件未成功写入，较旧重复文件已保留"
+    elif not confirm_cleanup or not same_tree:
+        report.skipped += 1
+        item["status"] = "duplicate-retained"
+        item["target"] = str(target)
+    elif source.resolve() == target.resolve():
+        # The winner has already atomically replaced this path.
+        item["status"] = "duplicate-overwritten"
+        item["target"] = str(target)
+    elif source.exists():
+        source.unlink()
+        report.deleted += 1
+        item["status"] = "duplicate-removed"
+    else:
+        item["status"] = "duplicate-resolved"
+        item["target"] = str(target)
+
+
+def _exec_mpf(f, item, report, src_dir, dst_dir, config, same_tree, errors, successful_targets):
+    """写入 MPF：有错误拦截为失败，无输出/目标跳过，否则原子写入并计数。"""
+    source = src_dir / f.source
+    if errors:
+        report.failed += 1
+        item["status"] = "failed"
+    elif f.output_text is None or not f.target:
+        report.skipped += 1
+        item["status"] = "skipped"
+    else:
+        planned = Path(f.target)
+        target = (dst_dir / planned.name) if not same_tree else planned
+        item["target"] = str(target)
+        if target.exists() and target.resolve() != source.resolve() and not (config.overwrite_existing or f.overwrite_target):
+            raise FileExistsError(f"目标已存在: {target.name}")
+        _, enc, _ = read_text(source, config.encoding)
+        _atomic_write(target, f.output_text, enc)
+        if same_tree and target.resolve() != source.resolve() and source.exists():
+            source.unlink()
+        report.success += 1
+        item["status"] = "success"
+        successful_targets.add(os.path.normcase(os.path.abspath(str(target))))
+
+
+def _exec_aptsource(f, item, report, src_dir, dst_dir, config, scan, same_tree, successful_targets, confirm_cleanup):
+    """处理 APTSOURCE：删除或归档（时间戳子目录），未确认时跳过。"""
+    source = src_dir / f.source
+    if f.action == "delete":
+        if confirm_cleanup and same_tree and source.exists():
+            source.unlink()
+            report.deleted += 1
+            item["status"] = "deleted"
+        else:
+            report.skipped += 1
+            item["status"] = "skipped"
+        return
+    if not confirm_cleanup:
+        report.skipped += 1
+        item["status"] = "skipped"
+        return
+    planned = Path(f.target)
+    target = (dst_dir / config.aptsource_dir / scan.archive_stamp / planned.name) if not same_tree else planned
+    item["target"] = str(target)
+    if target.exists() and not (config.overwrite_existing or f.overwrite_target):
+        raise FileExistsError(f"目标已存在: {target.name}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if same_tree:
+        if source.resolve() != target.resolve():
+            if f.overwrite_target:
+                os.replace(str(source), str(target))
+            else:
+                shutil.move(str(source), str(target))
+    else:
+        shutil.copy2(str(source), str(target))
+    report.moved += 1
+    item["status"] = "moved"
+    successful_targets.add(os.path.normcase(os.path.abspath(str(target))))
+
+
+def _exec_delete(f, item, report, src_dir, same_tree, confirm_cleanup):
+    """删除中间文件（LOG/MOAPTIndexes 等），未确认时跳过。"""
+    source = src_dir / f.source
+    if confirm_cleanup and same_tree and source.exists():
+        source.unlink()
+        report.deleted += 1
+        item["status"] = "deleted"
+    else:
+        report.skipped += 1
+        item["status"] = "skipped"
+
+
+def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Optional[Config] = None, *, confirm_cleanup: bool = True, progress_callback=None, backup: bool = False, generator: str = "", confirmations: Sequence[str] = ()) -> ProcessReport:
     config = config or Config()
     src_dir = Path(scan.input_dir).resolve()
     dst_dir = Path(output_dir or scan.input_dir).resolve()
     same_tree = src_dir == dst_dir
     report = ProcessReport(str(src_dir), str(dst_dir), datetime.now().isoformat(timespec="seconds"))
+    report.app_version = _app_version()
+    report.generator = generator
+    report.config_snapshot = _config_snapshot(config)
+    report.user_confirmations = list(confirmations)
+    report.scan_warnings = list(scan.warnings)
+    report.archive_stamp = scan.archive_stamp
     dst_dir.mkdir(parents=True, exist_ok=True)
     backup_root = ""
     if backup:
@@ -1507,94 +1890,33 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(source), str(destination))
         report.backup_dir = backup_root
+        emit_event("info", "backup_created", f"处理前备份已创建：{backup_root}")
     successful_targets = set()
     ordered_files = sorted(scan.files, key=lambda item: item.action == "duplicate")
     total = len(ordered_files)
+    emit_event("info", "process_start", f"开始处理：{total} 个文件")
     for index, f in enumerate(ordered_files, start=1):
         if progress_callback is not None:
             progress_callback(index, total, f.source)
+        emit_event("info", "process_file", f"处理文件：{f.source}（{index}/{total}）")
         if f.stats is None and f.output_text is not None:
             f.stats = calculate_stats(f.output_text)
         diff = []
         if f.original_text is not None and f.output_text is not None and f.original_text != f.output_text:
             diff = list(difflib.unified_diff(f.original_text.splitlines(), f.output_text.splitlines(), fromfile=f.source + " (before)", tofile=(Path(f.target).name if f.target else f.source) + " (after)", lineterm=""))
-        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None}
+        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "target": f.target or "", "program_name_source": f.program_name_source or "", "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None}
         errors = [x for x in f.issues if x.severity == "error"]
         report.warnings += sum(x.severity == "warning" for x in f.issues)
         report.errors += len(errors)
         try:
-            source = src_dir / f.source
             if f.action == "duplicate":
-                planned = Path(f.duplicate_target)
-                if f.kind == "mpf":
-                    target = (dst_dir / planned.name) if not same_tree else planned
-                else:
-                    target = (dst_dir / config.aptsource_dir / scan.archive_stamp / planned.name) if not same_tree else planned
-                target_key = os.path.normcase(os.path.abspath(str(target)))
-                if target_key not in successful_targets:
-                    report.skipped += 1
-                    item["status"] = "duplicate-retained"
-                    item["runtime_error"] = "最新文件未成功写入，较旧重复文件已保留"
-                elif not confirm_cleanup or not same_tree:
-                    report.skipped += 1
-                    item["status"] = "duplicate-retained"
-                elif source.resolve() == target.resolve():
-                    # The winner has already atomically replaced this path.
-                    item["status"] = "duplicate-overwritten"
-                elif source.exists():
-                    source.unlink()
-                    report.deleted += 1
-                    item["status"] = "duplicate-removed"
-                else:
-                    item["status"] = "duplicate-resolved"
+                _exec_duplicate(f, item, report, src_dir, dst_dir, config, scan, same_tree, successful_targets, confirm_cleanup)
             elif f.kind == "mpf":
-                if errors:
-                    report.failed += 1
-                    item["status"] = "failed"
-                elif f.output_text is None or not f.target:
-                    report.skipped += 1
-                    item["status"] = "skipped"
-                else:
-                    planned = Path(f.target)
-                    target = (dst_dir / planned.name) if not same_tree else planned
-                    if target.exists() and target.resolve() != source.resolve() and not (config.overwrite_existing or f.overwrite_target):
-                        raise FileExistsError(f"目标已存在: {target.name}")
-                    _, enc, _ = read_text(source, config.encoding)
-                    _atomic_write(target, f.output_text, enc)
-                    if same_tree and target.resolve() != source.resolve() and source.exists():
-                        source.unlink()
-                    report.success += 1
-                    item["status"] = "success"
-                    successful_targets.add(os.path.normcase(os.path.abspath(str(target))))
-            elif f.kind == "aptsource" and f.action == "delete":
-                if confirm_cleanup and same_tree and source.exists():
-                    source.unlink(); report.deleted += 1; item["status"] = "deleted"
-                else:
-                    report.skipped += 1; item["status"] = "skipped"
+                _exec_mpf(f, item, report, src_dir, dst_dir, config, same_tree, errors, successful_targets)
             elif f.kind == "aptsource":
-                if not confirm_cleanup:
-                    report.skipped += 1; item["status"] = "skipped"
-                else:
-                    planned = Path(f.target)
-                    target = (dst_dir / config.aptsource_dir / scan.archive_stamp / planned.name) if not same_tree else planned
-                    if target.exists() and not (config.overwrite_existing or f.overwrite_target):
-                        raise FileExistsError(f"目标已存在: {target.name}")
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if same_tree:
-                        if source.resolve() != target.resolve():
-                            if f.overwrite_target:
-                                os.replace(str(source), str(target))
-                            else:
-                                shutil.move(str(source), str(target))
-                    else:
-                        shutil.copy2(str(source), str(target))
-                    report.moved += 1; item["status"] = "moved"
-                    successful_targets.add(os.path.normcase(os.path.abspath(str(target))))
+                _exec_aptsource(f, item, report, src_dir, dst_dir, config, scan, same_tree, successful_targets, confirm_cleanup)
             elif f.action == "delete":
-                if confirm_cleanup and same_tree and source.exists():
-                    source.unlink(); report.deleted += 1; item["status"] = "deleted"
-                else:
-                    report.skipped += 1; item["status"] = "skipped"
+                _exec_delete(f, item, report, src_dir, same_tree, confirm_cleanup)
             else:
                 report.skipped += 1; item["status"] = "review"
         except UnicodeError as e:
@@ -1602,21 +1924,29 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
             item["status"] = "failed"
             item["error_kind"] = "encoding"
             item.setdefault("runtime_error", str(e))
+            emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
         except PermissionError as e:
             report.failed += 1
             item["status"] = "failed"
             item["error_kind"] = "permission"
             item.setdefault("runtime_error", str(e))
+            emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
         except OSError as e:
             report.failed += 1
             item["status"] = "failed"
             item["error_kind"] = "io"
             item.setdefault("runtime_error", str(e))
+            emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
         except Exception as e:
             report.failed += 1
             item["status"] = "failed"
             item["error_kind"] = "other"
             item.setdefault("runtime_error", str(e))
+            emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
         report.files.append(item)
     report.finished_at = datetime.now().isoformat(timespec="seconds")
+    report.elapsed_seconds = _iso_seconds_delta(report.started_at, report.finished_at)
+    emit_event("info", "process_finish",
+               f"处理完成：成功 {report.success}，失败 {report.failed}，移动 {report.moved}，删除 {report.deleted}，跳过 {report.skipped}")
+    report.refresh_runtime_log()
     return report
