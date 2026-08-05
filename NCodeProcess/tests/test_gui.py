@@ -454,14 +454,14 @@ class LayoutWidgetTests(unittest.TestCase):
             # Exactly one selected: compare must stay disabled.
             app.keep_table.selection_set("0")
             app._refresh_keep_menu_states()
-            self.assertEqual(app.keep_table_menu.entrycget(1, "state"), "disabled")
+            self.assertEqual(app.keep_table_menu.entrycget(2, "state"), "disabled")
             app.compare_selected_programs()
             self.assertIsNone(app.program_compare_window)
 
             # Exactly two selected: compare enabled and opens the window.
             app.keep_table.selection_set(("0", "1"))
             app._refresh_keep_menu_states()
-            self.assertEqual(app.keep_table_menu.entrycget(1, "state"), "normal")
+            self.assertEqual(app.keep_table_menu.entrycget(2, "state"), "normal")
             app.compare_selected_programs()
             self.assertTrue(app.program_compare_window is not None and app.program_compare_window.winfo_exists())
             title = app.program_compare_window.title()
@@ -1492,6 +1492,44 @@ class ScanLifecycleTests(unittest.TestCase):
             with patch("ncodeprocess.gui.messagebox.askyesno", return_value=True) as ask:
                 self.assertTrue(app._backup_requested())
             ask.assert_called_once()
+        finally:
+            root.destroy()
+
+    def test_finish_scan_uses_batch_program_name_confirmation(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plans = [FilePlan(f"{index}.MPF", "mpf", None, None, "keep") for index in range(3)]
+            for plan in plans:
+                plan.original_text = "%\nM30\n"
+            result = ScanResult("tmp", plans)
+            with patch.object(app, "_confirm_program_names", return_value={"0.MPF": "P1", "1.MPF": "P2", "2.MPF": "P3"}) as confirm:
+                app.finish_scan(result, app._scan_generation)
+            confirm.assert_called_once()
+            self.assertEqual([plan.program for plan in plans], ["P1", "P2", "P3"])
+        finally:
+            root.destroy()
+
+    def test_keep_menu_has_rename_program_entry(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            labels = [app.keep_table_menu.entrycget(index, "label") for index in range(app.keep_table_menu.index("end") + 1)]
+            self.assertIn("修改程序名", labels)
+        finally:
+            root.destroy()
+
+    def test_rename_selected_program_updates_plan(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            with patch("ncodeprocess.gui.simpledialog.askstring", return_value="Q"):
+                app.rename_selected_program()
+            self.assertEqual(plan.program, "Q")
+            self.assertIn("Q.MPF", plan.target or "")
+            self.assertIn('MSG("PROGRAM:Q")', plan.original_text)
         finally:
             root.destroy()
 

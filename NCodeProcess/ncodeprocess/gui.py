@@ -934,6 +934,7 @@ class App(ttk.Frame):
         issue.bind("<Button-1>", select_issue_row)
         self.keep_table_menu = tk.Menu(self.master, tearoff=0)
         self.keep_table_menu.add_command(label="编辑程序代码", command=self.edit_program_code)
+        self.keep_table_menu.add_command(label="修改程序名", command=self.rename_selected_program)
         self.keep_table_menu.add_command(label="对比所选两条程序", command=self.compare_selected_programs)
         main.bind("<Button-3>", self._open_keep_table_menu)
         issue.bind("<Button-3>", self._open_keep_table_menu)
@@ -1446,13 +1447,23 @@ class App(ttk.Frame):
             messagebox.showwarning("扫描提示", "\n".join(result.warnings), parent=self.master)
         unresolved = [f for f in result.files if f.kind == "mpf" and not f.program]
         changed = False
-        for f in unresolved:
+        pattern = self.allowed_name_pattern_var.get().strip()
+        if len(unresolved) == 1:
+            f = unresolved[0]
             value = simpledialog.askstring("确认程序名", "无法确定程序名：" + f.source, parent=self.master)
-            pattern = self.allowed_name_pattern_var.get().strip()
             if value and re.match(pattern, value.strip()):
                 f.program = value.strip()
                 f.issues = [i for i in f.issues if i.kind != "program-name"]
                 changed = True
+        elif len(unresolved) > 1:
+            values = self._confirm_program_names(unresolved)
+            if values:
+                for f in unresolved:
+                    name = values.get(f.source, "")
+                    if name and re.match(pattern, name):
+                        f.program = name
+                        f.issues = [i for i in f.issues if i.kind != "program-name"]
+                        changed = True
         if changed:
             result = build_plan(result, self.info(), self.config(), self.program_tools)
         self.scan_result = result
@@ -1487,6 +1498,49 @@ class App(ttk.Frame):
         self.status.set(f"扫描完成：{len(result.files)} 个文件，{mpfs} 个 MPF；从保留/归档表选择 MPF 查看解析信息。")
         self.process_button.configure(state="normal" if result.files else "disabled")
         self.all_stats_button.configure(state="normal" if mpfs else "disabled")
+
+    def _confirm_program_names(self, unresolved):
+        """List-style batch confirmation for unnamed programs.
+
+        Returns {source: program_name} on confirm, or None when cancelled.
+        """
+        result = {"values": None}
+        window = tk.Toplevel(self.master)
+        window.title("确认程序名")
+        window.transient(self.master)
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
+        ttk.Label(
+            container,
+            text="以下程序无法自动确定程序名，请逐一填写（留空跳过，非法字符将忽略）：",
+            wraplength=720,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        detail = ttk.Frame(container)
+        detail.grid(row=1, column=0, sticky="nsew")
+        detail.columnconfigure(1, weight=1)
+        vars_by_source = {}
+        for row, plan_file in enumerate(unresolved):
+            ttk.Label(detail, text=plan_file.source).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+            var = tk.StringVar()
+            ttk.Entry(detail, textvariable=var).grid(row=row, column=1, sticky="ew", pady=2)
+            vars_by_source[plan_file.source] = var
+        buttons = ttk.Frame(container)
+        buttons.grid(row=2, column=0, sticky="e", pady=(12, 0))
+
+        def close(confirmed=False):
+            if confirmed:
+                result["values"] = {source: var.get().strip() for source, var in vars_by_source.items()}
+            window.destroy()
+
+        ttk.Button(buttons, text="取消", command=lambda: close(False)).pack(side="right", padx=(8, 0))
+        ttk.Button(buttons, text="确定", command=lambda: close(True)).pack(side="right")
+        window.protocol("WM_DELETE_WINDOW", lambda: close(False))
+        self._show_centered(window, 720, 480, min_width=600, min_height=360)
+        window.grab_set()
+        window.wait_window()
+        return result["values"]
 
     def populate_file_tables(self):
         self._cancel_cell_tooltip()
@@ -1745,10 +1799,39 @@ class App(ttk.Frame):
         self.show_selected()
 
     def _refresh_keep_menu_states(self):
-        """Enable the edit/compare entries based on the current selection."""
+        """Enable the edit/rename/compare entries based on the current selection."""
         count = len(self.keep_table.selection())
         self.keep_table_menu.entryconfig(0, state="normal" if count == 1 else "disabled")
-        self.keep_table_menu.entryconfig(1, state="normal" if count == 2 else "disabled")
+        self.keep_table_menu.entryconfig(1, state="normal" if count == 1 else "disabled")
+        self.keep_table_menu.entryconfig(2, state="normal" if count == 2 else "disabled")
+
+    def rename_selected_program(self):
+        """Rename the selected MPF program (target file + PROGRAM MSG)."""
+        f = self.selected_plan()
+        if not f or f.kind != "mpf":
+            return
+        pattern = self.allowed_name_pattern_var.get().strip()
+        value = simpledialog.askstring(
+            "修改程序名",
+            f"当前程序名：{f.program or '未命名'}\n输入新的程序名：",
+            parent=self.master,
+            initialvalue=f.program or "",
+        )
+        if not value:
+            return
+        value = value.strip()
+        if not re.match(pattern, value):
+            messagebox.showerror("程序名无效", "程序名不符合允许字符规则，未修改。", parent=self.master)
+            return
+        if value == f.program:
+            return
+        f.program = value
+        f.target = str(Path(self.workdir) / (value + self.config().program_output_extension))
+        f.issues = [issue for issue in f.issues if issue.kind != "program-name"]
+        # 同步原文本中的 PROGRAM MSG，使重处理后的字段与文件名一致。
+        program_msg = re.compile(r'(?i)^(\s*MSG\(\s*["\']PROGRAM:)[^"\']*')
+        f.original_text = program_msg.sub(lambda m: m.group(1) + value, f.original_text)
+        self.rebuild_selected_preview()
 
     def _open_keep_table_menu(self, event):
         self._refresh_keep_menu_states()
