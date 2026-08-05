@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
 import difflib
 import json
+import os
 import re
 import sys
 import threading
@@ -14,12 +16,14 @@ from typing import List, NamedTuple
 from . import __version__
 from .core import (
     Config,
+    DEFAULT_NAME_PATTERN,
     FIELD_ORDER,
     ProgramInfo,
     ToolInfo,
     align_lines,
     build_plan,
     calculate_stats,
+    emit_event,
     extract_header_fields,
     extract_tools,
     format_nc_date,
@@ -27,12 +31,10 @@ from .core import (
     reprocess_file,
     save_timestamped_report,
     scan_directory,
-    validate_program,
 )
 from .preferences import (
     KEY as PREFERENCES_KEY,
     REGISTRY_DEFAULTS,
-    clear_all,
     load_all,
     save_all,
     storage_backend,
@@ -74,6 +76,66 @@ def parse_positive_default(raw: str, default: float) -> float:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def parse_non_negative_int(raw: str) -> int:
+    """解析整数上限输入：留空、非法或非正数时返回 0（= 不限制）。"""
+    value = (raw or "").strip()
+    if not value:
+        return 0
+    try:
+        parsed = int(float(value))
+    except ValueError:
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def text_changed_ignoring_line_endings(original: str, edited: str) -> bool:
+    """比较编辑前后文本，忽略 CRLF/LF 差异，防止仅行尾变化触发重处理。"""
+    def normalize(value: str) -> str:
+        return value.replace("\r\n", "\n").replace("\r", "\n")
+    return normalize(original) != normalize(edited)
+
+
+_MUTEX_HANDLE = None
+
+
+def single_instance_mutex_name(anchor_path: str) -> str:
+    """基于 EXE/脚本绝对路径生成稳定的命名互斥体名（FNV-1a 64 位，非密码学用途）。
+
+    用 FNV-1a 替代 hashlib.md5，使打包时可排除 hashlib/_hashlib（WP-S1，体积优化）。
+    """
+    normalized = os.path.normcase(os.path.abspath(anchor_path)).encode("utf-8")
+    value = 0xCBF29CE484222325
+    for byte in normalized:
+        value ^= byte
+        value = (value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    digest = format(value, "016x")
+    return "NCodeProcess_" + digest
+
+
+def acquire_single_instance(anchor_path: str) -> bool:
+    """创建命名互斥体；同路径已有实例运行时返回 False（Win32）。"""
+    global _MUTEX_HANDLE
+    if sys.platform != "win32":
+        return True
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False, single_instance_mutex_name(anchor_path))
+    if not handle:
+        return True
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return False
+    _MUTEX_HANDLE = handle
+    return True
+
+
+def release_single_instance() -> None:
+    """释放命名互斥体（测试与退出清理用）。"""
+    global _MUTEX_HANDLE
+    if _MUTEX_HANDLE and sys.platform == "win32":
+        ctypes.windll.kernel32.CloseHandle(_MUTEX_HANDLE)
+        _MUTEX_HANDLE = None
 
 
 # 鼠标悬停在单元格上多久后弹出内容提示（毫秒）。
@@ -342,6 +404,7 @@ class App(ttk.Frame):
         self.master.title("NCodeProcess " + __version__)
         self.settings_registry_key = settings_registry_key or PREFERENCES_KEY
         self._loaded_settings = load_all(self.settings_registry_key)
+        emit_event("info", "settings_loaded", "程序设置加载完成")
         self._configure_window_size()
         self.pack(fill="both", expand=True)
         self.workdir = application_directory()
@@ -354,6 +417,7 @@ class App(ttk.Frame):
         self._processing = False
         self._process_progress = None
         self._process_progress_lock = threading.Lock()
+        self._scan_running = False
         self.report = None
         self.info_vars = {}
         self.info_defaults = {key: "" for key in ("bianzhi", "shenhe", "drawing", "version", "date")}
@@ -689,14 +753,22 @@ class App(ttk.Frame):
         self.feed_outlier_low_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_low_ratio", "0.1"))
         self.feed_outlier_high_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_high_ratio", "3"))
         self.multiple_spindle_var = tk.BooleanVar(value=loaded.get("multiple_spindle_warn", "1") == "1")
+        # WP-C1：文件大小/数量上限（持久化，留空 = 不限制）。
+        self.max_file_size_var = tk.StringVar(value=loaded.get("max_file_size", ""))
+        self.max_files_var = tk.StringVar(value=loaded.get("max_files", ""))
+        # WP-C9：抬刀高度阈值（持久化，默认 20）。
+        self.retract_z_threshold_var = tk.StringVar(value=loaded.get("retract_z_threshold", "20"))
         # 配置保存位置（持久化）：registry / appdata / home，默认注册表。
-        self.storage_backend_var = tk.StringVar(value=loaded.get("storage_backend", "registry"))
+        # WP-R2：启动时按实际存在性检测保存位置（哪个位置有配置即为保存位置）。
+        self.storage_backend_var = tk.StringVar(value=storage_backend(self.settings_registry_key)[0])
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
         options.columnconfigure(7, weight=1)
-        ttk.Button(options, text="全部应用", command=self.apply_info).grid(row=0, column=0, padx=3, sticky="w")
-        ttk.Button(options, text="应用所选", command=self.apply_selected).grid(row=0, column=1, padx=3, sticky="w")
+        self.apply_all_button = ttk.Button(options, text="全部应用", command=self.apply_info)
+        self.apply_all_button.grid(row=0, column=0, padx=3, sticky="w")
+        self.apply_selected_button = ttk.Button(options, text="应用所选", command=self.apply_selected)
+        self.apply_selected_button.grid(row=0, column=1, padx=3, sticky="w")
         ttk.Button(options, text="保存编制/校对", command=self.save_fields).grid(row=0, column=2, padx=3, sticky="w")
         overwrite_box = ttk.Frame(options)
         overwrite_box.grid(row=0, column=3, padx=3, sticky="w")
@@ -1049,6 +1121,7 @@ class App(ttk.Frame):
 
     def save_fields(self):
         backend, location = save_all({"bianzhi": self.info_vars["bianzhi"].get().strip(), "shenhe": self.info_vars["shenhe"].get().strip()}, self.settings_registry_key)
+        emit_event("info", "settings_saved", "编制/审核设置已保存")
         if backend == "registry":
             self.status.set("编制和审核/校对已保存到当前 Windows 用户设置（注册表）。")
         else:
@@ -1135,6 +1208,9 @@ class App(ttk.Frame):
             "feed_outlier_low_ratio": self.feed_outlier_low_ratio_var.get(),
             "feed_outlier_high_ratio": self.feed_outlier_high_ratio_var.get(),
             "multiple_spindle": self.multiple_spindle_var.get(),
+            "max_file_size": self.max_file_size_var.get(),
+            "max_files": self.max_files_var.get(),
+            "retract_z_threshold": self.retract_z_threshold_var.get(),
             "storage_backend": self.storage_backend_var.get(),
         }
         win = tk.Toplevel(self.master)
@@ -1145,62 +1221,104 @@ class App(ttk.Frame):
         notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
         basic = ttk.Frame(notebook, padding=8)
         rules = ttk.Frame(notebook, padding=8)
+        # WP-C1 布局统一：两页列 0 均可拉伸，LabelFrame 占满页面宽度，
+        # 保证「基本设置」与「校验规则」页的框宽度一致，切换时不跳动。
+        basic.columnconfigure(0, weight=1)
+        rules.columnconfigure(0, weight=1)
         notebook.add(basic, text="基本设置")
         notebook.add(rules, text="校验规则")
         self.settings_notebook = notebook
         self.settings_pages = (basic, rules)
 
-        def labeled(page, row, text, widget):
-            ttk.Label(page, text=text).grid(row=row, column=0, sticky="w", padx=(0, 6), pady=3)
-            widget.grid(row=row, column=1, sticky="w", pady=3)
+        def content_cell(page, row):
+            """返回第 row 行的内容容器（col1）：控件 + ? 说明紧邻，行尾放按钮。"""
+            cell = ttk.Frame(page)
+            cell.grid(row=row, column=1, sticky="w", pady=3)
+            return cell
 
-        # ── 基本设置：编码 / 扩展名 / 允许字符 / APTSOURCE ──
-        encoding_combo = ttk.Combobox(basic, textvariable=self.encoding_var, state="readonly", width=16,
-                                      values=("auto", "utf-8", "utf-8-sig", "gb18030", "gbk", "gb2312", "cp1252"))
-        labeled(basic, 0, "文件编码", encoding_combo)
-        self._settings_help_label(basic, "文件编码", "auto=自动识别；也可强制指定 utf-8、utf-8-sig、gb18030、gbk、gb2312 或 cp1252。").grid(row=0, column=2, sticky="w", padx=(6, 0))
+        # ── 基本设置：文件处理 / 文件类型 / 目录与存储 ──
+        file_box = ttk.LabelFrame(basic, text="文件处理", padding=(8, 4))
+        file_box.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        file_box.columnconfigure(1, weight=1)
+        ttk.Label(file_box, text="文件编码").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(file_box, 0)
+        ttk.Combobox(cell, textvariable=self.encoding_var, state="readonly", width=16,
+                     values=("auto", "utf-8", "utf-8-sig", "gb18030", "gbk", "gb2312", "cp1252")).pack(side="left")
+        self._settings_help_label(cell, "文件编码", "文件编码：auto=自动识别（按 utf-8、gb2312、gbk、gb18030、cp1252 顺序尝试并记录实际编码）；也可显式指定其中一种编码强制解码。识别结果会显示在解析信息页。").pack(side="left", padx=(4, 0))
 
-        delete_entry = ttk.Entry(basic, textvariable=self.delete_extensions_var, width=24)
-        labeled(basic, 1, "待删除扩展名", delete_entry)
-        ttk.Button(basic, text="恢复默认", command=lambda: self.delete_extensions_var.set(".log, .moaptindexes")).grid(row=1, column=2, padx=(6, 0))
-        self._settings_help_label(basic, "待删除扩展名", "逗号分隔，如 .log,.moaptindexes；留空则全部保留。").grid(row=2, column=1, sticky="w", padx=(6, 0))
+        ttk.Label(file_box, text="程序名允许字符").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(file_box, 1)
+        ttk.Entry(cell, textvariable=self.allowed_name_pattern_var, width=24).pack(side="left")
+        self._settings_help_label(cell, "程序名允许字符", "程序名允许字符：用于校验提取到的程序名（正则表达式）。默认允许中文、英文、数字、下划线和连字符；与默认规则不一致时提示手动确认。").pack(side="left", padx=(4, 0))
+        ttk.Button(cell, text="恢复默认", command=lambda: self.allowed_name_pattern_var.set(DEFAULT_NAME_PATTERN)).pack(side="left", padx=(12, 0))
 
-        pattern_entry = ttk.Entry(basic, textvariable=self.allowed_name_pattern_var, width=24)
-        labeled(basic, 3, "程序名允许字符", pattern_entry)
-        ttk.Button(basic, text="恢复默认", command=lambda: self.allowed_name_pattern_var.set(r"^[A-Za-z0-9_一-鿿-]+$")).grid(row=3, column=2, padx=(6, 0))
+        ttk.Label(file_box, text="单文件大小上限（字节）").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(file_box, 2)
+        ttk.Entry(cell, textvariable=self.max_file_size_var, width=12).pack(side="left")
+        self._settings_help_label(cell, "单文件大小上限", "单文件大小上限：MPF 文件超过该字节数时跳过并报错；留空或 0 表示不限制。用于防止超大文件拖慢扫描。").pack(side="left", padx=(4, 0))
 
-        apt_entry = ttk.Entry(basic, textvariable=self.aptsource_dir_var, width=24)
-        labeled(basic, 4, "APTSOURCE 归档子目录", apt_entry)
+        ttk.Label(file_box, text="扫描文件数量上限").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(file_box, 3)
+        ttk.Entry(cell, textvariable=self.max_files_var, width=12).pack(side="left")
+        self._settings_help_label(cell, "扫描文件数量上限", "扫描文件数量上限：目录内文件数超过该值时停止扫描并提示；留空或 0 表示不限制。").pack(side="left", padx=(4, 0))
 
-        program_ext_entry = ttk.Entry(basic, textvariable=self.program_extensions_var, width=24)
-        labeled(basic, 5, "主程序扩展名", program_ext_entry)
-        self._settings_help_label(basic, "主程序扩展名", "逗号分隔，如 .mpf,.nc,.txt。").grid(row=5, column=2, sticky="w", padx=(6, 0))
+        type_box = ttk.LabelFrame(basic, text="文件类型", padding=(8, 4))
+        type_box.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        type_box.columnconfigure(1, weight=1)
+        ttk.Label(type_box, text="待删除扩展名").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(type_box, 0)
+        ttk.Entry(cell, textvariable=self.delete_extensions_var, width=24).pack(side="left")
+        self._settings_help_label(cell, "待删除扩展名", "待删除扩展名：逗号分隔的扩展名列表（如 .log,.moaptindexes），大小写不敏感。扫描到的这些扩展名文件将在执行目录处理时清理；留空表示不清理任何中间文件。").pack(side="left", padx=(4, 0))
+        ttk.Button(cell, text="恢复默认", command=lambda: self.delete_extensions_var.set(".log, .moaptindexes")).pack(side="left", padx=(12, 0))
 
-        output_ext_entry = ttk.Entry(basic, textvariable=self.program_output_extension_var, width=24)
-        labeled(basic, 6, "输出扩展名", output_ext_entry)
-        self._settings_help_label(basic, "输出扩展名", "如 .MPF 或 .nc。").grid(row=6, column=2, sticky="w", padx=(6, 0))
-        ttk.Checkbutton(basic, text="处理前询问备份（关闭则不询问也不备份）", variable=self.ask_backup_var).grid(row=7, column=1, sticky="w", pady=3)
-        ttk.Label(basic, text="配置保存位置").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=3)
-        backend_combo = ttk.Combobox(basic, textvariable=self.storage_backend_var, state="readonly", width=10,
-                                     values=("registry", "appdata", "home"))
-        backend_combo.grid(row=8, column=1, sticky="w", pady=3)
-        self._settings_help_label(basic, "配置保存位置", "registry=注册表（默认）；appdata=用户数据目录 %APPDATA%\\NCodeProcess；home=用户主目录。切换保存位置后会清空另外两处可能残留的旧配置。").grid(row=8, column=2, sticky="w", padx=(6, 0))
+        ttk.Label(type_box, text="主程序扩展名").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(type_box, 1)
+        ttk.Entry(cell, textvariable=self.program_extensions_var, width=24).pack(side="left")
+        self._settings_help_label(cell, "主程序扩展名", "主程序扩展名：逗号分隔，如 .mpf,.nc,.txt。扫描时按这些扩展名识别数控主程序（MPF），并参与命名规范化与头部处理。").pack(side="left", padx=(4, 0))
 
-        # ── 校验规则：结束标记 / G00 / 必填字段 / M03 / S·F / 换行 / 启发式阈值 / 辅助顺序 ──
-        check_frame = ttk.Frame(rules)
-        check_frame.grid(row=0, column=0, columnspan=4, sticky="w")
-        ttk.Checkbutton(check_frame, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).pack(side="left")
-        ttk.Checkbutton(check_frame, text="要求刀具调用包含 M06", variable=self.require_m06_var).pack(side="left", padx=(16, 0))
-        ttk.Checkbutton(check_frame, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).pack(side="left", padx=(16, 0))
+        ttk.Label(type_box, text="输出扩展名").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(type_box, 2)
+        ttk.Entry(cell, textvariable=self.program_output_extension_var, width=24).pack(side="left")
+        self._settings_help_label(cell, "输出扩展名", "输出扩展名：规范化重命名后使用的扩展名，如 .MPF 或 .nc。").pack(side="left", padx=(4, 0))
 
-        g00_combo = ttk.Combobox(rules, textvariable=self.g00_level, state="readonly", width=10,
-                                 values=("error", "warning", "allow"))
-        labeled(rules, 1, "G00 级别", g00_combo)
-        self._settings_help_label(rules, "G00 级别", "G00/G0 检查级别：error=报错阻止输出；warning=提示；allow=放行。").grid(row=1, column=2, sticky="w", padx=(6, 0))
+        store_box = ttk.LabelFrame(basic, text="目录与存储", padding=(8, 4))
+        store_box.grid(row=2, column=0, sticky="ew")
+        store_box.columnconfigure(1, weight=1)
+        ttk.Label(store_box, text="APTSOURCE 归档子目录").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(store_box, 0)
+        ttk.Entry(cell, textvariable=self.aptsource_dir_var, width=24).pack(side="left")
+        self._settings_help_label(cell, "APTSOURCE 归档子目录", "APTSOURCE 归档子目录：启用「保存 APTSOURCE」后，匹配到的 APT 源文件将归档到该子目录下的时间戳目录（YYYYMMDD_HHMMSS）。").pack(side="left", padx=(4, 0))
 
-        ttk.Label(rules, text="必填 MSG 字段").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(4, 3))
-        required_frame = ttk.Frame(rules)
-        required_frame.grid(row=2, column=1, columnspan=3, sticky="w", pady=(4, 3))
+        cell = content_cell(store_box, 1)
+        ttk.Checkbutton(cell, text="处理前询问备份", variable=self.ask_backup_var).pack(side="left")
+        self._settings_help_label(cell, "处理前询问备份", "处理前询问备份：执行目录处理前询问是否先将待处理文件快照到 backup\\时间戳 目录；关闭后执行前不再询问，也不会自动备份。").pack(side="left", padx=(4, 0))
+
+        ttk.Label(store_box, text="配置保存位置").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(store_box, 2)
+        ttk.Combobox(cell, textvariable=self.storage_backend_var, state="readonly", width=10,
+                     values=("registry", "appdata", "home")).pack(side="left")
+        self._settings_help_label(cell, "配置保存位置", "配置保存位置：registry=当前 Windows 用户注册表（默认）；appdata=用户数据目录 %APPDATA%\\NCodeProcess\\settings.json；home=用户主目录 settings.json。切换保存位置后将清空另外两处可能残留的旧配置。").pack(side="left", padx=(4, 0))
+
+        # ── 校验规则：基础检查 / 工艺校验 / F 离群与 S 警告 / 输出格式 ──
+        check_box = ttk.LabelFrame(rules, text="基础检查", padding=(8, 4))
+        check_box.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Checkbutton(check_box, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).pack(side="left")
+        ttk.Checkbutton(check_box, text="要求刀具调用包含 M06", variable=self.require_m06_var).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(check_box, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).pack(side="left", padx=(16, 0))
+
+        rule_box = ttk.LabelFrame(rules, text="工艺校验", padding=(8, 4))
+        rule_box.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        rule_box.columnconfigure(1, weight=1)
+        ttk.Label(rule_box, text="G00 级别").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(rule_box, 0)
+        ttk.Combobox(cell, textvariable=self.g00_level, state="readonly", width=10,
+                     values=("error", "warning", "allow")).pack(side="left")
+        self._settings_help_label(cell, "G00 级别", "G00/G0 快速定位检查级别：error=作为错误阻止输出；warning=仅提示；allow=不检查。").pack(side="left", padx=(4, 0))
+
+        ttk.Label(rule_box, text="必填 MSG 字段").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(rule_box, 1)
+        required_frame = ttk.Frame(cell)
+        required_frame.pack(side="left")
         for text, var in (
             ("编制", self.required_bianzhi_var),
             ("审核", self.required_shenhe_var),
@@ -1208,58 +1326,74 @@ class App(ttk.Frame):
             ("版次", self.required_part_var),
         ):
             ttk.Checkbutton(required_frame, text=text, variable=var).pack(side="left", padx=8)
+        self._settings_help_label(cell, "必填 MSG 字段", "必填 MSG 字段：勾选的字段在程序头部缺失或为空时按错误上报。程序名、机床、控制系统固定必填，不可关闭。").pack(side="left", padx=(4, 0))
 
-        m03_combo = ttk.Combobox(rules, textvariable=self.m03_position_var, state="readonly", width=14,
-                                 values=("after-s", "standalone"))
-        labeled(rules, 3, "M03 补写位置", m03_combo)
-        self._settings_help_label(rules, "M03 补写位置", "after-s=追加在首个 S 转速所在程序块末尾（分号之前）；standalone=在首条切削/运动指令前插入独立 M03 行。").grid(row=3, column=2, sticky="w", padx=(6, 0))
+        ttk.Label(rule_box, text="M03 补写位置").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(rule_box, 2)
+        ttk.Combobox(cell, textvariable=self.m03_position_var, state="readonly", width=14,
+                     values=("after-s", "standalone")).pack(side="left")
+        self._settings_help_label(cell, "M03 补写位置", "M03 补写位置：after-s=在首个 S 转速所在程序块末尾（分号之前）追加 M03；standalone=在首条切削/运动指令前插入独立 M03 行。").pack(side="left", padx=(4, 0))
 
-        ttk.Label(rules, text="F 上下限").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        feed_frame = ttk.Frame(rules)
-        feed_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=(6, 3))
-        ttk.Entry(feed_frame, textvariable=self.feed_min_var, width=8).pack(side="left")
-        ttk.Label(feed_frame, text="~").pack(side="left", padx=4)
-        ttk.Entry(feed_frame, textvariable=self.feed_max_var, width=8).pack(side="left")
-        ttk.Label(rules, text="S 上下限").grid(row=5, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        spindle_frame = ttk.Frame(rules)
-        spindle_frame.grid(row=5, column=1, columnspan=3, sticky="w", pady=(6, 3))
-        ttk.Entry(spindle_frame, textvariable=self.spindle_min_var, width=8).pack(side="left")
-        ttk.Label(spindle_frame, text="~").pack(side="left", padx=4)
-        ttk.Entry(spindle_frame, textvariable=self.spindle_max_var, width=8).pack(side="left")
-        ttk.Label(rules, text="留空 = 不检查").grid(row=6, column=1, columnspan=3, sticky="w", pady=(0, 3))
+        ttk.Label(rule_box, text="F/S 上下限").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(rule_box, 3)
+        limit_frame = ttk.Frame(cell)
+        limit_frame.pack(side="left")
+        ttk.Label(limit_frame, text="F").pack(side="left")
+        ttk.Entry(limit_frame, textvariable=self.feed_min_var, width=8).pack(side="left", padx=2)
+        ttk.Label(limit_frame, text="~").pack(side="left", padx=4)
+        ttk.Entry(limit_frame, textvariable=self.feed_max_var, width=8).pack(side="left", padx=2)
+        ttk.Label(limit_frame, text="S").pack(side="left", padx=(10, 0))
+        ttk.Entry(limit_frame, textvariable=self.spindle_min_var, width=8).pack(side="left", padx=2)
+        ttk.Label(limit_frame, text="~").pack(side="left", padx=4)
+        ttk.Entry(limit_frame, textvariable=self.spindle_max_var, width=8).pack(side="left", padx=2)
+        self._settings_help_label(cell, "F/S 上下限", "F/S 上下限：F 为进给、S 为主轴转速。留空表示不检查对应方向；填写数值后，正文中的 F/S 值低于下限或高于上限时按错误上报，用于拦截误输。").pack(side="left", padx=(4, 0))
 
-        newline_combo = ttk.Combobox(rules, textvariable=self.newline_var, state="readonly", width=14,
-                                     values=("auto", "crlf", "lf"))
-        labeled(rules, 7, "换行策略", newline_combo)
-        self._settings_help_label(rules, "换行策略", "auto=跟随源文件；crlf=强制 CRLF；lf=强制 LF。").grid(row=7, column=2, sticky="w", padx=(6, 0))
-
-        ttk.Label(rules, text="F 离群校验").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=(4, 2))
-        feed_outlier_frame = ttk.Frame(rules)
-        feed_outlier_frame.grid(row=8, column=1, columnspan=3, sticky="w", pady=(4, 2))
+        outlier_box = ttk.LabelFrame(rules, text="F 离群与 S 警告", padding=(8, 4))
+        outlier_box.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        outlier_box.columnconfigure(1, weight=1)
+        ttk.Label(outlier_box, text="F 离群校验").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(outlier_box, 0)
+        feed_outlier_frame = ttk.Frame(cell)
+        feed_outlier_frame.pack(side="left")
         ttk.Label(feed_outlier_frame, text="IQR×").pack(side="left")
         ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_iqr_var, width=5).pack(side="left", padx=2)
         ttk.Label(feed_outlier_frame, text="低值×").pack(side="left", padx=(10, 0))
         ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_low_ratio_var, width=5).pack(side="left", padx=2)
         ttk.Label(feed_outlier_frame, text="高值×").pack(side="left", padx=(10, 0))
         ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_high_ratio_var, width=5).pack(side="left", padx=2)
+        ttk.Label(feed_outlier_frame, text="抬刀Z≥").pack(side="left", padx=(10, 0))
+        ttk.Entry(feed_outlier_frame, textvariable=self.retract_z_threshold_var, width=5).pack(side="left", padx=2)
+        self._settings_help_label(cell, "F 离群校验", "F 离群校验：按工艺阶段（移动/进刀/切削）分组统计常见进给档位（出现 ≥2 次视为正常），仅对出现 1 次的孤立值判定——低于最低常见档位 × 低值比例或高于最高常见档位 × 高值倍数时报警告；IQR 倍数为组内无常见档位（F 值连续变化）时的回退判定标准；抬刀Z≥ 为抬刀高度阈值，正文 Z 值达到该值时归入移动/退刀阶段。").pack(side="left", padx=(4, 0))
 
-        ttk.Checkbutton(rules, text="多 S 值警告（程序包含多个不同 S 值时提示）", variable=self.multiple_spindle_var).grid(
-            row=9, column=0, columnspan=4, sticky="w", pady=(4, 2))
+        cell = content_cell(outlier_box, 1)
+        ttk.Checkbutton(cell, text="多 S 值警告", variable=self.multiple_spindle_var).pack(side="left")
+        self._settings_help_label(cell, "多 S 值警告", "多 S 值警告：程序正文包含多个不同 S 转速值时给出警告，提示确认转速切换是否符合工艺要求。").pack(side="left", padx=(4, 0))
 
-        ttk.Label(rules, text="辅助指令顺序").grid(row=10, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
-        aux_rows = (
-            (("M03 先于切削", self.aux_m03_before_motion_var), ("M05 先于结束", self.aux_m05_before_end_var)),
-            (("M08 先于切削", self.aux_m08_before_cut_var), ("M09 先于结束", self.aux_m09_before_end_var)),
-        )
-        for row_offset, row_items in enumerate(aux_rows):
-            for col, (text, var) in enumerate(row_items):
-                ttk.Checkbutton(rules, text=text, variable=var).grid(
-                    row=11 + row_offset, column=1 + col, sticky="w", pady=(6 if row_offset == 0 else 0, 3))
+        output_box = ttk.LabelFrame(rules, text="输出格式", padding=(8, 4))
+        output_box.grid(row=3, column=0, sticky="ew")
+        output_box.columnconfigure(1, weight=1)
+        ttk.Label(output_box, text="换行策略").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(output_box, 0)
+        ttk.Combobox(cell, textvariable=self.newline_var, state="readonly", width=14,
+                     values=("auto", "crlf", "lf")).pack(side="left")
+        self._settings_help_label(cell, "换行策略", "换行策略：auto=跟随源文件换行风格；crlf=统一使用 CRLF；lf=统一使用 LF。用于老旧控制器对换行风格敏感的目录。").pack(side="left", padx=(4, 0))
+
+        ttk.Label(output_box, text="辅助指令顺序").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        cell = content_cell(output_box, 1)
+        aux_frame = ttk.Frame(cell)
+        aux_frame.pack(side="left")
+        for text, var in (
+            ("M03 先于切削", self.aux_m03_before_motion_var),
+            ("M05 先于结束", self.aux_m05_before_end_var),
+            ("M08 先于切削", self.aux_m08_before_cut_var),
+            ("M09 先于结束", self.aux_m09_before_end_var),
+        ):
+            ttk.Checkbutton(aux_frame, text=text, variable=var).pack(side="left", padx=8)
+        self._settings_help_label(cell, "辅助指令顺序", "辅助指令顺序：勾选的规则在指令顺序异常时提示——M03 先于首次切削（错误）、M05/M09 先于程序结束（警告）、M08 先于首次切削（警告）。").pack(side="left", padx=(4, 0))
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
         ttk.Button(actions, text="恢复默认", command=self._restore_default_settings).pack(side="left")
-        ttk.Button(actions, text="清除注册表", command=self._clear_registry_settings).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="导出设置…", command=self._export_settings).pack(side="left")
         ttk.Button(actions, text="确定", command=self._confirm_settings).pack(side="right")
         ttk.Button(actions, text="取消", command=self._cancel_settings).pack(side="right", padx=(0, 8))
@@ -1313,6 +1447,7 @@ class App(ttk.Frame):
 
     def _save_settings_values(self):
         save_all(self._current_settings_values(), self.settings_registry_key, backend=self.storage_backend_var.get())
+        emit_event("info", "settings_saved", f"程序设置已保存（保存位置：{self.storage_backend_var.get()}）")
 
     def _current_settings_values(self) -> dict:
         """收集当前全部设置值（REGISTRY_KEYS → 字符串），供保存与导出复用。"""
@@ -1348,6 +1483,9 @@ class App(ttk.Frame):
             "feed_outlier_low_ratio": value.feed_outlier_low_ratio_var.get().strip(),
             "feed_outlier_high_ratio": value.feed_outlier_high_ratio_var.get().strip(),
             "multiple_spindle_warn": "1" if value.multiple_spindle_var.get() else "0",
+            "max_file_size": value.max_file_size_var.get().strip(),
+            "max_files": value.max_files_var.get().strip(),
+            "retract_z_threshold": value.retract_z_threshold_var.get().strip(),
             "storage_backend": value.storage_backend_var.get(),
         }
 
@@ -1400,7 +1538,11 @@ class App(ttk.Frame):
         self.feed_outlier_low_ratio_var.set(defaults["feed_outlier_low_ratio"])
         self.feed_outlier_high_ratio_var.set(defaults["feed_outlier_high_ratio"])
         self.multiple_spindle_var.set(defaults["multiple_spindle_warn"] == "1")
-        # 保存位置保留用户当前选择（恢复默认不清空存储位置偏好）
+        self.max_file_size_var.set(defaults["max_file_size"])
+        self.max_files_var.set(defaults["max_files"])
+        self.retract_z_threshold_var.set(defaults["retract_z_threshold"])
+        # WP-C8：恢复默认时保存位置回到注册表（默认后端），并清空另外两处残留配置。
+        self.storage_backend_var.set("registry")
         # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
         self.info_vars["bianzhi"].set("")
         self.info_vars["shenhe"].set("")
@@ -1408,28 +1550,9 @@ class App(ttk.Frame):
         self.info_defaults["shenhe"] = ""
 
     def _restore_default_settings(self):
-        """恢复全部默认值并立即写入注册表（含编制/审核）。"""
+        """恢复全部默认值：保存位置切回注册表，并清空另外两处可能残留的配置（含编制/审核）。"""
         self._apply_settings_defaults()
-        save_all(dict(REGISTRY_DEFAULTS), self.settings_registry_key, backend=self.storage_backend_var.get())
-        self.settings_window.destroy()
-        self.settings_window = None
-        self.scan()
-
-    def _clear_registry_settings(self):
-        """删除全部持久化的设置值（含编制/审核）并回到默认值。"""
-        backend, location = storage_backend(self.settings_registry_key)
-        if backend == "registry":
-            question = "将删除 HKCU\\Software\\NCodeProcess 下的全部程序设置值（含编制/审核），确定？"
-        else:
-            question = f"将删除设置文件 {location} 中的全部程序设置值（含编制/审核），确定？"
-        if not messagebox.askyesno(
-            "清除设置",
-            question,
-            parent=self.settings_window,
-        ):
-            return
-        clear_all(self.settings_registry_key)
-        self._apply_settings_defaults()
+        save_all(dict(REGISTRY_DEFAULTS), self.settings_registry_key, backend="registry")
         self.settings_window.destroy()
         self.settings_window = None
         self.scan()
@@ -1465,20 +1588,30 @@ class App(ttk.Frame):
         self.feed_outlier_low_ratio_var.set(snapshot.get("feed_outlier_low_ratio", self.feed_outlier_low_ratio_var.get()))
         self.feed_outlier_high_ratio_var.set(snapshot.get("feed_outlier_high_ratio", self.feed_outlier_high_ratio_var.get()))
         self.multiple_spindle_var.set(snapshot.get("multiple_spindle", self.multiple_spindle_var.get()))
+        self.max_file_size_var.set(snapshot.get("max_file_size", self.max_file_size_var.get()))
+        self.max_files_var.set(snapshot.get("max_files", self.max_files_var.get()))
+        self.retract_z_threshold_var.set(snapshot.get("retract_z_threshold", self.retract_z_threshold_var.get()))
         self.storage_backend_var.set(snapshot.get("storage_backend", self.storage_backend_var.get()))
         self.settings_window.destroy()
         self.settings_window = None
 
     def apply_info(self):
+        if self._scan_running:
+            messagebox.showinfo("扫描进行中", "扫描进行中，请稍候再应用程序信息。", parent=self.master)
+            return
         v = self.info_vars
         if not v["drawing"].get().strip() or not v["version"].get().strip():
             messagebox.showerror("信息不完整", "图号和版次为必填项。未应用设置，也不会修改任何 MPF 文件。", parent=self.master)
             return
         self.applied_info = ProgramInfo(v["bianzhi"].get().strip(), v["shenhe"].get().strip(), v["drawing"].get().strip(), v["version"].get().strip(), "", "SIE840D", v["date"].get().strip())
         self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
+        preview_config = self.config()
+        applied_plans = []
         if self.scan_result is not None:
             for plan_file in self.scan_result.files:
-                if plan_file.kind == "mpf" and plan_file.program:
+                if plan_file.kind == "mpf" and plan_file.program and plan_file.original_text is not None:
+                    # WP-P3：内存局部重处理，立即生成预览，不再依赖整目录重扫。
+                    reprocess_file(plan_file, self.info(), preview_config, tools=self.program_tools.get(plan_file.program, []))
                     self.program_header_values[plan_file.program] = {
                         "bianzhi": v["bianzhi"].get().strip(),
                         "shenhe": v["shenhe"].get().strip(),
@@ -1486,7 +1619,28 @@ class App(ttk.Frame):
                         "version": v["version"].get().strip(),
                         "date": v["date"].get().strip(),
                     }
-        self.status.set("程序信息已应用，正在刷新预览……")
+                    applied_plans.append(plan_file)
+        mode = "覆盖修改" if self.overwrite_fields.get() else "按默认逻辑（保留已有值）"
+        self.status.set(f"已生成 {len(applied_plans)} 个程序的预览（{mode}）。确认无误后点击“确认并执行处理”写入文件。")
+        # 立即用内存预览刷新表格与右侧信息（含新的头部/刀具）。
+        previous_program = None
+        if self.keep_table.selection():
+            try:
+                previous_program = self.scan_result.files[int(self.keep_table.selection()[0])].program
+            except (IndexError, TypeError, ValueError):
+                previous_program = None
+        self.populate_file_tables()
+        if previous_program:
+            for iid in self.keep_table.get_children():
+                try:
+                    if self.scan_result.files[int(iid)].program == previous_program:
+                        self.keep_table.selection_set(iid)
+                        self.keep_table.focus(iid)
+                        break
+                except (IndexError, TypeError, ValueError):
+                    continue
+        self.show_selected()
+        # WP-P3：末尾保留一次轻量扫描，刷新图号候选等目录级全局数据。
         self.scan()
 
     def _show_overwrite_help(self):
@@ -1502,6 +1656,9 @@ class App(ttk.Frame):
 
     def apply_selected(self):
         """Apply the program-info fields only to the selected MPF rows."""
+        if self._scan_running:
+            messagebox.showinfo("扫描进行中", "扫描进行中，请稍候再应用程序信息。", parent=self.master)
+            return
         v = self.info_vars
         if not v["drawing"].get().strip() or not v["version"].get().strip():
             messagebox.showerror("信息不完整", "图号和版次为必填项。未应用设置，也不会修改任何 MPF 文件。", parent=self.master)
@@ -1582,7 +1739,6 @@ class App(ttk.Frame):
             overwrite_fields=self.overwrite_fields.get(),
             auto_m03=self.auto_m03.get(),
             auto_tool_change=self.auto_tool_change.get(),
-            defer_stats=False,
             g00_level=self.g00_level.get(),
             delete_extensions=delete_extensions,
             allowed_name_pattern=self.allowed_name_pattern_var.get().strip(),
@@ -1605,12 +1761,18 @@ class App(ttk.Frame):
             feed_outlier_high_ratio=parse_positive_default(self.feed_outlier_high_ratio_var.get(), 3.0),
             multiple_spindle_warn=self.multiple_spindle_var.get(),
             ask_backup=self.ask_backup_var.get(),
+            max_file_size=parse_non_negative_int(self.max_file_size_var.get()),
+            max_files=parse_non_negative_int(self.max_files_var.get()),
+            retract_z_threshold=parse_positive_default(self.retract_z_threshold_var.get(), 20.0),
         )
 
     def info(self):
         return ProgramInfo(self.applied_info.bianzhi, self.applied_info.shenhe, self.applied_info.drawing_number, self.applied_info.part_version, "", "SIE840D", self.applied_info.date)
 
     def scan(self, *, overwrite_fields=None):
+        self._scan_running = True
+        self.apply_all_button.configure(state="disabled")
+        self.apply_selected_button.configure(state="disabled")
         self.process_button.configure(state="disabled")
         self.all_stats_button.configure(state="disabled")
         if self.all_stats_window is not None and self.all_stats_window.winfo_exists():
@@ -1625,9 +1787,22 @@ class App(ttk.Frame):
             config.overwrite_fields = overwrite_fields
         info = self.info()
         def work():
-            result = build_plan(scan_directory(str(self.workdir), config), info, config, self.program_tools)
+            try:
+                result = build_plan(scan_directory(str(self.workdir), config), info, config, self.program_tools)
+            except Exception:
+                self._safe_after(0, lambda: self._finish_scan_error(generation))
+                return
             self._safe_after(0, lambda: self.finish_scan(result, generation))
         threading.Thread(target=work, daemon=True).start()
+
+    def _finish_scan_error(self, generation):
+        """扫描线程异常时恢复界面状态，避免应用按钮永久禁用。"""
+        if generation is not None and generation != self._scan_generation:
+            return
+        self._scan_running = False
+        self.apply_all_button.configure(state="normal")
+        self.apply_selected_button.configure(state="normal")
+        self.status.set("扫描失败，请重试。")
 
     def finish_scan(self, result, generation=None):
         if generation is not None and generation != self._scan_generation:
@@ -1642,6 +1817,7 @@ class App(ttk.Frame):
             value = simpledialog.askstring("确认程序名", "无法确定程序名：" + f.source, parent=self.master)
             if value and re.match(pattern, value.strip()):
                 f.program = value.strip()
+                f.program_name_source = "手动确认"
                 f.issues = [i for i in f.issues if i.kind != "program-name"]
                 changed = True
         elif len(unresolved) > 1:
@@ -1651,6 +1827,7 @@ class App(ttk.Frame):
                     name = values.get(f.source, "")
                     if name and re.match(pattern, name):
                         f.program = name
+                        f.program_name_source = "手动确认"
                         f.issues = [i for i in f.issues if i.kind != "program-name"]
                         changed = True
         if changed:
@@ -1707,6 +1884,9 @@ class App(ttk.Frame):
         self.status.set(f"扫描完成：{len(result.files)} 个文件，{mpfs} 个 MPF；从保留/归档表选择 MPF 查看解析信息。")
         self.process_button.configure(state="normal" if result.files else "disabled")
         self.all_stats_button.configure(state="normal" if mpfs else "disabled")
+        self._scan_running = False
+        self.apply_all_button.configure(state="normal")
+        self.apply_selected_button.configure(state="normal")
 
     def _confirm_program_names(self, unresolved):
         """List-style batch confirmation for unnamed programs.
@@ -2067,6 +2247,7 @@ class App(ttk.Frame):
         if value == f.program:
             return
         f.program = value
+        f.program_name_source = "手动确认"
         f.target = str(Path(self.workdir) / (value + self.config().program_output_extension))
         f.issues = [issue for issue in f.issues if issue.kind != "program-name"]
         # 同步原文本中的 PROGRAM MSG，使重处理后的字段与文件名一致。
@@ -2292,7 +2473,7 @@ class App(ttk.Frame):
             new_text = text.get("1.0", "end-1c")
             window.destroy()
             self.program_editor_window = None
-            if new_text == f.original_text:
+            if not text_changed_ignoring_line_endings(f.original_text, new_text):
                 return
             f.original_text = new_text
             reprocess_file(f, self.info(), self.config(), tools=self.program_tools.get(f.program, []))
@@ -2367,9 +2548,26 @@ class App(ttk.Frame):
                     detail_lines.append(f"  · {change}")
             if len(modified) > 50:
                 detail_lines.append(f"  … 其余 {len(modified) - 50} 个文件略")
+        tool_skipped = [f for f in self.scan_result.files if f.kind == "mpf" and f.auto_tool_change_skipped]
+        if tool_skipped:
+            if detail_lines:
+                detail_lines.append("")
+            detail_lines.append("【自动添加换刀指令已跳过】")
+            for plan_file in tool_skipped:
+                detail_lines.append(f"[{plan_file.source}] {plan_file.auto_tool_change_skipped}")
         if not self.confirm_processing(summary, detail_lines):
             return
         backup = self._backup_requested() if self.config().ask_backup else False
+        # 在主线程捕获配置快照，避免工作线程读取 Tk 变量（非主线程访问 Tk 不安全）。
+        cfg = self.config()
+        confirmations = []
+        if backup:
+            confirmations.append("已确认：处理前备份到 backup 时间戳目录")
+        if self.save_aptsource.get():
+            confirmations.append("已确认：保存并归档 APTSOURCE")
+        if self.overwrite_fields.get():
+            confirmations.append("已确认：覆盖已有非空 MSG 字段")
+        confirmations.append("已确认：执行目录处理（含清理、归档与重复文件处理）")
         self.process_button.configure(state="disabled")
         self.status.set("正在处理当前目录……")
         self._processing = True
@@ -2378,7 +2576,7 @@ class App(ttk.Frame):
             def report(done, total, name):
                 with self._process_progress_lock:
                     self._process_progress = (done, total, name)
-            result = process_plan(self.scan_result, str(self.workdir), self.config(), confirm_cleanup=True, progress_callback=report, backup=backup)
+            result = process_plan(self.scan_result, str(self.workdir), cfg, confirm_cleanup=True, progress_callback=report, backup=backup, generator="gui", confirmations=confirmations)
             self._safe_after(0, lambda: self.finish_process(result))
         threading.Thread(target=work, daemon=True).start()
 
@@ -2456,18 +2654,32 @@ class App(ttk.Frame):
 
 
 def main():
-    root = tk.Tk()
-    root.withdraw()
+    anchor = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve()
+    if not acquire_single_instance(str(anchor)):
+        # 同一目录已有实例在运行：提示后退出，避免双 EXE 竞态写
+        # special_tools.json 与报告时间戳。
+        if sys.platform == "win32":
+            ctypes.windll.user32.MessageBoxW(None, "NCodeProcess 已在本目录运行，请勿重复启动。", "NCodeProcess", 0x40)
+        emit_event("warning", "startup", "检测到程序已在本目录运行，本次启动被拒绝")
+        return
     try:
-        style = ttk.Style()
-        style.theme_use("vista")
-        style.configure("Treeview", rowheight=24, font=("Microsoft YaHei UI", 9))
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
-        style.configure("TButton", padding=(8, 4))
-    except tk.TclError:
-        pass
-    App(root)
-    root.mainloop()
+        # WP-R3：启动不自动创建 NCodeProcessData/logs；磁盘日志仅在导出报告时落盘。
+        emit_event("info", "startup", f"程序启动（版本 {__version__}）")
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            style = ttk.Style()
+            style.theme_use("vista")
+            style.configure("Treeview", rowheight=24, font=("Microsoft YaHei UI", 9))
+            style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
+            style.configure("TButton", padding=(8, 4))
+        except tk.TclError:
+            pass
+        App(root)
+        root.mainloop()
+        emit_event("info", "shutdown", "程序退出")
+    finally:
+        release_single_instance()
 
 
 if __name__ == "__main__":

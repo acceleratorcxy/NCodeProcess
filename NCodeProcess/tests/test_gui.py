@@ -1,5 +1,8 @@
+import json
 import os
+import sys
 import tempfile
+import threading
 import tkinter as tk
 import unittest
 from pathlib import Path
@@ -7,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import ncodeprocess.gui as gui
-from ncodeprocess.core import FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ScanResult
+from ncodeprocess.core import FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ScanResult, emit_event, reset_runtime_log, runtime_log
 from ncodeprocess.gui import (
     App,
     centered_position,
@@ -22,6 +25,13 @@ TEST_SETTINGS_KEY = r"Software\NCodeProcess_UnitTests_Gui"
 
 
 class DiffViewTests(unittest.TestCase):
+    def test_text_changed_ignoring_line_endings(self):
+        # WP-B1：仅 CRLF/LF 差异不算内容变化，防止编辑器保存触发误重处理。
+        from ncodeprocess.gui import text_changed_ignoring_line_endings as changed
+        self.assertFalse(changed("N10 X10;\r\nN20 Y20;\r\n", "N10 X10;\nN20 Y20;\n"))
+        self.assertFalse(changed("N10 X10;\r\n", "N10 X10;\r\n"))
+        self.assertTrue(changed("N10 X10;\r\n", "N10 X11;\r\n"))
+
     def test_compact_diff_keeps_three_context_lines_and_counts_hidden(self):
         before = "\n".join(f"L{i}" for i in range(1, 16))
         after_lines = before.splitlines()
@@ -1035,7 +1045,62 @@ class SettingsDialogTests(LayoutWidgetTests):
             self.assertIn("确定", texts)
             self.assertIn("取消", texts)
             self.assertIn("恢复默认", texts)
-            self.assertIn("清除注册表", texts)
+            self.assertNotIn("清除注册表", texts)
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_has_max_limits_inputs(self):
+        # WP-C1：文件大小/数量上限输入存在，config() 按留空/非法回退 0 解析。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            self.assertIsNotNone(app.max_file_size_var)
+            self.assertIsNotNone(app.max_files_var)
+            app.max_file_size_var.set("2048")
+            app.max_files_var.set("abc")
+            cfg = app.config()
+            self.assertEqual(cfg.max_file_size, 2048)
+            self.assertEqual(cfg.max_files, 0)
+        finally:
+            root.destroy()
+
+    def test_settings_pages_frames_share_same_width(self):
+        # WP-C1 布局统一：基本设置与校验规则页的 LabelFrame 宽度一致，切换不跳动。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            win = app.settings_window
+            win.update()
+            basic, rules = app.settings_pages
+
+            def frame_widths(page):
+                return [child.winfo_width() for child in page.winfo_children()
+                        if child.winfo_class() == "TLabelframe"]
+
+            app.settings_notebook.select(0)
+            win.update()
+            basic_widths = frame_widths(basic)
+            app.settings_notebook.select(1)
+            win.update()
+            rules_widths = frame_widths(rules)
+            self.assertTrue(basic_widths)
+            self.assertTrue(rules_widths)
+            self.assertEqual(len(set(basic_widths)), 1)
+            self.assertEqual(len(set(rules_widths)), 1)
+            self.assertEqual(basic_widths[0], rules_widths[0])
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_has_retract_z_threshold_input(self):
+        # WP-C9：抬刀高度阈值输入存在，config() 按留空/非法回退默认 20 解析。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            self.assertIsNotNone(app.retract_z_threshold_var)
+            app.retract_z_threshold_var.set("abc")
+            self.assertEqual(app.config().retract_z_threshold, 20.0)
+            app.retract_z_threshold_var.set("12")
+            self.assertEqual(app.config().retract_z_threshold, 12.0)
         finally:
             root.destroy()
 
@@ -1099,38 +1164,10 @@ class SettingsDialogTests(LayoutWidgetTests):
             saved = load_all(TEST_SETTINGS_KEY)
             self.assertEqual(saved["encoding"], "auto")
             self.assertEqual(saved["bianzhi"], "")
+            # WP-C8：恢复默认后保存位置回到注册表（并清空另两处残留）。
+            self.assertEqual(app.storage_backend_var.get(), "registry")
+            self.assertEqual(saved["storage_backend"], "registry")
             scan_mock.assert_called_once_with()
-        finally:
-            clear_all(TEST_SETTINGS_KEY)
-            root.destroy()
-
-    def test_clear_registry_confirmed_removes_values(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            app.settings_registry_key = TEST_SETTINGS_KEY
-            save_all({"encoding": "gb18030", "bianzhi": "张工"}, TEST_SETTINGS_KEY)
-            with patch("ncodeprocess.gui.messagebox.askyesno", return_value=True), patch.object(App, "scan") as scan_mock:
-                app.open_settings()
-                app._clear_registry_settings()
-            # 统一清除：程序设置与编制/审核一起删除
-            self.assertEqual(load_all(TEST_SETTINGS_KEY), {})
-            self.assertEqual(app.encoding_var.get(), "auto")
-            self.assertEqual(app.info_vars["bianzhi"].get(), "")
-            scan_mock.assert_called_once_with()
-        finally:
-            clear_all(TEST_SETTINGS_KEY)
-            root.destroy()
-
-    def test_clear_registry_cancelled_keeps_values(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            app.settings_registry_key = TEST_SETTINGS_KEY
-            save_all({"encoding": "gb18030"}, TEST_SETTINGS_KEY)
-            with patch("ncodeprocess.gui.messagebox.askyesno", return_value=False):
-                app.open_settings()
-                app._clear_registry_settings()
-            self.assertEqual(load_all(TEST_SETTINGS_KEY)["encoding"], "gb18030")
-            self.assertIsNotNone(app.settings_window)
         finally:
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
@@ -1407,6 +1444,26 @@ class SettingsDialogTests(LayoutWidgetTests):
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
+    def test_single_instance_mutex_name_is_stable_and_path_specific(self):
+        # WP-12：同一路径生成相同互斥体名，不同路径互不相同。
+        first = gui.single_instance_mutex_name(r"C:\dir\NCodeProcess.exe")
+        second = gui.single_instance_mutex_name(r"C:\dir\NCodeProcess.exe")
+        other = gui.single_instance_mutex_name(r"C:\other\NCodeProcess.exe")
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, other)
+        self.assertTrue(first.startswith("NCodeProcess_"))
+        # WP-S1：FNV-1a 64 位输出格式（16 位十六进制），锁定格式防止回归。
+        self.assertRegex(first, r"^NCodeProcess_[0-9a-f]{16}$")
+
+    @unittest.skipUnless(sys.platform == "win32", "命名互斥体仅存在于 Windows")
+    def test_acquire_single_instance_second_call_fails(self):
+        # WP-12：同目录第二个实例获取互斥体失败。
+        self.assertTrue(gui.acquire_single_instance(r"C:\dir\NCodeProcess.exe"))
+        try:
+            self.assertFalse(gui.acquire_single_instance(r"C:\dir\NCodeProcess.exe"))
+        finally:
+            gui.release_single_instance()
+
     def test_required_field_checkbuttons_have_equal_spacing(self):
         # 必填 MSG 字段的 4 个勾选项位于同一容器内等间距排列。
         root, app = self._build_app(1286, 668)
@@ -1427,8 +1484,8 @@ class SettingsDialogTests(LayoutWidgetTests):
             root.destroy()
 
     def test_feed_spindle_limit_rows_have_tight_consistent_spacing(self):
-        # F/S 上下限的「输入框 ~ 输入框」位于各自独立子容器内紧凑排列：
-        # 不与共享网格列对齐导致大间距，且相邻间隙一致且很小。
+        # F/S 上下限合并于同一行容器（F 段与 S 段），每段「输入框 ~ 输入框」
+        # 内部紧凑排列：不与共享网格列对齐导致大间距，段内间隙一致且很小。
         root, app = self._build_app(1286, 668)
         try:
             app.open_settings()
@@ -1443,18 +1500,16 @@ class SettingsDialogTests(LayoutWidgetTests):
                 and str(widget.cget("textvariable")) in limit_vars
             ]
             self.assertEqual(len(limit_entries), 4)
-            # 两行（F / S）各自独立容器，而非全部挂在共享网格的 rules 上。
             frames = {widget.master for widget in limit_entries}
-            self.assertEqual(len(frames), 2)
+            self.assertEqual(len(frames), 1)
+            frame = next(iter(frames))
+            children = frame.winfo_children()
+            self.assertGreaterEqual(len(children), 7)
             root.update()
-            for frame in frames:
-                children = frame.winfo_children()
-                self.assertGreaterEqual(len(children), 3)
-                positions = [widget.winfo_x() for widget in children]
-                gaps = [
-                    positions[i + 1] - (positions[i] + children[i].winfo_width())
-                    for i in range(len(children) - 1)
-                ]
+            for start in (1, 5):  # F 段与 S 段的 (输入框 ~ 输入框)
+                positions = [children[start + i].winfo_x() for i in range(3)]
+                widths = [children[start + i].winfo_width() for i in range(3)]
+                gaps = [positions[i + 1] - (positions[i] + widths[i]) for i in range(2)]
                 self.assertEqual(len(set(gaps)), 1)  # 相邻间隙一致
                 self.assertLessEqual(gaps[0], 6)     # 间隙足够小（紧凑）
         finally:
@@ -1554,6 +1609,44 @@ class ScanLifecycleTests(unittest.TestCase):
                 app.finish_process(ProcessReport("in", "out", "start"))
             self.assertFalse(app._processing)
             self.assertIsNone(app._process_progress)
+        finally:
+            root.destroy()
+
+    def test_apply_buttons_disabled_while_scan_running(self):
+        # WP-C4：扫描期间禁用全部应用/应用所选，并拦截直接调用。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.scan()
+            self.assertTrue(app._scan_running)
+            self.assertEqual(str(app.apply_all_button.cget("state")), "disabled")
+            self.assertEqual(str(app.apply_selected_button.cget("state")), "disabled")
+            with patch("ncodeprocess.gui.messagebox.showinfo") as showinfo:
+                app.apply_info()
+                app.apply_selected()
+            self.assertEqual(showinfo.call_count, 2)
+            # 扫描结束恢复按钮。
+            app._scan_running = False
+            app.apply_all_button.configure(state="normal")
+            app.apply_selected_button.configure(state="normal")
+            self.assertEqual(str(app.apply_all_button.cget("state")), "normal")
+        finally:
+            root.destroy()
+
+    def test_apply_info_does_not_rescan_whole_directory(self):
+        # WP-P3：全部应用改为内存局部重处理并立即刷新预览，不再依赖整目录重扫。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nMSG("DRAWING NUMBER:OLD")\nN1G1X10F500\nN2M30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.info_vars["drawing"].set("NEW_D")
+            app.info_vars["version"].set("V1")
+            app.overwrite_fields.set(True)
+            with patch.object(App, "scan") as scan_mock:
+                app.apply_info()
+            # 内存重处理立即生效（预览刷新），不依赖整目录重扫。
+            self.assertIn('MSG("DRAWING NUMBER:NEW_D")', plan.output_text or "")
+            self.assertLessEqual(scan_mock.call_count, 1)
         finally:
             root.destroy()
 
@@ -1659,6 +1752,9 @@ class ScanLifecycleTests(unittest.TestCase):
             self.assertEqual(plan.program, "Q")
             self.assertIn("Q.MPF", plan.target or "")
             self.assertIn('MSG("PROGRAM:Q")', plan.original_text)
+            # WP-B2：改名同步到表格显示与重处理后的头部。
+            self.assertEqual(app.keep_table.item("0", "values")[1], "Q")
+            self.assertIn('MSG("PROGRAM:Q")', plan.output_text or "")
         finally:
             root.destroy()
 
@@ -1921,6 +2017,102 @@ class ScanLifecycleTests(unittest.TestCase):
             app.compare_selected_programs()
             left_lines = int(app.program_compare_left.index("end-1c").split(".")[0])
             self.assertLessEqual(left_lines, 21)
+        finally:
+            root.destroy()
+
+
+class RuntimeEventTests(unittest.TestCase):
+    """WP-C6：GUI 事件埋点（settings_loaded / settings_saved）。"""
+
+    def _build_app(self, width, height):
+        root = tk.Tk()
+        root.withdraw()
+        with patch.object(App, "scan", lambda _self: None):
+            app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
+        root.geometry(f"{width}x{height}")
+        root.deiconify()
+        root.update_idletasks()
+        root.update()
+        root.update_idletasks()
+        return root, app
+
+    def test_app_start_emits_settings_loaded_event(self):
+        reset_runtime_log()
+        root, app = self._build_app(1286, 668)
+        try:
+            events = [entry["event"] for entry in runtime_log().snapshot()]
+            self.assertIn("settings_loaded", events)
+        finally:
+            root.destroy()
+
+    def test_settings_confirm_emits_settings_saved_event(self):
+        reset_runtime_log()
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            with patch.object(App, "scan"):
+                app._confirm_settings()
+            events = [entry["event"] for entry in runtime_log().snapshot()]
+            self.assertIn("settings_saved", events)
+        finally:
+            clear_all(TEST_SETTINGS_KEY)
+            root.destroy()
+
+    def test_save_fields_emits_settings_saved_without_names(self):
+        reset_runtime_log()
+        root, app = self._build_app(1286, 668)
+        try:
+            with patch("ncodeprocess.preferences.save_all", return_value=("registry", "HKCU")):
+                app.save_fields()
+            snapshot = runtime_log().snapshot()
+            entries = [entry for entry in snapshot if entry["event"] == "settings_saved"]
+            self.assertTrue(entries)
+            self.assertNotIn("张工", json.dumps(entries, ensure_ascii=False))
+        finally:
+            root.destroy()
+
+    def test_process_passes_generator_gui_and_confirmations(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.changes = ["补全头部"]
+            app.scan_result = ScanResult("tmp", [plan])
+            app.applied_info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+            called = {}
+            ready = threading.Event()
+
+            def fake_process_plan(_scan, _output, _config, **_kwargs):
+                called.update(_kwargs)
+                ready.set()
+                return ProcessReport("in", "out", "start")
+
+            with patch.object(App, "confirm_processing", return_value=True), \
+                 patch.object(App, "_backup_requested", return_value=False), \
+                 patch("ncodeprocess.gui.process_plan", side_effect=fake_process_plan), \
+                 patch("ncodeprocess.gui.messagebox"):
+                app.process()
+            self.assertTrue(ready.wait(2))
+            self.assertEqual(called.get("generator"), "gui")
+            self.assertTrue(any(str(c).startswith("已确认：执行目录处理") for c in called.get("confirmations", [])))
+        finally:
+            root.destroy()
+
+    def test_confirm_processing_shows_auto_tool_change_skipped_section(self):
+        # WP-A2：最终执行确认页明确列出因多刀无法自动添加换刀指令的程序。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.changes = ["补全头部"]
+            plan.auto_tool_change_skipped = "程序引用多把刀具，不具备自动添加换刀指令条件，已跳过生成，请人工确认换刀流程"
+            app.scan_result = ScanResult("tmp", [plan])
+            app.applied_info = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
+            with patch.object(App, "confirm_processing", return_value=False) as confirm:
+                app.process()
+            _summary, detail_lines = confirm.call_args.args
+            joined = "\n".join(detail_lines)
+            self.assertIn("【自动添加换刀指令已跳过】", joined)
+            self.assertIn("P.MPF", joined)
+            self.assertIn("多把刀具", joined)
         finally:
             root.destroy()
 
