@@ -327,6 +327,7 @@ class App(ttk.Frame):
         self.special_tools_path = self.data_dir / "special_tools.json"
         self.legacy_special_tools_path = self.workdir / "NCPostProcessData" / "special_tools.json"
         self.scan_result = None
+        self._scan_generation = 0
         self.report = None
         self.info_vars = {}
         self.info_defaults = {key: "" for key in ("bianzhi", "shenhe", "drawing", "version", "date")}
@@ -1377,14 +1378,21 @@ class App(ttk.Frame):
             self.all_stats_window.destroy()
             self.all_stats_window = None
         self.status.set("正在扫描 EXE 所在目录……")
+        self._scan_generation += 1
+        generation = self._scan_generation
         config = self.config()
         info = self.info()
         def work():
             result = build_plan(scan_directory(str(self.workdir), config), info, config, self.program_tools)
-            self.after(0, lambda: self.finish_scan(result))
+            try:
+                self.after(0, lambda: self.finish_scan(result, generation))
+            except tk.TclError:
+                pass
         threading.Thread(target=work, daemon=True).start()
 
-    def finish_scan(self, result):
+    def finish_scan(self, result, generation=None):
+        if generation is not None and generation != self._scan_generation:
+            return
         unresolved = [f for f in result.files if f.kind == "mpf" and not f.program]
         changed = False
         for f in unresolved:

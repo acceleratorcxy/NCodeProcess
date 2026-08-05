@@ -1376,5 +1376,20 @@ class ReportExportTests(unittest.TestCase):
         showerror.assert_not_called()
 
 
+class ScanLifecycleTests(LayoutWidgetTests):
+    def test_finish_scan_ignores_stale_generation(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app._scan_generation = 2
+            app.scan_result = None
+            stale = ScanResult("stale", [], warnings=["stale"])
+            app.finish_scan(stale, 1)   # 旧代结果：应被忽略
+            self.assertIsNone(app.scan_result)
+            app.finish_scan(stale, 2)   # 当前代结果：应生效
+            self.assertIs(app.scan_result, stale)
+        finally:
+            root.destroy()
+
+
 if __name__ == "__main__":
     unittest.main()
