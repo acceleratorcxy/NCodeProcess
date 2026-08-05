@@ -653,7 +653,18 @@ def extract_tools(text: str) -> List[ToolInfo]:
                     same_dia = cutter_dia.strip() == nominal_dia.strip()
                     same_coner = cutter_coner.strip() == nominal_coner.strip()
                 if same_dia and same_coner:
-                    tool_type = "普通立铣刀"
+                    # 普通立铣刀按 R 与 D 的关系细分：球头 R=D/2、平底 R=0、其余圆鼻。
+                    try:
+                        radius = float(cutter_coner)
+                        mill_dia = float(cutter_dia)
+                    except ValueError:
+                        radius = mill_dia = 0.0
+                    if radius <= 1e-9:
+                        tool_type = "平底立铣刀"
+                    elif abs(radius * 2 - mill_dia) <= 1e-6:
+                        tool_type = "球头立铣刀"
+                    else:
+                        tool_type = "圆鼻立铣刀"
                 elif included_angle:
                     try:
                         angle_value = float(included_angle) / 2.0
@@ -664,6 +675,16 @@ def extract_tools(text: str) -> List[ToolInfo]:
                             tool_type = "铅笔铣刀"
                     except ValueError:
                         pass
+                else:
+                    # T 形刀初步识别：直径差异大（比值 >= 2）且无锥度角度。
+                    try:
+                        cutter_value = float(cutter_dia)
+                        nominal_value = float(nominal_dia)
+                        ratio = max(cutter_value, nominal_value) / min(cutter_value, nominal_value)
+                    except (ValueError, ZeroDivisionError):
+                        ratio = 1.0
+                    if ratio >= 2.0:
+                        tool_type = "T形刀"
             found[number] = ToolInfo(number, dia, coner, tool_type, tool_angle)
             # A CUTTER record belongs to the next TOOLNO only.
             cutter_dia = ""

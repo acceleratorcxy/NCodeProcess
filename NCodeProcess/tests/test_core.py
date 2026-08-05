@@ -200,29 +200,55 @@ class CoreTests(unittest.TestCase):
         tool = extract_tools(text)[0]
         self.assertEqual(tool.dia, "16.000")
         self.assertEqual(tool.tool_coner, "3.000")
-        self.assertEqual(tool.tool_type, "普通立铣刀")
+        self.assertEqual(tool.tool_type, "圆鼻立铣刀")
         self.assertEqual(tool.tool_angle, "")
 
     def test_ordinary_mill_requires_matching_corner_radius(self):
-        # FR-4.3.16: 直径与圆角都一致才判普通立铣刀；圆角不一致不得误判。
+        # FR-4.3.16: 直径与圆角都一致才判普通立铣刀族；圆角不一致不得误判。
         text = "CUTTER/10,2\nTOOLNO/1,10,1,,\n"
         tools = extract_tools(text)
         self.assertEqual(tools[0].tool_type, "")
 
+    def test_round_nose_split_into_ball_flat_and_round_nose(self):
+        # 普通立铣刀按 R 与 D 的关系细分：球头 R=D/2、平底 R=0、其余圆鼻。
+        cases = (
+            ("CUTTER/ 10.000000,  5.000000\nTOOLNO/1, 10.000000, 5.000000,, 120.000000,$\n", "球头立铣刀"),
+            ("CUTTER/ 10.000000,  0.000000\nTOOLNO/2, 10.000000, 0.000000,, 120.000000,$\n", "平底立铣刀"),
+            ("CUTTER/ 20.000000,  3.000000\nTOOLNO/3, 20.000000, 3.000000,, 120.000000,$\n", "圆鼻立铣刀"),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text.splitlines()[0]):
+                tool = extract_tools(text)[0]
+                self.assertEqual(tool.tool_type, expected)
+
+    def test_t_slot_mill_recognized_when_diameter_ratio_large(self):
+        # 刀具说明：T 形刀直径与切削刃差异很大、无锥度角度。
+        # 初步规则：直径比值 >= 2 且无包含角 → T 形刀。
+        text = "CUTTER/ 30.000000,  1.000000\nTOOLNO/1, 10.000000, 1.000000,, 120.000000,$\n"
+        tool = extract_tools(text)[0]
+        self.assertEqual(tool.tool_type, "T形刀")
+
+    def test_reverse_taper_not_mistaken_for_t_slot_mill(self):
+        # 反锥直径差小（12 vs 10.467，比值约 1.15）且带负角度，不得判为 T 形刀。
+        text = "CUTTER/ 12.000000,  3.000000\nTOOLNO/4, 10.467000, 3.000000, -4.000000, 120.000000,$\n"
+        tool = extract_tools(text)[0]
+        self.assertEqual(tool.tool_type, "反锥立铣刀")
+        self.assertEqual(tool.tool_angle, "-2.000")
+
     def test_sample_apt_round_nose_ball_and_flat_mills_are_ordinary(self):
-        # 样例刀具说明：圆鼻/球头/平底立铣刀（D20R3/D10R5/D10R0）→ 普通立铣刀。
+        # 样例刀具说明：圆鼻/球头/平底立铣刀（D20R3/D10R5/D10R0）→ 细分类型。
         # 使用样例真实格式：CUTTER 5 参 + TOOLNO 第 3 参圆角 + 第 5 参 120。
         cases = (
-            ("CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\nTOOLNO/1,   20.000000,    3.000000,,  120.000000,$\n", "20.000", "3.000"),
-            ("CUTTER/ 10.000000,  5.000000,  0.000000,  5.000000,  0.000000,$\nTOOLNO/6,   10.000000,    5.000000,,  120.000000,$\n", "10.000", "5.000"),
-            ("CUTTER/ 10.000000,  0.000000,  5.000000,  0.000000,  0.000000,$\nTOOLNO/14,   10.000000,    0.000000,,  120.000000,$\n", "10.000", "0.000"),
+            ("CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\nTOOLNO/1,   20.000000,    3.000000,,  120.000000,$\n", "20.000", "3.000", "圆鼻立铣刀"),
+            ("CUTTER/ 10.000000,  5.000000,  0.000000,  5.000000,  0.000000,$\nTOOLNO/6,   10.000000,    5.000000,,  120.000000,$\n", "10.000", "5.000", "球头立铣刀"),
+            ("CUTTER/ 10.000000,  0.000000,  5.000000,  0.000000,  0.000000,$\nTOOLNO/14,   10.000000,    0.000000,,  120.000000,$\n", "10.000", "0.000", "平底立铣刀"),
         )
-        for text, dia, coner in cases:
+        for text, dia, coner, tool_type in cases:
             with self.subTest(text=text.splitlines()[0]):
                 tool = extract_tools(text)[0]
                 self.assertEqual(tool.dia, dia)
                 self.assertEqual(tool.tool_coner, coner)
-                self.assertEqual(tool.tool_type, "普通立铣刀")
+                self.assertEqual(tool.tool_type, tool_type)
                 self.assertEqual(tool.tool_angle, "")
 
     def test_sample_apt_reverse_taper_mill_with_angle(self):
@@ -313,7 +339,7 @@ class CoreTests(unittest.TestCase):
             {"P": [ToolInfo(5, "88", "", "配置旧信息")]},
         )
         out = self._mpf(plan).output_text
-        self.assertIn('MSG("T5:DIA=16.000,TOOL_CONER=3.000,TOOL_TYPE=普通立铣刀")', out)
+        self.assertIn('MSG("T5:DIA=16.000,TOOL_CONER=3.000,TOOL_TYPE=圆鼻立铣刀")', out)
         self.assertNotIn("DIA=99", out)
         self.assertNotIn("DIA=88", out)
 
@@ -329,7 +355,7 @@ class CoreTests(unittest.TestCase):
         cfg = self._cfg()
         plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         out = self._mpf(plan).output_text
-        self.assertIn('MSG("T5:DIA=16.000,TOOL_CONER=3.000,TOOL_TYPE=普通立铣刀")', out)
+        self.assertIn('MSG("T5:DIA=16.000,TOOL_CONER=3.000,TOOL_TYPE=圆鼻立铣刀")', out)
         self.assertNotIn("DIA=10.000000", out)
 
     def test_streamed_apt_scan_keeps_multiple_tool_records(self):
@@ -345,8 +371,8 @@ class CoreTests(unittest.TestCase):
         cfg = self._cfg()
         plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         out = self._mpf(plan).output_text
-        self.assertIn('MSG("T1:DIA=10.000,TOOL_CONER=3.000,TOOL_TYPE=普通立铣刀")', out)
-        self.assertIn('MSG("T2:DIA=6.000,TOOL_CONER=1.000,TOOL_TYPE=普通立铣刀")', out)
+        self.assertIn('MSG("T1:DIA=10.000,TOOL_CONER=3.000,TOOL_TYPE=圆鼻立铣刀")', out)
+        self.assertIn('MSG("T2:DIA=6.000,TOOL_CONER=1.000,TOOL_TYPE=圆鼻立铣刀")', out)
 
     def test_program_tool_override_replaces_existing_tool_rows(self):
         root = self.make_dir()

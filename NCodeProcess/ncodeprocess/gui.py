@@ -39,7 +39,7 @@ from .preferences import (
 )
 
 
-DEFAULT_TOOL_TYPES = ["普通立铣刀", "反锥立铣刀", "铅笔铣刀", "T形刀", "钻头", "中心钻"]
+DEFAULT_TOOL_TYPES = ["普通立铣刀", "圆鼻立铣刀", "球头立铣刀", "平底立铣刀", "反锥立铣刀", "铅笔铣刀", "T形刀", "钻头", "中心钻"]
 
 
 def parse_extension_list(raw: str) -> set:
