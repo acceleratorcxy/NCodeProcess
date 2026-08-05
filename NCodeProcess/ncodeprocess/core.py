@@ -725,13 +725,33 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
     header = lines[:end]
     body = lines[end:]
     existing_tool_keys = set()
+    existing_tool_objects = {}
+    skip_tools = set()
     if replace_tools or info.tools:
+        existing_tool_objects = {tool.number: tool for tool in extract_tools("\n".join(header))}
+        new_tools_by_number = {tool.number: tool for tool in info.tools}
         filtered = []
         for line in header:
             parsed = _parse_msg(line)
-            if parsed and re.match(r"^T\d+$", parsed[0], re.I):
-                existing_tool_keys.add(parsed[0].upper())
-                continue
+            if parsed:
+                tool_match = re.match(r"^T(\d+)$", parsed[0], re.I)
+                if tool_match:
+                    number = int(tool_match.group(1))
+                    existing_tool_keys.add(parsed[0].upper())
+                    new_tool = new_tools_by_number.get(number)
+                    old_tool = existing_tool_objects.get(number)
+                    if new_tool is not None and old_tool is not None and (
+                        old_tool.dia == new_tool.dia
+                        and old_tool.tool_coner == new_tool.tool_coner
+                        and old_tool.tool_angle == new_tool.tool_angle
+                        and old_tool.tool_type == new_tool.tool_type
+                    ):
+                        # 刀具信息完全一致：保留原行、不记录变更。
+                        filtered.append(line)
+                        skip_tools.add(parsed[0].upper())
+                        continue
+                    # 有变化或新刀具列表不含该号：移除该行（有变化者稍后按新值重写）。
+                    continue
             filtered.append(line)
         header = filtered
     fields = info.fields(program)
@@ -784,6 +804,8 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
         if not payload:
             continue
         key = f"T{tool.number}"
+        if key.upper() in skip_tools:
+            continue
         line = _msg_line(key, payload.split(":", 1)[1], semicolon)
         if key in seen:
             # Replace only when caller supplied tool information; values remain editable.

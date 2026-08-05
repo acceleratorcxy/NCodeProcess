@@ -417,6 +417,20 @@ class CoreTests(unittest.TestCase):
         _out, changes, _issues = apply_header(text, "P", info, self._cfg(), replace_tools=True)
         self.assertIn("插入刀具 T2", changes)
 
+    def test_apply_header_skips_unchanged_tool_rows(self):
+        # 刀具信息与头部已有 Tn 完全一致时：保留原行、不记录任何刀具变更。
+        text = 'MSG("PROGRAM:P")\nMSG("T1:DIA=10.000,TOOL_CONER=3.000,TOOL_TYPE=圆鼻立铣刀")\nN1G1X10F1000S5000M03\nM30\n'
+        info = ProgramInfo("A", "B", "D", "V", "HASS", "SIE840D", "DATE")
+        info.tools = [ToolInfo(1, "10", "3", "圆鼻立铣刀", "")]
+        _out, changes, _issues = apply_header(text, "P", info, self._cfg(), replace_tools=True)
+        self.assertFalse(any("刀具" in change for change in changes), f"不应记录刀具变更: {changes}")
+        self.assertIn('MSG("T1:DIA=10.000,TOOL_CONER=3.000,TOOL_TYPE=圆鼻立铣刀")', _out)
+        # 刀具值有变化时仍记录更新。
+        info.tools[0] = ToolInfo(1, "12", "3", "圆鼻立铣刀", "")
+        _out, changes, _issues = apply_header(text, "P", info, self._cfg(), replace_tools=True)
+        self.assertIn("更新刀具 T1", changes)
+        self.assertIn('MSG("T1:DIA=12.000', _out)
+
     def test_existing_reprocessing_header_values_are_preserved(self):
         text = (
             'MSG("PROGRAM:OLD_PROGRAM")\n'
