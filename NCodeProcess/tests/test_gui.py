@@ -1417,9 +1417,10 @@ class ScanLifecycleTests(unittest.TestCase):
             app._scan_generation = 2
             app.scan_result = None
             stale = ScanResult("stale", [], warnings=["stale"])
-            app.finish_scan(stale, 1)   # 旧代结果：应被忽略
-            self.assertIsNone(app.scan_result)
-            app.finish_scan(stale, 2)   # 当前代结果：应生效
+            with patch("ncodeprocess.gui.messagebox.showwarning"):
+                app.finish_scan(stale, 1)   # 旧代结果：应被忽略
+                self.assertIsNone(app.scan_result)
+                app.finish_scan(stale, 2)   # 当前代结果：应生效
             self.assertIs(app.scan_result, stale)
         finally:
             root.destroy()
