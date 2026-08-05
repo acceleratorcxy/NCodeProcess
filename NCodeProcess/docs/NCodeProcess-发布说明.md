@@ -123,7 +123,20 @@
 - **WP-C2/D1/D2**（P2/P3）：死代码清理、程序名默认正则提为模块常量。
 - **WP-D3/D4**（P3）：构建不可复现性文档化、文档一致性总修订。
 
-测试基线：主工具 **277 项**、查看器 **9 项**。完整记录见 `docs/NCodeProcess-程序理解与操作记录.md` 与 `docs/NCodeProcess-审查与待办.md`。
+测试基线：主工具 **245 项**、查看器 **10 项**（以 `python -m unittest discover -s tests -v` 输出为准）。完整记录见 `docs/NCodeProcess-程序理解与操作记录.md` 与 `docs/NCodeProcess-审查与待办.md`。
+
+## 附：测试套件整改摘要（2026-08-06，未独立发版）
+
+按「NCodeProcess 测试套件整改实施计划」完成 WP-T1/T2/T3/T4/T5/T7（WP-T6 大文件拆分登记待办）：
+
+- **WP-T1**：抽取 `LayoutWidgetMixin`，消除 `SettingsDialogTests` 继承导致的 19 项重复执行。
+- **WP-T2**：合并 11 组重叠用例（subTest 表驱动，断言不变）。
+- **WP-T3**：tooltip 断言改轮询 pump，连续 10 次无 flake。
+- **WP-T4**：删除注册表键集复制断言、版本资源断言动态推导、像素间距断言加容差。
+- **WP-T5**：新增 CLI 全流程/CSV/程序名提取测试，消除覆盖空白。
+- **WP-T7**：测试基线改为以 discover 输出为准；新增 `run_tests.ps1` 一键跑主/查看器两套测试。
+
+全套耗时由约 51s 降至约 37s；仅改动测试与文档，未触碰生产代码。
 
 ## 附：性能与打包体积优化摘要（2026-08-06，未独立发版）
 
