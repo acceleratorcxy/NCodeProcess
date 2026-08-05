@@ -2211,6 +2211,17 @@ class App(ttk.Frame):
         if not self.applied_info.drawing_number.strip() or not self.applied_info.part_version.strip():
             messagebox.showerror("信息不完整", "图号和版次未通过“应用设置”提交，已放弃本次修改。", parent=self.master)
             return
+        has_changes = any(
+            f.changes or f.action in ("delete", "move", "duplicate")
+            for f in self.scan_result.files
+        )
+        if not has_changes:
+            messagebox.showinfo(
+                "无更改",
+                "当前没有需要执行的处理：程序信息没有变化，也没有文件清理、归档或重命名操作。",
+                parent=self.master,
+            )
+            return
         deletes = [f.source for f in self.scan_result.files if f.action == "delete"]
         duplicates = [f for f in self.scan_result.files if f.action == "duplicate"]
         mpfs = sum(f.kind == "mpf" and f.action != "duplicate" for f in self.scan_result.files)

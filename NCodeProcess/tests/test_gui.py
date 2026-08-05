@@ -1700,6 +1700,40 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_process_aborts_without_changes(self):
+        # 没有程序信息变化、也没有清理/归档/重命名操作时，提示“无更改”并停止。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
+            plan.output_text = plan.original_text
+            app.scan_result = ScanResult("tmp", [plan])
+            app.applied_info = ProgramInfo("A", "B", "D", "V", "", "SIE840D", "")
+            with patch("ncodeprocess.gui.messagebox.showinfo") as showinfo, \
+                 patch.object(app, "confirm_processing") as confirm:
+                app.process()
+            showinfo.assert_called_once()
+            confirm.assert_not_called()
+        finally:
+            root.destroy()
+
+    def test_process_proceeds_when_changes_exist(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
+            plan.output_text = plan.original_text
+            plan.changes = ["补全 DRAWING NUMBER"]
+            app.scan_result = ScanResult("tmp", [plan])
+            app.applied_info = ProgramInfo("A", "B", "D", "V", "", "SIE840D", "")
+            with patch("ncodeprocess.gui.messagebox.showinfo") as showinfo, \
+                 patch.object(app, "confirm_processing", return_value=False) as confirm:
+                app.process()
+            showinfo.assert_not_called()
+            confirm.assert_called_once()
+        finally:
+            root.destroy()
+
     def test_parsed_info_shows_encoding(self):
         root, app = self._build_app(1286, 668)
         try:
