@@ -11,7 +11,7 @@
 **关联文档：**
 - 需求基线：`NCodeProcess-需求文档.md`（V1.1，第 13 节待确认事项、FR-07.2/07.3、第 15 节实施状态）
 - 待办来源：`NCodeProcess-审查与待办.md`、`NCodeProcessReportViewer-审查与待办.md`
-- 测试基线：`NCodeProcess-测试指南.md`（191 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
+- 测试基线：`NCodeProcess-测试指南.md`（198 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
 - 前置工作：Batch 1 / Batch 2 计划（已完成，见 `docs/archive/superpowers/plans/`）
 
 ---
@@ -49,7 +49,7 @@
 | WP-04 | 备份/回收站兜底与只读目录预检 | 中 | 主 | `core.py`、`gui.py` | 无 | 只读目录启动/扫描后有提示；处理前可选备份，删除/覆盖可恢复 |
 | WP-05 | 编码识别、NUL 检测与 gbk/gb2312 支持 | 中 | 主 | `core.py`、`gui.py` | 无 | 解析信息显示实际编码；含 NUL 数据报 encoding 错误；支持 gbk/gb2312 识别与强制指定 |
 | WP-06 | 注释边界统一与刀具圆角比较 | 中 | 主 | `core.py` | 无 | `add_initial_tool_change` 不改写注释内 T 号；`extract_tools` 普通立铣刀判定同时比较直径与圆角 |
-| WP-07 | FR-07.2/07.3 校验缺口 | 中 | 主 | `core.py` | 无 | 新增刀具号一致性、孤立坐标/进给/转速、互斥 G/M 检查并有测试锁定 |
+| WP-07 | FR-07.2/07.3 校验缺口与 F 上离群 | 中 | 主 | `core.py` | 无 | 新增刀具号一致性、孤立 F/S 参数、互斥 M 指令、F 上离群校验并有测试锁定 |
 | WP-08 | 异常归类细分 | 低 | 主 | `core.py` | 无 | MPF 读取异常按 encoding/permission/io 区分 kind |
 | WP-09 | 未命名程序批量确认页 | 低 | 主 | `gui.py` | 无 | 多个未命名程序一次性列表确认，不再逐个弹模态框 |
 | WP-10 | 启发式阈值进 Config | 低 | 主 | `core.py`、`gui.py` | 无 | `feed-outlier`/`multiple-spindle-speeds` 阈值可配置 |
@@ -155,7 +155,7 @@ Expected: PASS
 - [ ] **Step 5: 全量回归并提交**
 
 Run: `conda run -n python38 python -m unittest discover -s tests -v`
-Expected: 159 项全部通过（WP-01/WP-02/WP-04/WP-05/WP-06 及二级页面修复、样例刀具回归、刀具类型拆分完成后基线更新为 191 项，测试指南同步）。
+Expected: 159 项全部通过（WP-01~WP-07 及二级页面修复、样例刀具回归、刀具类型拆分完成后基线更新为 198 项，测试指南同步）。
 
 ```bash
 git add NCodeProcess/ncodeprocess/gui.py NCodeProcess/tests/test_gui.py
@@ -558,6 +558,8 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 - 互斥 G/M 专项：扩展 `conflicting-motion` 之外的 G/M 互斥规则（如 G00 与 G01 混用块、M03/M05 同块），级别与现有规则对齐。
 - 验收：新增问题类型进入报告与校验页；需求文档 FR-07.2/07.3 状态改为 ✅。
 
+> ✅ **已完成（2026-08-05，提交 `d44f532`）**：新增 `tool-number-missing`（warning）、`isolated-parameter`（warning，S5000M03 合法行不误报）、`mutually-exclusive-m`（error，M03+M05/M08+M09 同块）、F 上离群（主体 F 中位数 1000–10000 时出现 ≥10000 且 ≥3 倍 → `feed-outlier` warning，用户新增要求）。测试 +7 项，基线 191 → 198。需求文档 FR-07.2 ✅、FR-07.3 互斥项标注已实现。
+
 ### WP-08: 异常归类细分
 
 - `scan_directory`/`process_plan` 的 `except Exception` 按 `PermissionError`（permission）、`OSError`（io）、`UnicodeError`（encoding）区分 `Issue.kind` 与建议文案。
@@ -621,7 +623,7 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 2. **Python 3.8 兼容**：代码与测试避免 3.9+ 语法；测试必须用 conda Python 3.8 环境运行。
 3. **提交规范**：小步提交，提交信息含 `feat/fix/refactor/docs` 前缀与中文说明；不提交构建产物（`build/`、`dist/`、`Publish/`）、样例目录、`NCodeProcessData/`。
 4. **隐私审核**：提交前检查本机路径/用户名/邮箱/代理地址，一律通用化（占位符）。
-5. **测试基线**：主工具 191 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
+5. **测试基线**：主工具 198 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
 6. **文档同步**：见 WP-17，任何变更不得遗漏受影响文档。
 7. **执行确认**：每个 WP/Task 启动前须经用户确认（见「〇、决策点」的执行确认流程），不得擅自连续执行多个工作包。
 
