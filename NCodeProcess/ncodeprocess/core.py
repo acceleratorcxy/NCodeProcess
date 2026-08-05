@@ -237,6 +237,7 @@ class ProcessReport:
     warnings: int = 0
     errors: int = 0
     files: List[dict] = field(default_factory=list)
+    backup_dir: str = ""
 
     def to_dict(self):
         return asdict(self)
@@ -452,6 +453,8 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
     drawing_seen = set()
     if not directory.is_dir():
         return ScanResult(str(directory), [], [f"输入目录不存在: {directory}"])
+    if not os.access(directory, os.W_OK):
+        warnings.append("当前目录只读：处理写入、移动、删除与报告导出可能失败，请先开放目录写权限")
     running_exe = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
     for path in sorted(_iter_files(directory, config.recursive)):
         relative_parts = path.relative_to(directory).parts
@@ -1292,13 +1295,26 @@ def _atomic_write(path: Path, text: str, encoding: str):
             tmp_path.unlink()
 
 
-def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Optional[Config] = None, *, confirm_cleanup: bool = True, progress_callback=None) -> ProcessReport:
+def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Optional[Config] = None, *, confirm_cleanup: bool = True, progress_callback=None, backup: bool = False) -> ProcessReport:
     config = config or Config()
     src_dir = Path(scan.input_dir).resolve()
     dst_dir = Path(output_dir or scan.input_dir).resolve()
     same_tree = src_dir == dst_dir
     report = ProcessReport(str(src_dir), str(dst_dir), datetime.now().isoformat(timespec="seconds"))
     dst_dir.mkdir(parents=True, exist_ok=True)
+    backup_root = ""
+    if backup:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_root = str(dst_dir / "backup" / stamp)
+        backup_path = Path(backup_root)
+        backup_path.mkdir(parents=True, exist_ok=True)
+        for plan_file in scan.files:
+            source = src_dir / plan_file.source
+            if source.is_file():
+                destination = backup_path / plan_file.source
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(source), str(destination))
+        report.backup_dir = backup_root
     successful_targets = set()
     ordered_files = sorted(scan.files, key=lambda item: item.action == "duplicate")
     total = len(ordered_files)

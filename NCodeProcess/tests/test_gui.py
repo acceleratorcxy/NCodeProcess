@@ -1470,6 +1470,24 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_finish_scan_shows_scan_warnings(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            with patch("ncodeprocess.gui.messagebox.showwarning") as showwarning:
+                app.finish_scan(ScanResult("tmp", [], warnings=["当前目录只读：处理可能失败"]))
+            showwarning.assert_called_once()
+        finally:
+            root.destroy()
+
+    def test_backup_request_confirmation(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            with patch("ncodeprocess.gui.messagebox.askyesno", return_value=True) as ask:
+                self.assertTrue(app._backup_requested())
+            ask.assert_called_once()
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

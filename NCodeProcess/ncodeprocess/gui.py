@@ -1434,6 +1434,8 @@ class App(ttk.Frame):
     def finish_scan(self, result, generation=None):
         if generation is not None and generation != self._scan_generation:
             return
+        if result.warnings:
+            messagebox.showwarning("扫描提示", "\n".join(result.warnings), parent=self.master)
         unresolved = [f for f in result.files if f.kind == "mpf" and not f.program]
         changed = False
         for f in unresolved:
@@ -2014,6 +2016,7 @@ class App(ttk.Frame):
             detail_lines.extend(deletes)
         if not self.confirm_processing(summary, detail_lines):
             return
+        backup = self._backup_requested()
         self.process_button.configure(state="disabled")
         self.status.set("正在处理当前目录……")
         self._processing = True
@@ -2022,9 +2025,17 @@ class App(ttk.Frame):
             def report(done, total, name):
                 with self._process_progress_lock:
                     self._process_progress = (done, total, name)
-            result = process_plan(self.scan_result, str(self.workdir), self.config(), confirm_cleanup=True, progress_callback=report)
+            result = process_plan(self.scan_result, str(self.workdir), self.config(), confirm_cleanup=True, progress_callback=report, backup=backup)
             self._safe_after(0, lambda: self.finish_process(result))
         threading.Thread(target=work, daemon=True).start()
+
+    def _backup_requested(self):
+        """Ask the operator whether to snapshot files before processing."""
+        return messagebox.askyesno(
+            "处理前备份",
+            "执行前是否先将待处理文件备份到 backup\\时间戳 目录？\n推荐在首次处理正式目录前使用。",
+            parent=self.master,
+        )
 
     def _poll_process_progress(self):
         with self._process_progress_lock:

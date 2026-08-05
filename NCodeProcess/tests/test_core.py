@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ToolInfo, add_m03, align_lines, apply_header, build_plan, calculate_stats, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
 
@@ -410,6 +411,38 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(progress[-1][0], progress[-1][1])
         self.assertEqual(progress[-1][2], "A.MPF")
         self.assertEqual([done for done, _total, _name in progress], list(range(1, len(progress) + 1)))
+
+    def test_process_plan_backup_preserves_original_files(self):
+        root = self.make_dir()
+        original_mpf = "%\nN1G1X0Y0Z0F1000S5000M03\nM30\n"
+        (root / "A.MPF").write_text(original_mpf, encoding="utf-8")
+        (root / "a.LOG").write_text("log-data", encoding="utf-8")
+        config = self._cfg(require_end_marker=False)
+        scan = build_plan(scan_directory(str(root), config), DEFAULT_INFO, config)
+        report = process_plan(scan, str(root), config, backup=True)
+        backups = list((root / "backup").rglob("*"))
+        backup_mpf = next(p for p in backups if p.name == "A.MPF")
+        backup_log = next(p for p in backups if p.name == "a.LOG")
+        self.assertEqual(backup_mpf.read_text(encoding="utf-8"), original_mpf)
+        self.assertEqual(backup_log.read_text(encoding="utf-8"), "log-data")
+        self.assertTrue(report.backup_dir)
+        self.assertTrue(Path(report.backup_dir).is_dir())
+
+    def test_process_plan_without_backup_creates_no_backup_dir(self):
+        root = self.make_dir()
+        (root / "A.MPF").write_text("%\nN1G1X0Y0Z0F1000S5000M03\nM30\n", encoding="utf-8")
+        config = self._cfg(require_end_marker=False)
+        scan = build_plan(scan_directory(str(root), config), DEFAULT_INFO, config)
+        report = process_plan(scan, str(root), config, backup=False)
+        self.assertEqual(report.backup_dir, "")
+        self.assertFalse((root / "backup").exists())
+
+    def test_scan_directory_warns_when_directory_is_readonly(self):
+        root = self.make_dir()
+        (root / "A.MPF").write_text("%\nM30\n", encoding="utf-8")
+        with patch("ncodeprocess.core.os.access", return_value=False):
+            scan = scan_directory(str(root), self._cfg(require_end_marker=False))
+        self.assertTrue(any("只读" in warning for warning in scan.warnings))
 
     def test_apt_drawing_candidates_from_filename_and_productname(self):
         text = (
