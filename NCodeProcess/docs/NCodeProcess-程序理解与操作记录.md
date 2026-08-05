@@ -231,6 +231,19 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 **测试基线**：163 项 → WP-02 新增 4 项（`centered_position` 纯函数 2 项 + all_stats 窗口适配、settings 窗口居中集成测试各 1 项）→ **167 项**，全量通过。Toplevel 未映射时 `geometry()` 读尺寸为 1x1，集成测试在读前 `update_idletasks()`。
 
+### 2.13 Post-Batch 2 WP-04 备份兜底与只读预检（2026-08-05）
+
+处理审查与待办问题 4/5（需求 9.3 与 FR-03.7）：
+
+| # | 改动 | 说明 | 提交 |
+|---|---|---|---|
+| 1 | 处理前备份快照 | `process_plan` 新增 `backup` 参数：处理前将全部待处理源文件（MPF/aptsource/中间文件）复制到 `backup/YYYYMMDD_HHMMSS/`，保留相对路径；`ProcessReport` 新增 `backup_dir` 字段记录备份位置 | `b2704fc` |
+| 2 | 只读目录预检 | `scan_directory` 用 `os.access(directory, os.W_OK)` 探测可写性，不可写时加入「当前目录只读」警告（需求 9.3 不得静默失败） | `b2704fc` |
+| 3 | GUI 扫描警告提示 | `finish_scan` 在 `result.warnings` 非空时弹窗展示（含只读目录、无 MPF 等提示） | `b2704fc` |
+| 4 | GUI 备份询问 | 处理确认后、执行前询问「是否先将待处理文件备份到 backup\\时间戳 目录」（`_backup_requested`），结果传入 `process_plan(backup=...)` | `b2704fc` |
+
+**测试基线**：167 项 → WP-04 新增 5 项（备份可恢复/无备份不建目录/只读警告 3 项 core + 扫描警告弹窗/备份询问 2 项 GUI）→ **172 项**，全量通过。
+
 ---
 
 ## 三、后续建议（可选）
