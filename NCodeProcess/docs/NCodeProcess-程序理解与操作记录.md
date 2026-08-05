@@ -338,6 +338,17 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 无代码改动、无测试数量变化（基线保持 198 项）。
 
+### 2.21 Post-Batch 2 WP-08 异常归类细分（2026-08-05）
+
+处理审查与待办问题 7（提交 `f4111f3`）：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 扫描异常细分 | `scan_directory` 的 MPF 读取异常按 `UnicodeError`→`encoding`、`PermissionError`→`permission`、`OSError`→`io` 分类，不再一律标 encoding |
+| 2 | 处理异常细分 | `process_plan` 失败项新增 `error_kind` 字段（encoding/permission/io/other），报告可区分失败原因 |
+
+**测试基线**：198 项 → WP-08 新增 2 项（扫描 permission/io 分类、处理 error_kind）→ **200 项**，全量通过。
+
 ---
 
 ## 三、后续建议（可选）
