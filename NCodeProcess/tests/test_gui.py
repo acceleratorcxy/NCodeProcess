@@ -1376,7 +1376,21 @@ class ReportExportTests(unittest.TestCase):
         showerror.assert_not_called()
 
 
-class ScanLifecycleTests(LayoutWidgetTests):
+class ScanLifecycleTests(unittest.TestCase):
+    def _build_app(self, width, height):
+        root = tk.Tk()
+        root.withdraw()
+        with patch.object(App, "scan", lambda _self: None):
+            # 使用隔离的测试注册表键，避免本机真实 HKCU\Software\NCodeProcess
+            # 中的用户设置（如 require_m06/require_spindle_speed）污染默认值断言。
+            app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
+        root.geometry(f"{width}x{height}")
+        root.deiconify()
+        root.update_idletasks()
+        root.update()
+        root.update_idletasks()
+        return root, app
+
     def test_finish_scan_ignores_stale_generation(self):
         root, app = self._build_app(1286, 668)
         try:
