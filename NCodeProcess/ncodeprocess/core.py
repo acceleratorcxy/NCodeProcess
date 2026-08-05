@@ -724,8 +724,16 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
     end = _header_end(lines)
     header = lines[:end]
     body = lines[end:]
+    existing_tool_keys = set()
     if replace_tools or info.tools:
-        header = [line for line in header if not (_parse_msg(line) and re.match(r"^T\d+$", _parse_msg(line)[0], re.I))]
+        filtered = []
+        for line in header:
+            parsed = _parse_msg(line)
+            if parsed and re.match(r"^T\d+$", parsed[0], re.I):
+                existing_tool_keys.add(parsed[0].upper())
+                continue
+            filtered.append(line)
+        header = filtered
     fields = info.fields(program)
     changes: List[str] = []
     # FR-04.2.4: repeated keys keep the first record but must surface as
@@ -780,6 +788,10 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
         if key in seen:
             # Replace only when caller supplied tool information; values remain editable.
             header[seen[key]] = line
+            changes.append(f"更新刀具 {key}")
+        elif key.upper() in existing_tool_keys:
+            # 原有刀具被替换后重新写入：记录为更新而非重复插入。
+            tool_insert.append(line)
             changes.append(f"更新刀具 {key}")
         else:
             tool_insert.append(line)

@@ -403,6 +403,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(tool_index, body_index - 1)
         self.assertNotIn("\n\nN", out)
 
+    def test_apply_header_marks_existing_tool_as_update_not_insert(self):
+        # 已有 T1 刀具被替换时记录为「更新刀具 T1」而非「插入刀具 T1」，
+        # 避免执行确认列表出现“重复插入刀具”。
+        text = 'MSG("PROGRAM:P")\nMSG("T1:DIA=10.000,TOOL_TYPE=圆鼻立铣刀")\nN1G1X10F1000S5000M03\nM30\n'
+        info = ProgramInfo("A", "B", "D", "V", "HASS", "SIE840D", "DATE")
+        info.tools = [ToolInfo(1, "12", "2", "球头立铣刀", "")]
+        _out, changes, _issues = apply_header(text, "P", info, self._cfg(), replace_tools=True)
+        self.assertIn("更新刀具 T1", changes)
+        self.assertFalse(any("插入刀具 T1" in change for change in changes))
+        # 新增刀具仍记录为插入。
+        info.tools.append(ToolInfo(2, "6", "0", "平底立铣刀", ""))
+        _out, changes, _issues = apply_header(text, "P", info, self._cfg(), replace_tools=True)
+        self.assertIn("插入刀具 T2", changes)
+
     def test_existing_reprocessing_header_values_are_preserved(self):
         text = (
             'MSG("PROGRAM:OLD_PROGRAM")\n'
