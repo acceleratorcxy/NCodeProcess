@@ -11,7 +11,7 @@
 
 - **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `Python 3.8 环境`）。
 - **目录**：`tests/`，模块 `tests/test_report_viewer.py`。
-- **当前基线**：**6 项全部通过**（约 0.4 秒）。
+- **当前基线**：**10 项全部通过**（2026-08-05 WP-C6 运行日志 2 项 + 报告第 12 节字段消费 1 项 + 悬停浮窗截断判定 1 项后为 10 项；约 0.4 秒）。
 - **运行命令**（cwd 为 `NCodeProcessReportViewer` 目录）：
 
 | 场景 | 命令 |
@@ -23,9 +23,9 @@
 
 | 测试类 | 覆盖内容 |
 |---|---|
-| `ReportViewerTests` | 纯逻辑：`discover_reports`（当前目录 + NCodeProcessData + 旧版 NCPostProcessData、忽略无关文件）、`load_report`（加载校验 + 根节点非对象报错）、`report_summary`/`file_issue_counts`/`iter_stats_rows`（汇总、问题计数、参数与 G00 行） |
+| `ReportViewerTests` | 纯逻辑：`discover_reports`（当前目录 + NCodeProcessData + 旧版 NCPostProcessData、忽略无关文件）、`load_report`（加载校验 + 根节点非对象报错）、`report_summary`/`file_issue_counts`/`iter_stats_rows`（汇总、问题计数、参数与 G00 行）、`runtime_log_events`（运行日志条目容错与事件筛选，WP-C6） |
 | `LayoutMetricTests` | `window_geometry_for_screen`：1366×768 / 1920×1080 精确值、小屏不超屏幕 |
-| `ReportViewerLayoutTests` | Tk 交互：默认窗口（1290×720）报告列表、文件明细、参数统计、校验问题表头完整可见、无横向溢出 |
+| `ReportViewerLayoutTests` | Tk 交互：默认窗口（1290×720）报告列表、文件明细、参数统计、校验问题表头完整可见、无横向溢出；运行日志页签渲染与 log_path 提示（WP-C6）；概览元信息与文件明细「目标」列/来源标记渲染（报告第 12 节）；悬停浮窗截断判定（超长单元格提示、短内容不提示） |
 
 ## 三、测试隔离约定
 
