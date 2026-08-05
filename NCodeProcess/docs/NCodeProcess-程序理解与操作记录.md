@@ -270,6 +270,18 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 **测试基线**：180 项 → 新增 2 项（设置窗口尺寸匹配内容、对比页不填充短程序空行）→ **182 项**，全量通过。
 
+### 2.16 Post-Batch 2 WP-06 注释边界统一与刀具圆角比较（2026-08-05）
+
+处理审查与待办问题 13 与 FR-4.3.16：
+
+| # | 改动 | 说明 | 提交 |
+|---|---|---|---|
+| 1 | 统一去注释工具 | 新增 `code_part(line)`（取括号注释前的代码部分），`add_m03`/`_insert_standalone_m03`/`calculate_stats`/`validate_program`/`add_initial_tool_change` 全部复用，消除重复的 `split("(", 1)[0]` | `92fc728` |
+| 2 | 换刀注释保护 | `add_initial_tool_change` 用 `partition("(")` 拆分后只替换代码部分的 T 号，注释（如 `(T2 备用)`）保持原样 | `92fc728` |
+| 3 | 普通立铣刀圆角比较 | `extract_tools` 判定普通立铣刀时，CUTTER 圆角与 TOOLNO 名义圆角必须一致（FR-4.3.16）；圆角不一致不再误判 | `92fc728` |
+
+**测试基线**：182 项 → WP-06 新增 3 项（圆角不一致不判普通立铣刀、`code_part` 行为、换刀不改写注释内 T 号）→ **185 项**，全量通过。
+
 ---
 
 ## 三、后续建议（可选）
