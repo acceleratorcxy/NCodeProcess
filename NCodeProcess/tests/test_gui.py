@@ -1443,6 +1443,21 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_overwrite_help_describes_preview_then_execute_flow(self):
+        """覆盖选项说明必须与当前逻辑一致：应用只预览，写入统一由确认并执行处理完成。"""
+        root, app = self._build_app(1286, 668)
+        try:
+            with patch("ncodeprocess.gui.messagebox.showinfo") as showinfo:
+                app._show_overwrite_help()
+            title, message = showinfo.call_args.args[0], showinfo.call_args.args[1]
+            self.assertEqual(title, "覆盖已有非空 MSG 字段")
+            self.assertIn("受保护字段保持不变", message)
+            self.assertNotIn("将更改直接写入所选文件", message)  # 旧口径：应用直接写文件
+            self.assertIn("确认并执行处理", message)             # 写入统一由确认并执行处理完成
+            self.assertIn("不会直接修改文件", message)
+        finally:
+            root.destroy()
+
     def test_all_stats_window_uses_screen_fitted_geometry(self):
         root, app = self._build_app(1286, 668)
         try:
