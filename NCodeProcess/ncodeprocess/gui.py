@@ -24,10 +24,12 @@ from .core import (
     extract_tools,
     format_nc_date,
     process_plan,
+    read_text,
     reprocess_file,
     save_timestamped_report,
     scan_directory,
     validate_program,
+    _atomic_write,
 )
 from .preferences import (
     KEY as PREFERENCES_KEY,
@@ -1390,6 +1392,19 @@ class App(ttk.Frame):
             if plan_file.kind == "mpf" and plan_file.program and plan_file.original_text is not None:
                 reprocess_file(plan_file, self.info(), self.config(), tools=self.program_tools.get(plan_file.program, []))
                 applied_plans.append(plan_file)
+        if self.config().force_apply and applied_plans:
+            # 强制应用：直接写入所选文件，完成后重新扫描目录刷新新信息。
+            try:
+                for plan_file in applied_plans:
+                    source = Path(self.workdir) / plan_file.source
+                    _text, enc, _newline = read_text(source, self.config().encoding)
+                    _atomic_write(source, plan_file.output_text, enc)
+            except OSError as exc:
+                messagebox.showerror("写入失败", f"强制应用写入文件失败：\n{exc}", parent=self.master)
+                return
+            self.status.set(f"已强制应用并写入 {len(applied_plans)} 个文件，正在重新扫描……")
+            self.scan()
+            return
         self.populate_file_tables()
         for plan_file in applied_plans:
             row = next((str(i) for i, item in enumerate(self.scan_result.files) if item is plan_file), None)

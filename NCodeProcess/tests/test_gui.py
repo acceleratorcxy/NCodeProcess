@@ -1548,6 +1548,26 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_apply_selected_with_force_writes_and_rescans(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.info_vars["drawing"].set("NEWDRAW")
+            app.info_vars["version"].set("V9")
+            app.force_apply.set(True)
+            with patch.object(app, "scan") as scan_mock, \
+                 patch("ncodeprocess.gui._atomic_write") as atomic_write, \
+                 patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")):
+                app.apply_selected()
+            atomic_write.assert_called_once()
+            scan_mock.assert_called_once()
+        finally:
+            root.destroy()
+
     def test_parsed_info_shows_encoding(self):
         root, app = self._build_app(1286, 668)
         try:
