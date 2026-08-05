@@ -1065,6 +1065,78 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 **执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
 
+### 2.79 测试套件整改 WP-T1：抽取 LayoutWidgetMixin（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `LayoutWidgetMixin` | `tests/test_gui.py` 顶部新增 mixin（`_build_app`/`_descendants`/`_collect_buttons`/`_relative_x_to_root`/`_column_total`/`_pump_until` 轮询 helper），无 `test_` 方法不被收集 |
+| 2 | 类声明改造 | `LayoutWidgetTests`/`SettingsDialogTests`/`ScanLifecycleTests` 改为 `unittest.TestCase, LayoutWidgetMixin`；删除各测试类重复定义的 helper |
+| 3 | 消除重复执行 | `SettingsDialogTests` 不再继承 `LayoutWidgetTests`，19 个布局用例不再跑两遍 |
+
+**测试基线**：主工具 **280 → 261 项**（test_gui 130 → 111），全量耗时 51.1 → **44.6s**，全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过后提交 `refactor(test): 抽取 LayoutWidgetMixin，消除 SettingsDialogTests 继承导致的用例重复执行`（用户确认后）。
+
+### 2.80 测试套件整改 WP-T2：合并重叠用例（2026-08-06）
+
+按测试计划合并 11 组重叠用例（subTest 表驱动，断言不变）：
+
+| 组 | 内容 | 数量变化 |
+|---|---|---|
+| 1-6 | test_core：换行/align_lines/aux 顺序/M03 注释/普通立铣刀/钻类 | -12 |
+| 10 | test_core：F 离群高值/阈值/比例/小进给 → 2 个合并 | -2 |
+| 7 | test_gui：Batch2 roundtrip 四测试 → 1 | -3 |
+| 8/9/11 | test_gui：设置确认/配置注入/窗口尺寸 → 各 1 | -4 |
+
+**测试基线**：261 → **240 项**（test_core 113、test_gui 等），全量耗时 44.6 → **37.6s**，全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过后提交 `refactor(test): 合并 11 组重叠用例`（用户确认后）。
+
+### 2.81 测试套件整改 WP-T3：tooltip 测试去时序化（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 轮询断言 | 三个 tooltip 测试（显示/保持隐藏/移出隐藏）的 `winfo_viewable` 断言改为 `_pump_until(root, predicate, ...)`（2s 超时轮询），消除合成事件在整套负载下的时序 flake |
+
+**稳定性验证**：`LayoutWidgetTests` 连续 10 次全 OK（0 flake）；全量 240 项全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过后提交 `test(gui): tooltip 断言改为轮询 pump，消除偶发 flake`（用户确认后）。
+
+### 2.82 测试套件整改 WP-T4：删除/弱化脆弱断言（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 删除注册表键集断言 | `test_defaults_cover_all_registry_items`（与 `REGISTRY_DEFAULTS` 逐项复制的脆弱断言）删除，由 roundtrip 测试兜底；清理未用导入 |
+| 2 | 版本断言动态推导 | `version_info.txt` 的 `filevers/prodvers` 改为从 `__version__` 拆三元组推导；删除构建脚本 `Join-Path $dist` 字符串断言（脚本路径重构不碎测试） |
+| 3 | 像素间距容差 | 必填字段/F-S 上下限间距的精确相等断言改为容差 2px |
+
+**测试基线**：240 → **239 项**，全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过后提交 `refactor(test): 删除注册表键集复制断言并弱化版本/像素级断言`（用户确认后）。
+
+### 2.83 测试套件整改 WP-T5：新增 CLI/CSV/程序名提取测试（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `CliTests`（test_cli.py 新增） | 预览不写盘（无 `--yes` 不生成 MPF/NCodeProcessData）、`--yes` 缺图号/版次退出码 2、`--yes`+`--json-report` 全流程（成功写入 + 报告生成 + 不生成 logs）、`--csv-report` 生成 CSV；按 WP-R4 行为适配（无 `--json-report` 不自动生成报告） |
+| 2 | test_core 直测 | `write_csv` 表头与问题行、`extract_program_name` 优先级（MSG/PPRINT/文件名下划线/`_I` 后缀） |
+
+**测试基线**：239 → **245 项**（CLI 4 + core 2），全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过后提交 `test(cli,core): 新增 CLI 全流程/CSV/程序名提取测试`（用户确认后）。
+
+### 2.84 测试套件整改 WP-T7：基线文档与流程收尾（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 测试指南基线 | 改为「主项目约 245 项、查看器 10 项，以 `python -m unittest discover -s tests -v` 输出为准」（D-A=B） |
+| 2 | `run_tests.ps1` | 主项目根新增一键测试脚本（D-C=B）：依次跑主项目与查看器两套 discover，失败即退出；实测两套全绿 exit 0 |
+| 3 | 审查与待办 | 登记 WP-T1~T5/T7 完成；WP-T6（大文件拆分）登记待办（D-D=B 本轮跳过） |
+
+**测试套件整改计划全部完成**：WP-T1（mixin/去重）、T2（合并）、T3（tooltip 轮询）、T4（弱化断言）、T5（CLI/CSV/程序名）、T7（基线文档/一键脚本）；主工具 **245 项**、查看器 **10 项**全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过后提交 `docs: 测试基线以 discover 输出为准并新增一键测试脚本`（用户确认后）。
+
 ---
 
 ## 三、后续建议（可选）

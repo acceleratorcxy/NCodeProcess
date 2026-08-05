@@ -11,7 +11,7 @@
 
 - **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `Python 3.8 环境`，3.8.19）。
 - **目录**：`tests/`（与 `ncodeprocess/` 同级），模块划分与源码分层一一对应。
-- **当前基线**：**280 项全部通过**（2026-08-05 合并精简后 159 项；WP-01~WP-09、用户测试修正、覆盖选项说明文案锁定测试、WP-10 启发式阈值阶段分组化、WP-11 设置持久化、WP-12 细节清理、WP-C6 运行日志、报告第 12 节增强字段、WP-A1 M04 校验、WP-A2 多刀换刀防护、WP-B1 换行保护、WP-B3 M06 注释修复、WP-B2 PROGRAM/DATE 口径、WP-C1 文件上限/布局统一、WP-C4 扫描应用互斥、WP-C5 嵌套忽略目录、WP-C8 恢复默认回注册表、WP-C9 抬刀阈值、WP-C3 CLI 配置面统一、WP-P3 应用局部重处理、WP-R1 报告完善、WP-R2 保存位置启动检测、WP-R3 日志按需生成与 WP-R4 报告单 JSON 化各新增项累计后为 280 项），全量运行约 50 秒。
+- **当前基线**：**主项目约 245 项、查看器 10 项，以 `python -m unittest discover -s tests -v` 输出为准**（数字仅作参考；2026-08-06 测试套件整改 WP-T1~T5 完成：消除继承重复执行、合并 11 组重叠用例、tooltip 轮询化、删除脆弱断言、新增 CLI/CSV/程序名直测），全量运行约 35~40 秒。
 - **运行命令**（cwd 为 `NCodeProcess` 项目目录）：
 
 | 场景 | 命令 |
@@ -54,7 +54,7 @@
    - `LayoutWidgetTests`（`SettingsDialogTests` 继承）：`_build_app(w, h)`、`_descendants(widget)`、`_collect_buttons(widget)`、`_relative_x_to_root(widget, root)`、`_column_total`。
    - 成对/同模式场景用 `subTest` 表驱动合并（如 `test_fit_column_widths_cases`、`test_feed_limits_check_both_ends`、`test_drill_types_detected_independent_of_diameter`），减少重复同时保留全部断言。
 5. **Python 3.8 兼容**：测试代码同样避免 3.9+ 语法（如 `str.removeprefix`、`dict |` 合并）。
-6. **运行与验证**：改动后先跑目标模块，再跑全量回归；保持基线 **280 项全绿**（查看器基线 10 项）。
+6. **运行与验证**：改动后先跑目标模块，再跑全量回归；以 `python -m unittest discover -s tests -v` 输出为准保持全绿（主项目约 245 项、查看器 10 项）；也可用根目录 `run_tests.ps1` 一键跑两套测试。
 
 ## 六、与其他文档的关系
 
