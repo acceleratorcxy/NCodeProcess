@@ -1558,6 +1558,7 @@ class ScanLifecycleTests(unittest.TestCase):
             app.keep_table.selection_set("0")
             app.info_vars["drawing"].set("NEWDRAW")
             app.info_vars["version"].set("V9")
+            app.overwrite_fields.set(True)
             with patch.object(app, "scan") as scan_mock, \
                  patch("ncodeprocess.gui._atomic_write") as atomic_write, \
                  patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")), \
@@ -1565,6 +1566,28 @@ class ScanLifecycleTests(unittest.TestCase):
                 app.apply_selected()
             atomic_write.assert_called_once()
             scan_mock.assert_called_once()
+            show_mock.assert_called_once()
+            self.assertIn("NEWDRAW", plan.output_text or "")
+        finally:
+            root.destroy()
+
+    def test_apply_selected_without_overwrite_is_preview_only(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.info_vars["drawing"].set("NEWDRAW")
+            app.info_vars["version"].set("V9")
+            app.overwrite_fields.set(False)
+            with patch.object(app, "scan") as scan_mock, \
+                 patch("ncodeprocess.gui._atomic_write") as atomic_write, \
+                 patch.object(app, "show_selected") as show_mock:
+                app.apply_selected()
+            atomic_write.assert_not_called()
+            scan_mock.assert_not_called()
             show_mock.assert_called_once()
             self.assertIn("NEWDRAW", plan.output_text or "")
         finally:

@@ -638,7 +638,6 @@ class App(ttk.Frame):
             self.info_vars[key] = var
             ttk.Entry(field, textvariable=var, width=10).grid(row=0, column=1, sticky="ew")
         self.overwrite_fields = tk.BooleanVar(value=False)
-        self.force_apply = tk.BooleanVar(value=False)
         self.auto_m03 = tk.BooleanVar(value=True)
         self.auto_tool_change = tk.BooleanVar(value=False)
         self.g00_level = tk.StringVar(value="error")
@@ -680,11 +679,16 @@ class App(ttk.Frame):
         ttk.Button(options, text="全部应用", command=self.apply_info).grid(row=0, column=0, padx=3, sticky="w")
         ttk.Button(options, text="应用所选", command=self.apply_selected).grid(row=0, column=1, padx=3, sticky="w")
         ttk.Button(options, text="保存编制/校对", command=self.save_fields).grid(row=0, column=2, padx=3, sticky="w")
-        ttk.Checkbutton(options, text="强制应用", variable=self.force_apply).grid(row=0, column=3, padx=3, sticky="w")
-        ttk.Checkbutton(options, text="覆盖已有非空 MSG 字段", variable=self.overwrite_fields).grid(row=0, column=4, padx=3, sticky="w")
-        ttk.Checkbutton(options, text="自动补写 M03", variable=self.auto_m03).grid(row=0, column=5, padx=3, sticky="w")
-        ttk.Checkbutton(options, text="自动添加换刀指令", variable=self.auto_tool_change).grid(row=0, column=6, padx=3, sticky="w")
-        ttk.Label(options, text="机床：自动 HASS/2500B；控制系统：SIE840D").grid(row=0, column=7, padx=(8, 3), sticky="e")
+        overwrite_box = ttk.Frame(options)
+        overwrite_box.grid(row=0, column=3, padx=3, sticky="w")
+        ttk.Checkbutton(overwrite_box, text="覆盖已有非空 MSG 字段", variable=self.overwrite_fields).pack(side="left")
+        overwrite_help = ttk.Label(overwrite_box, text="?", cursor="question_arrow", foreground="#1565c0",
+                                   font=("TkDefaultFont", 9, "bold"))
+        overwrite_help.pack(side="left", padx=(2, 0))
+        overwrite_help.bind("<Button-1>", lambda _event: self._show_overwrite_help())
+        ttk.Checkbutton(options, text="自动补写 M03", variable=self.auto_m03).grid(row=0, column=4, padx=3, sticky="w")
+        ttk.Checkbutton(options, text="自动添加换刀指令", variable=self.auto_tool_change).grid(row=0, column=5, padx=3, sticky="w")
+        ttk.Label(options, text="机床：自动 HASS/2500B；控制系统：SIE840D").grid(row=0, column=6, padx=(8, 3), sticky="e")
 
         # G00 级别已移入程序设置对话框；此处仅保留自定义刀具类型一行。
         custom_type_row = ttk.Frame(info)
@@ -1371,6 +1375,16 @@ class App(ttk.Frame):
         self.status.set("程序信息已应用，正在刷新预览……")
         self.scan()
 
+    def _show_overwrite_help(self):
+        messagebox.showinfo(
+            "覆盖已有非空 MSG 字段",
+            "该选项仅更新可编辑头部字段：编制（BIANZHI）、审核/校对（SHENHE）、图号（DRAWING NUMBER）与版次（PART VERSION）；"
+            "程序名、机床、控制系统与日期等受保护字段保持不变。\n\n"
+            "勾选后：点击“应用所选”将更改直接写入所选文件；点击“全部应用”生成预览后，再点击“确认并执行处理”将更改写入全部文件。\n"
+            "未勾选时：应用操作仅生成并展示预览，不写入文件。",
+            parent=self.master,
+        )
+
     def apply_selected(self):
         """Apply the program-info fields only to the selected MPF rows."""
         v = self.info_vars
@@ -1394,15 +1408,20 @@ class App(ttk.Frame):
                 applied_plans.append(plan_file)
         if not applied_plans:
             return
-        # 应用所选：直接写入所选文件，完成后重新扫描刷新预览（刀具信息由 reprocess 回退保留）。
-        try:
-            for plan_file in applied_plans:
-                source = Path(self.workdir) / plan_file.source
-                _text, enc, _newline = read_text(source, self.config().encoding)
-                _atomic_write(source, plan_file.output_text, enc)
-        except OSError as exc:
-            messagebox.showerror("写入失败", f"应用所选写入文件失败：\n{exc}", parent=self.master)
-            return
+        if self.overwrite_fields.get():
+            # 勾选「覆盖已有非空 MSG 字段」：直接写入所选文件（刀具信息由 reprocess 回退保留）。
+            try:
+                for plan_file in applied_plans:
+                    source = Path(self.workdir) / plan_file.source
+                    _text, enc, _newline = read_text(source, self.config().encoding)
+                    _atomic_write(source, plan_file.output_text, enc)
+            except OSError as exc:
+                messagebox.showerror("写入失败", f"应用所选写入文件失败：\n{exc}", parent=self.master)
+                return
+            self.status.set(f"已应用并写入 {len(applied_plans)} 个文件，正在重新扫描……")
+            self.scan()
+        else:
+            self.status.set(f"已生成 {len(applied_plans)} 个程序的预览（未勾选“覆盖已有非空 MSG 字段”，未写入文件）。")
         # 立即用内存预览刷新表格与右侧信息（含新的头部/刀具），再后台扫描确认。
         self.populate_file_tables()
         for plan_file in applied_plans:
@@ -1410,9 +1429,6 @@ class App(ttk.Frame):
             if row is not None and self.keep_table.exists(row):
                 self.keep_table.selection_add(row)
         self.show_selected()
-        self.status.set(f"已应用并写入 {len(applied_plans)} 个文件，正在重新扫描……")
-        self.scan()
-        return
 
     def add_tool_type(self):
         value = self.new_type_var.get().strip()
@@ -1473,7 +1489,6 @@ class App(ttk.Frame):
             spindle_max=spindle_max,
             newline=self.newline_var.get(),
             aux_checks={name for name, enabled in aux_flags.items() if enabled},
-            force_apply=self.force_apply.get(),
             ask_backup=self.ask_backup_var.get(),
         )
 
