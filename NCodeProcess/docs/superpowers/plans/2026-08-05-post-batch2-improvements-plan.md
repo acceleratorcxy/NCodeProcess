@@ -11,7 +11,7 @@
 **关联文档：**
 - 需求基线：`NCodeProcess-需求文档.md`（V1.1，第 13 节待确认事项、FR-07.2/07.3、第 15 节实施状态）
 - 待办来源：`NCodeProcess-审查与待办.md`、`NCodeProcessReportViewer-审查与待办.md`
-- 测试基线：`NCodeProcess-测试指南.md`（219 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
+- 测试基线：`NCodeProcess-测试指南.md`（229 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
 - 前置工作：Batch 1 / Batch 2 计划（已完成，见 `docs/archive/superpowers/plans/`）
 
 ---
@@ -560,7 +560,7 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 - 互斥 G/M 专项：扩展 `conflicting-motion` 之外的 G/M 互斥规则（如 G00 与 G01 混用块、M03/M05 同块），级别与现有规则对齐。
 - 验收：新增问题类型进入报告与校验页；需求文档 FR-07.2/07.3 状态改为 ✅。
 
-> ✅ **已完成（2026-08-05，提交 `d44f532`）**：新增 `tool-number-missing`（warning）、`isolated-parameter`（warning，S5000M03 合法行不误报）、`mutually-exclusive-m`（error，M03+M05/M08+M09 同块）、F 上离群（主体 F 中位数 1000–10000 时出现 ≥10000 且 ≥3 倍 → `feed-outlier` warning，用户新增要求）。测试 +7 项，基线 191 → 198。需求文档 FR-07.2 ✅、FR-07.3 互斥项标注已实现。
+> ✅ **已完成（2026-08-05，提交 `d44f532`）**：新增 `tool-number-missing`（warning）、`isolated-parameter`（warning，S5000M03 合法行不误报）、`mutually-exclusive-m`（error，M03+M05/M08+M09 同块）、F 上离群（主体 F 中位数 1000–10000 时出现 ≥10000 且 ≥3 倍 → `feed-outlier` warning，用户新增要求）。测试 +7 项，基线 191 → 198。需求文档 FR-07.2 ✅、FR-07.3 互斥项标注已实现。**2026-08-05 用户后续决定**：`isolated-parameter` 孤立 F/S 行检查剔除（一行内只有 F/S 属正常设定行），F 上离群改按程序主体动态判定（见 WP-10 动态口径）。
 
 ### WP-08: 异常归类细分
 
@@ -580,6 +580,8 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 
 - `Config` 新增 `feed_outlier_ratio`/`feed_outlier_min_value` 与 `multiple_spindle_warn`（或统一 `heuristic: dict`）；`validate_program` 读取配置；GUI 校验规则页增加对应输入项（仅本次运行生效）。
 - 验收：阈值可在设置中调整并有测试锁定。
+
+> ✅ **已完成（2026-08-05）**：`Config` 新增 `feed_outlier_iqr_factor`（默认 3）、`feed_outlier_low_ratio`（默认 0.1）、`feed_outlier_high_ratio`（默认 3）与 `multiple_spindle_warn`（默认开启）；F 离群按工艺阶段（移动/进刀/切削，Z≥5 为抬刀移动）分组检测，组内 ≥2 次为常见档位、仅检查 1 次孤立值是否低于最低档 ×0.1 或高于最高档 ×3，无常见档位回退 IQR 极端值标准（k=3）；样例 50 个 MPF 实测 0 误报，注入 F20 切削行可检出；GUI 校验规则页新增「F 离群校验」（IQR 倍数/低值/高值比例）与「多 S 值警告」输入（仅本次运行生效），设置对话框布局重排后仍 ≤640×500。测试基线 219 → 229（新增阶段感知/宽波动容忍/多模态频率/孤立值检出/比例配置测试，移除不再有意义的孤立行测试），全量通过。提交待用户测试确认后统一执行。
 
 ### WP-11: Batch 2 配置持久化（依赖 D2）
 
@@ -629,7 +631,7 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 2. **Python 3.8 兼容**：代码与测试避免 3.9+ 语法；测试必须用 conda Python 3.8 环境运行。
 3. **提交规范**：小步提交，提交信息含 `feat/fix/refactor/docs` 前缀与中文说明；不提交构建产物（`build/`、`dist/`、`Publish/`）、样例目录、`NCodeProcessData/`。
 4. **隐私审核**：提交前检查本机路径/用户名/邮箱/代理地址，一律通用化（占位符）。
-5. **测试基线**：主工具 219 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
+5. **测试基线**：主工具 229 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
 6. **文档同步**：见 WP-17，任何变更不得遗漏受影响文档。
 7. **执行确认**：每个 WP/Task 启动前须经用户确认（见「〇、决策点」的执行确认流程），不得擅自连续执行多个工作包。**提交顺序（2026-08-05 用户要求）**：改动完成并全量回归通过后先打包 EXE 供用户测试；用户确认后再统一提交 git（可一次或分批提交），未获确认不得提交。
 
