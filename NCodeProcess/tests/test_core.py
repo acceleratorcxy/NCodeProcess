@@ -629,6 +629,61 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(zero), 1)
         self.assertEqual(zero[0].severity, "error")
 
+    def test_tool_call_without_header_tool_number_warns(self):
+        # FR-07.2: 正文 T 调用应对应头部 Tn MSG；头部无定义时警告。
+        text = 'MSG("PROGRAM:P")\nMSG("T1:DIA=10.000")\nN2T5M06\nN4G1X10F1000S5000M03\nN6M30\n'
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        missing = [issue for issue in issues if issue.kind == "tool-number-missing"]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("T5", missing[0].suggestion)
+        self.assertEqual(missing[0].severity, "warning")
+
+    def test_defined_tool_number_does_not_warn(self):
+        text = 'MSG("PROGRAM:P")\nMSG("T1:DIA=10.000")\nN2T1M06\nN4G1X10F1000S5000M03\nN6M30\n'
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "tool-number-missing" for issue in issues))
+
+    def test_isolated_feed_parameter_line_warns(self):
+        # FR-07.2: 无运动/坐标/辅助指令的孤立 F/S 参数行提示。
+        text = "N1G1X10F1000\nN2F3000\nN3M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        isolated = [issue for issue in issues if issue.kind == "isolated-parameter"]
+        self.assertEqual(len(isolated), 1)
+        self.assertIn("F3000", isolated[0].text)
+
+    def test_motion_line_with_feed_is_not_isolated(self):
+        text = "N1G1X10Y20F3000S5000M03\nN2M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "isolated-parameter" for issue in issues))
+
+    def test_mutually_exclusive_m_codes_in_same_block_error(self):
+        text = "N1M03M05\nN2G1X10F1000\nN3M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        conflicts = [issue for issue in issues if issue.kind == "mutually-exclusive-m"]
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0].severity, "error")
+
+    def test_feed_outlier_high_value_warns(self):
+        # 主体 F 在千位范围，突然出现上万 F 时警告。
+        body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
+        text = body + "\nN6G1X60F15000\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)
+        self.assertIn("F15000", outliers[0].text)
+
+    def test_feed_outlier_high_value_thresholds(self):
+        # 上万但不足主体 3 倍不报；主体本身上万不报。
+        body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
+        text = body + "\nN6G1X60F9000\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+
+        body = "\n".join(f"N{i}G1X{i}F20000" for i in range(1, 6))
+        text = body + "\nN6G1X60F25000\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+
     def test_duplicate_msg_field_is_reported_as_warning(self):
         # FR-04.2.4: when the same MSG key appears more than once, the first
         # record is kept and every duplicate must surface as a warning in the

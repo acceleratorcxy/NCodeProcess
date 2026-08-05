@@ -971,6 +971,11 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     has_s = False
     has_m03 = False
     tool_numbers = set()
+    header_tool_numbers = set()
+    for key in header_keys:
+        header_match = re.match(r"^T(\d+)$", key)
+        if header_match:
+            header_tool_numbers.add(int(header_match.group(1)))
     feed_values: List[Tuple[int, str, float, str]] = []
     spindle_values: List[Tuple[int, str, float, str]] = []
     first_cut: Optional[int] = None
@@ -1050,9 +1055,15 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                 m08_pos = i
             if m09_pos is None and M09_RE.search(code):
                 m09_pos = i
-        if config.require_m06 and "T" in upper_code:
+            if M03_RE.search(code) and M05_RE.search(code):
+                issues.append(Issue(filename, i, raw_line, "mutually-exclusive-m", "error", "同一程序段同时包含 M03 与 M05，主轴正转与停止互斥"))
+            if M08_RE.search(code) and M09_RE.search(code):
+                issues.append(Issue(filename, i, raw_line, "mutually-exclusive-m", "error", "同一程序段同时包含 M08 与 M09，冷却开启与关闭互斥"))
+        if "T" in upper_code:
             for tm in TOOL_CALL_RE.finditer(code):
                 tool_numbers.add(int(tm.group(1)))
+        if ("F" in upper_code or "S" in upper_code) and not CUT_RE.search(code) and not MOTION_RE.search(code) and "M" not in upper_code and "T" not in upper_code:
+            issues.append(Issue(filename, i, raw_line, "isolated-parameter", "warning", "该行只有 F/S 参数而没有运动或辅助指令，请确认是否有遗漏的指令"))
         if "G" in upper_code:
             motion_codes = {int(match.group(1)) for match in MOTION_RE.finditer(code)}
             if len(motion_codes) > 1:
@@ -1075,6 +1086,8 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             issues.append(Issue(filename, start + 1, "", "spindle-start", "warning", "正文中未找到 M03"))
     if config.require_m06 and tool_numbers and not M06_RE.search("\n".join(lines[start:])):
         issues.append(Issue(filename, start + 1, "", "tool-change", "error", "存在刀具调用但缺少 M06"))
+    for number in sorted(tool_numbers - header_tool_numbers):
+        issues.append(Issue(filename, start + 1, "", "tool-number-missing", "warning", f"正文调用 T{number} 但头部没有对应的 T{number} MSG 刀具信息，请确认"))
     # 辅助指令顺序规则（仅当相关指令都出现且顺序错误时报告）。
     aux = set(config.aux_checks)
     if aux:
@@ -1095,6 +1108,14 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         for line_no, raw_value, value, raw_line in positive_feeds:
             if value < 100:
                 issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 为个位/两位数，明显低于本程序主要 F 值范围，请确认"))
+    # F 上离群：主体 F 在千位范围，突然出现上万且远高于主体的值。
+    if positive_feeds:
+        sorted_feeds = sorted(item[2] for item in positive_feeds)
+        median_feed = sorted_feeds[len(sorted_feeds) // 2]
+        if 1000 <= median_feed <= 10000:
+            for line_no, raw_value, value, raw_line in positive_feeds:
+                if value >= 10000 and value >= median_feed * 3:
+                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 远高于本程序主要 F 值范围（约 {median_feed:g}），请确认"))
     distinct_spindle: Dict[float, Tuple[int, str, str]] = {}
     for line_no, raw_value, value, raw_line in spindle_values:
         distinct_spindle.setdefault(value, (line_no, raw_value, raw_line))
