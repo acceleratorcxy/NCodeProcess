@@ -763,7 +763,7 @@ def apply_header(text: str, program: str, info: ProgramInfo, config: Config, *, 
                 # reprocessed MPF. PROGRAM/NC MACHINE are loaded as program
                 # defaults; CONTROL SYSTEM/DATE must never be changed.
                 protect_existing = not config.force_apply and upper in ("PROGRAM", "NC MACHINE", "CONTROL SYSTEM", "DATE") and bool(value.strip())
-                if not protect_existing and (not value.strip() or config.overwrite_fields) and new_value != value:
+                if not protect_existing and (config.force_apply or not value.strip() or config.overwrite_fields) and new_value != value:
                     header[idx] = _msg_line(key, new_value, line.rstrip().endswith(";"))
                     changes.append(f"补全/更新 {upper}")
     field_insert: List[str] = []

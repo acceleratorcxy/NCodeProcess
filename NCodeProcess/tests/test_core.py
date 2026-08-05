@@ -444,6 +444,15 @@ class CoreTests(unittest.TestCase):
         self.assertIn('MSG("CONTROL SYSTEM:SIE840D")', new)
         self.assertIn('MSG("DATE:NEWDATE")', new)
 
+    def test_force_apply_overwrites_editable_fields_without_overwrite_flag(self):
+        # 强制应用勾选但「覆盖已有非空 MSG 字段」未勾选时，可编辑字段也必须覆盖。
+        text = 'MSG("PROGRAM:P")\nMSG("DRAWING NUMBER:OLD")\nMSG("PART VERSION:V1")\nN1G1X10F1000S5000M03\nM30\n'
+        info = ProgramInfo("A", "B", "NEWDRAW", "V9", "HASS", "SIE840D", "DATE")
+        config = self._cfg(force_apply=True)
+        new, changes, issues = apply_header(text, "P", info, config)
+        self.assertIn('MSG("DRAWING NUMBER:NEWDRAW")', new)
+        self.assertIn('MSG("PART VERSION:V9")', new)
+
     def test_optional_initial_tool_change_is_inserted_and_corrected(self):
         root = self.make_dir()
         (root / "x_P.MPF").write_text("N1T5M06;\nN2S100M03;\nN3T5;\nN4M30;\n", encoding="utf-8")
