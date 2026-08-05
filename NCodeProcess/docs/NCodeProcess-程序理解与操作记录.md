@@ -124,6 +124,8 @@ scan_directory(目录, Config) → build_plan(scan, ProgramInfo, Config)
 | 2026-08-05 00:00 前后 | `0ac50327…` | Batch 2 全部功能 + 两页重构 + 计划/Release Note 归档 |
 | 2026-08-05 00:13 后 | `ce9b2b42…` | + 布局优化（6224090） |
 | 2026-08-05 00:20 后 | `eb7264ed…` | + F/S 上下限间距修复（3146557） |
+| 2026-08-05 22:44 | `dba361bd…` | + WP-C6 运行日志（runtime_log/log_path）与报告第 12 节增强字段（app_version/config_snapshot/user_confirmations/files[].target 等）；查看器 `a9621cd9…`（运行日志页签 + 第 12 节消费）同步复制到 `测试\` |
+| 2026-08-06 性能计划 | WP-P1 后 `efa6401b…`（性能优化）；WP-S1 后 `f05f5c0d…`（8.95→7.13MB，去 libcrypto）；WP-S2 后 6.98/6.90MB；WP-S3 启用 UPX 后主 6.02MB / 查看器 5.94MB（Defender 复测通过，360/火绒/Win7 留待车间） |
 
 每次打包后校验 EXE 哈希与 `SHA256SUMS.txt` 一致，并同步 `Publish\` 5 个目标（exe / 便携包 / Package 目录 / 无md发布 zip / 最终发布 zip）。
 
@@ -622,6 +624,444 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 | 1 | 统一 ? 按钮 | 新增 `App._settings_help_label`（? 图标，点击弹出 `messagebox.showinfo`），与主窗口覆盖选项说明按钮同风格 |
 | 2 | 替换长说明 | 基本设置页：文件编码/待删除扩展名/主程序扩展名/输出扩展名/配置保存位置的长说明改为 ? 按钮（保存位置切换清空提示并入说明，删除多余行）；校验规则页：G00 级别/M03 补写位置/换行策略长说明改为 ? 按钮；「留空 = 不检查」等短提示保留 |
 | 3 | 布局 | 设置对话框宽度不再被长文字撑大，仍满足 ≤640×500 布局锁定；SettingsDialogTests 53 项与全量 235 项通过 |
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.46 WP-12 细节清理：MSG 缩进保留 / 单实例约束 / 杀软实测（2026-08-05）
+
+按计划执行 WP-12 三项清理：
+
+| # | 调整 | 说明 |
+|---|---|---|
+| 1 | MSG 缩进保留 | `apply_header` 替换已有 MSG 行时保留该行原缩进（FR-4.2.5）；插入缺失字段/刀具行时沿用头部首条 MSG 行的缩进；新增 2 项测试锁定 |
+| 2 | 单实例约束 | `gui.py` 新增 `single_instance_mutex_name`（按 EXE 绝对路径 md5 命名）/`acquire_single_instance`（Win32 CreateMutexW）/`release_single_instance`；`main()` 启动时检测，同目录第二实例用 Win32 MessageBox 提示「程序已在本目录运行」后退出，避免双 EXE 竞态写 `special_tools.json` 与报告时间戳；不同目录 EXE 互不影响；新增 2 项测试 |
+| 3 | 杀软实测 | 重新打包最新 EXE 后，Windows Defender `MpCmdRun -Scan -ScanType 3` 扫描 `dist\NCodeProcess.exe`：**未检出威胁**（退出码 0）；第三方杀软本机未安装，留待车间实测 |
+| 4 | 测试 | 基线 235 → **239 项**，全量通过 |
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.47 程序设置页面分组重排与描述精确化（2026-08-05）
+
+用户反馈设置页面排版不美观、说明口语化，要求按分类归类整理、描述完整精确：
+
+| # | 调整 | 说明 |
+|---|---|---|
+| 1 | 基本设置分组 | 改为三个分组框：文件处理（文件编码、程序名允许字符）、文件类型（待删除扩展名、主程序扩展名、输出扩展名）、目录与存储（APTSOURCE 归档子目录、处理前询问备份、配置保存位置） |
+| 2 | 校验规则分组 | 改为四个分组框：基础检查（结束标记/M06/S）、工艺校验（G00 级别、必填 MSG 字段、M03 补写位置、F/S 上下限合并一行）、F 离群与 S 警告（IQR/低值/高值、多 S 警告）、输出格式（换行策略、辅助指令顺序） |
+| 3 | 描述精确化 | 全部 ? 说明改为完整精确表述（如 F/S 上下限说明“留空表示不检查对应方向，填写数值后低于下限或高于上限按错误上报”）；标签措辞统一（“F/S 上下限”合并、“处理前询问备份”等） |
+| 4 | 布局 | 仍为两页 Notebook，页内按 LabelFrame 分组；F/S 上下限合并一行控制高度，窗口仍满足 ≤640×500 布局锁定；间距测试同步更新（F/S 段内部间隙一致） |
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.48 打包修复：排除列表移除 hashlib（2026-08-05）
+
+用户测试打包后程序时双击报错 `failed to execute script 'launcher' ... No module named 'hashlib'`：
+
+| # | 调整 | 说明 |
+|---|---|---|
+| 1 | 根因 | WP-12 单实例互斥体名使用 `hashlib.md5`，但 `NCodeProcess.spec`（本地构建配置，gitignore）的 PyInstaller `excludes` 列表为瘦身包含 `hashlib`/`_hashlib`，打包后运行时导入失败 |
+| 2 | 修复 | 从 `NCodeProcess.spec` 排除列表移除 `hashlib`、`_hashlib`（`ctypes` 未在排除列表，单实例正常） |
+| 3 | 验证 | 重新打包后冒烟测试：EXE 启动进程正常存活（无异常退出）；SHA-256 `e31a8127…` 已复制到测试目录 |
+
+> 提示：`NCodeProcess.spec` 为本地文件不入库；后续向代码新增标准库模块时，先核对 spec 排除列表是否包含该模块，避免打包后 `No module named` 错误。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.49 WP-C6 运行日志（runtime_log / log_path）生成端落地（2026-08-05）
+
+按报告内容规范第 9 节实现运行日志，让报告回答「程序运行期间发生了什么」：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `RuntimeLog` 事件源 | `core.py` 新增 `RuntimeEvent`/`RuntimeLog`：内存环形缓冲默认 500 条 + 可选磁盘滚动日志（`NCodeProcessData/logs/ncodeprocess-YYYYMMDD.log`，单文件 1MB 轮转、磁盘最多保留 3 个文件）；磁盘写入失败静默降级为仅内存缓冲，不阻断业务 |
+| 2 | 事件埋点 | `scan_directory`（scan_start/scan_finish/scan_warning + 读文件异常 error）、`build_plan`（plan_built）、`process_plan`（process_start/process_file/process_finish/backup_created + 处理失败 error 含 traceback）、`save_timestamped_report`（export_start/export_finish）；截断时 snapshot 自动追加 `已截断` 说明事件 |
+| 3 | 报告内嵌 | `ProcessReport` 新增 `runtime_log`/`log_path`；`process_plan` 结束与 `write_json` 导出时刷新最新快照，CLI/GUI 导出的报告均含本次会话事件子集与完整日志路径 |
+| 4 | GUI/CLI 埋点 | `main()` 启动 attach 磁盘日志并记录 startup/shutdown（单实例拒绝记 warning startup）；App 加载设置记 settings_loaded，确认保存/保存编制审核记 settings_saved（不含姓名等敏感值）；CLI 同样 attach + startup/shutdown |
+| 5 | 查看器消费端 | `NCodeProcessReportViewer` 新增「运行日志」页签（时间/级别/事件/消息四列，error 红/warning 橙加粗，按事件类型下拉筛选，`log_path` 底部提示：缺失/未记录/文件不存在均有明确文案） |
+
+**测试基线**：主工具 239 → **250 项**（RuntimeLogTests 8 项 + RuntimeEventTests 3 项）；查看器 6 → **8 项**（runtime_log_events 纯函数 + 运行日志页签渲染），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.50 报告内容规范第 12 节增强字段落地（2026-08-05）
+
+按用户「都做，分开实现」的决定，在 WP-C6 之后落地报告内容规范第 12 节全部建议新增字段：
+
+| # | 字段 | 说明 |
+|---|---|---|
+| 1 | 顶层元数据 | `app_version`（延迟读取 `__version__`，避免 core↔__init__ 循环导入）、`report_schema_version`（当前 1）、`config_snapshot`（处理时生效的关键 Config 键值，不含编制/审核等业务数据）、`user_confirmations`（GUI/CLI 调用方传入：备份、归档、覆盖、执行确认）、`scan_warnings`、`archive_stamp`、`elapsed_seconds`（finished_at−started_at）、`generator`（gui/cli） |
+| 2 | 文件级字段 | `files[].target`（记录实际目标路径：MPF 重命名/aptsource 归档/重复处理，跨输出目录模式也取最终路径）、`files[].program_name_source`（MSG / PPRINT / 文件名 / 手动确认：`_program_name_and_source` 重构 `extract_program_name`，GUI 手动确认与改名置为「手动确认」） |
+| 3 | 线程安全修复 | `process()` 原在工作线程内调用 `self.config()` 读取 Tk 变量（非主线程访问 Tk 不安全，Python 3.14 直接抛 `main thread is not in main loop`）；改为进入线程前在主线程捕获配置快照再传入 |
+| 4 | 查看器消费 | 概览页元信息新增工具版本/报告来源/报告结构版本/处理耗时/归档时间戳/用户确认项/扫描警告；文件明细表新增「目标」列与程序名旁来源标记（压缩列宽后仍满足 1290×720 无横向溢出布局锁定） |
+
+**测试基线**：主工具 250 → **254 项**（ReportMetadataTests 3 项 + process 传参 1 项）；查看器 8 → **9 项**（第 12 节元信息与目标列渲染），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.51 审查整改 WP-A1：M04 与自动补写 M03 冲突（2026-08-05）
+
+按「NCodeProcess 审查整改实施计划」执行第一个 WP（P0，D3 用户确认选 A：禁止自动补写并报 error）：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 新增 `M04_RE` 正则 | 顶部常量区，与 M03_RE 同风格（`M04`/`M4` 大小写变体） |
+| 2 | `add_m03` 拦截 | 首个正文循环发现 M04 即返回不补写（正反转冲突，不改变原文） |
+| 3 | `validate_program` 校验 | 记录 `m04_pos`；正文有 M04 且无 M03 且自动补写开启时报 `spindle-direction` error（含行号与原文）；同段 M03+M04 报 `mutually-exclusive-m` error |
+
+**测试基线**：254 → **256 项**（WP-A1 新增 2 项），test_core 全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.52 审查整改 WP-A2：多刀程序自动换刀防护（2026-08-05）
+
+按用户要求（多刀先警告、对该程序禁用自动添加换刀、最终执行时明确列出）执行 WP-A2：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `add_initial_tool_change` 防护 | 刀具列表 >1 或正文引用 ≥2 个不同 T 号时跳过改写，返回明确跳过提示（不进 `changes` 前先判定） |
+| 2 | `validate_program` 警告 | `auto_tool_change` 开启且多刀时新增 `auto-tool-change-skipped` warning：程序引用多把刀具，自动添加换刀指令已禁用并跳过 |
+| 3 | 跳过原因记录 | `FilePlan.auto_tool_change_skipped` 记录原因；`reprocess_file`/`build_plan` 的 note 追加由 `if tool_changed:` 改为 `if tool_note:`，跳过提示进入 `changes`（预览与报告可见） |
+| 4 | 执行确认页 | GUI `process()` 新增「【自动添加换刀指令已跳过】」段，逐条列出文件与原因 |
+
+**测试基线**：256 → **260 项**（多刀配置不改写、正文多 T 引用警告、build_plan 记录原因 3 项 core + 确认页明细 1 项 GUI），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.53 审查整改 WP-B1：代码编辑器换行保护（2026-08-05）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 新增纯函数 | `text_changed_ignoring_line_endings(original, edited)`：规范化 `\r\n`/`\r`/`\n` 后比较，仅行尾差异判定为无变化 |
+| 2 | 保存判定 | `edit_program_code` 的 `save()` 由 `new_text == f.original_text` 改用该函数，仅换行风格差异的保存不再触发重新处理，避免 CRLF 被静默转 LF 后整份误处理 |
+
+**测试基线**：260 → **261 项**（纯函数 1 项），test_gui 全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.54 审查整改 WP-B3：M06 注释误判修复（2026-08-05）
+
+按用户要求同时覆盖括号与分号两种注释形式：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `code_part` 增强 | 同时剔除括号注释 `( ... )` 与分号后注释内容（分号本身保留为块结束符），两种注释形式中的指令均不再被当作真实指令参与解析/统计/校验 |
+| 2 | `require_m06` 检查 | 主循环按 code_part 口径记录 `has_m06`，结尾检查由整块正则搜索改为 `not has_m06`——注释中的 M06 不再满足换刀要求 |
+| 3 | 连带正确性 | 分号注释中的 S/F/T 等指令同样不再被 M03 补写、参数统计与刀具引用检测误判 |
+
+**测试基线**：261 → **263 项**（注释 M06 不满足检查（括号+分号两种 subTest）、正文真实 M06 满足检查），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.55 审查整改 WP-B2：PROGRAM/受保护字段/DATE 口径（2026-08-05）
+
+按用户自定义口径（D1）执行：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | PROGRAM 取消保护 | `apply_header` 的 `protect_existing` 移除 PROGRAM；勾选「覆盖已有非空 MSG 字段」且头部 PROGRAM 与程序名不一致时头部对齐程序名；程序名修改统一走右键「修改程序名」（已同步目标文件名、头部 PROGRAM MSG、表格刷新与预览，补锁定测试） |
+| 2 | NC MACHINE / CONTROL SYSTEM 永久保护 | 已有非空值即使勾选覆盖也不得更改 |
+| 3 | DATE 自动维护 | 新增 `update_header_date(text, date_value)`；`build_plan`/`reprocess_file` 处理完成后若 `changes` 非空（字段补全/更新、刀具、M03、换刀等任何实际变更），DATE 自动更新为变更发生时间（当前时间）并记录「更新 DATE」；无变更保留原值，避免“每次处理都有 DATE 变更” |
+
+**测试基线**：263 → **267 项**（PROGRAM 覆盖更新、NC MACHINE/CONTROL SYSTEM 不可覆盖、DATE 有变更自动更新、DATE 无变更保留 4 项 core + GUI 改名表格/头部同步断言扩展），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.56 审查整改 WP-C1：文件大小/数量上限配置与设置页布局统一（2026-08-05）
+
+按用户要求（D5=A：默认不限制）执行 WP-C1，并顺带修复设置对话框两页框宽不一致问题：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | Config 新增上限 | `max_file_size`（字节）、`max_files`（数量），默认 0 = 不限制（需求 9.4 补齐） |
+| 2 | `scan_directory` 限制 | 文件循环累计计数，`max_files` 超限追加 warning 并停止扫描；MPF 读取前检查大小，超限生成 `file-too-large` error issue 并跳过 |
+| 3 | 设置持久化 | `preferences.REGISTRY_DEFAULTS` 新增 `max_file_size`/`max_files`；GUI「基本设置 → 文件处理」新增两个输入（留空/非法回退 0），`config()`/快照/恢复默认/取消/导出全部接线 |
+| 4 | 设置对话框布局统一 | 「基本设置」与「校验规则」页面均加 `columnconfigure(0, weight=1)`，LabelFrame 拉伸占满页面宽度——两页框宽由 Notebook 统一为一致值（此前基本设置 398px vs 校验规则 589px，切换跳动） |
+
+**测试基线**：267 → **272 项**（max_files 停止扫描、max_file_size 跳过超大 MPF 2 项 core + 上限持久化 roundtrip 1 项 preferences + 设置对话框含上限输入、两页框宽一致 2 项 GUI），全量通过；设置对话框仍满足宽 ≤640、高 ≤500 布局锁定。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.57 审查整改 WP-C4：扫描与应用并发互斥（2026-08-05）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `_scan_running` 标志 | `App` 新增扫描运行标志；`scan()` 置 True 并禁用「全部应用」「应用所选」按钮（按钮引用 `apply_all_button`/`apply_selected_button`） |
+| 2 | 结束恢复 | `finish_scan` 末尾（当前代结果）置 False 并恢复按钮；扫描线程异常时经 `_finish_scan_error` 恢复，避免按钮永久禁用 |
+| 3 | 应用拦截 | `apply_info`/`apply_selected` 开头若扫描运行中，提示「扫描进行中，请稍候」并返回，避免扫描重建表格与应用操作竞争共享 FilePlan |
+
+**测试基线**：272 → **273 项**（扫描期间按钮禁用与调用拦截），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.58 审查整改 WP-C5：嵌套忽略目录与未知扩展名口径（2026-08-05）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 嵌套忽略目录 | `scan_directory` 的忽略目录判断由「第一层目录名」改为「路径任意层级目录部分」（`any(part.lower() in ignored_directories for part in relative_parts[:-1])`），递归模式下 `sub/aptsource/`、`a/b/NCodeProcessData/` 等任意深度数据/归档目录均被跳过 |
+| 2 | 未知扩展名口径（D2=A） | 需求文档 13.3 与 FR-03.4 统一为「未知扩展名完全忽略，不展示、不移动、不删除、不写入报告」，删除「列入待确认清单」表述 |
+
+**测试基线**：273 → **274 项**（递归扫描跳过嵌套 aptsource/NCodeProcessData），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.59 审查整改 WP-C8：删除清除注册表按钮、恢复默认自动回注册表（2026-08-06）
+
+按用户要求调整（保存位置可选且切换时清空其它两处，清除注册表按钮失去意义）：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 删除「清除注册表」按钮 | `open_settings` actions 帧移除按钮；删除 `_clear_registry_settings` 方法；GUI 不再需要 `clear_all`/`storage_backend` 导入（一并清理） |
+| 2 | 恢复默认自动回注册表 | `_apply_settings_defaults` 将 `storage_backend_var` 置 `registry`；`_restore_default_settings` 改为 `save_all(..., backend="registry")`——恢复全部默认值后保存位置切回注册表，并经 preferences 显式切换逻辑清空 appdata/home 残留配置 |
+| 3 | 测试更新 | 删除 `test_clear_registry_confirmed_removes_values`/`test_clear_registry_cancelled_keeps_values`；按钮断言改为「不含清除注册表」；`test_restore_defaults_resets_and_persists` 扩展断言 `storage_backend_var == registry` 且持久化 `storage_backend=registry` |
+
+**测试基线**：274 → **272 项**（删除 2 项清除注册表测试），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.60 审查整改 WP-C9：抬刀高度阈值进 Config（2026-08-06）
+
+按用户要求（默认值至少 20，并重新做离群误报检查）执行：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | Config 可配置 | `Config.retract_z_threshold` 默认 20.0（模块常量 `RETRACT_Z_THRESHOLD` 同步 5→20）；`validate_program` 阶段分组改用 `config.retract_z_threshold`（Z 达到阈值归移动/退刀，低于阈值的正 Z 归切削/进刀） |
+| 2 | 设置持久化 | `REGISTRY_DEFAULTS` 新增 `retract_z_threshold="20"`；GUI「校验规则 → F 离群与 S 警告」F 离群行新增「抬刀Z≥」输入（与 IQR×/低值×/高值× 同行，避免撑高设置对话框），`config()`/快照/恢复/取消/导出全接线 |
+| 3 | 样例误报复核 | 默认阈值 20 下扫描 `样例文件/数控程序`（V5-2500B + HASS）50 个 MPF：**feed-outlier 0 条**；异常检出由既有单元测试覆盖（切削段孤立 F20、3000 主体冒 15000 等） |
+
+**测试基线**：272 → **275 项**（抬刀阈值可配置改判阶段 1 项 core + 阈值 roundtrip 1 项 preferences + 设置对话框阈值输入 1 项 GUI），全量通过；设置对话框仍满足宽 ≤640、高 ≤500 布局锁定。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.61 审查整改 WP-C2：死代码清理（2026-08-06）
+
+| # | 清理项 | 说明 |
+|---|---|---|
+| 1 | `core.py` | 删除从未使用的 `PROGRAM_RE` 常量、`Config.defer_stats` 字段 |
+| 2 | `gui.py` | 删除未使用的 `validate_program` 导入与 `config()` 中 `defer_stats=False` 传参 |
+| 3 | `viewer.py` | 删除未使用的 `Dict` 类型导入；`iter_stats_rows` 中 `parameter == "G00"` 恒为假的死分支改为直接 `"否"` |
+
+**行为零变化**：主工具 275 项、查看器 9 项全绿，无新增测试。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.62 审查整改 WP-C7：`process_plan` 拆分重构（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 私有执行器 | 主循环按动作分支抽为 `_exec_duplicate`（重复目标）、`_exec_mpf`（MPF 写入）、`_exec_aptsource`（删除/归档）、`_exec_delete`（中间文件），`process_plan` 主循环只做分发与统一异常处理 |
+| 2 | 行为验证 | 全量 275 项测试全绿；`样例文件/数控程序/V5-2500B` 副本 CLI 处理（补全必填参数）：25 MPF 全部 success、errors=0，aptsource/LOG/MOAPTIndexes 按规则清理 |
+
+**测试基线**：保持 **275 项**（重构类，无新增测试）。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.63 审查整改 WP-C3：CLI/GUI 配置面统一（2026-08-06）
+
+按用户确认 D7=A 执行：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | CLI 新参数 | `--m03-position`、`--newline`、`--feed-min/--feed-max/--spindle-min/--spindle-max`、`--aux-m03/--aux-m05/--aux-m08/--aux-m09`（及 `--no-` 前缀，互斥组）、`--feed-outlier-iqr/--feed-outlier-low/--feed-outlier-high`、`--multiple-spindle/--no-multiple-spindle`、`--max-file-size/--max-files`、`--retract-z-threshold` |
+| 2 | 偏好加载 | 新增 `_config_from_args(args)`：未显式传参的项读取 `load_all()` 持久化偏好（与 GUI 一致），显式参数覆盖；`main()` 改用它构建 Config |
+| 3 | 测试 | 新建 `tests/test_cli.py`：显式 `--newline lf` 生效、持久化偏好（newline/m03_position/feed_max/multiple_spindle_warn/aux/retract_z_threshold）作为默认 |
+
+**测试基线**：275 → **277 项**（CLI 2 项），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.64 审查整改 WP-D1：查看器清理复核（2026-08-06）
+
+**结论**：静态核对 `viewer.py` 全部导入（json/sys/tk/dataclass/datetime/Path/filedialog/messagebox/ttk/typing）与模块级函数均被引用；WP-C2 已清理 `Dict` 导入与 `iter_stats_rows` 中 `parameter == "G00"` 恒假分支，无其它死代码残留。**无代码改动**，查看器 9 项测试保持全绿，无需重新打包。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.65 审查整改 WP-D2：程序名默认正则提为模块常量（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `DEFAULT_NAME_PATTERN` | `core.py` 顶部新增程序名默认正则常量；`Config.allowed_name_pattern`、`_safe_name`/`_program_name_and_source`/`extract_program_name` 默认参数引用该常量 |
+| 2 | GUI 恢复默认 | 设置页「程序名允许字符」的恢复默认按钮由硬编码改为引用 `DEFAULT_NAME_PATTERN` |
+| 3 | 自定义保留 | 实际校验仍使用 `config.allowed_name_pattern`（GUI 输入值），用户自定义正则优先生效；常量仅作为默认值来源 |
+
+**测试基线**：保持 **277 项**（重构类，无新增测试），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.66 审查整改 WP-D3：构建不可复现性文档化（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 主项目 README | 构建段落补充「随机 PYZ 密钥与随机 hash seed 导致同一源码产物不可逐字节复现，属防破解/防提取设计，校验以 `SHA256SUMS.txt` 为准」 |
+| 2 | 仓库根 README | 「构建与测试」节新增构建说明块（不可逐字节复现 + 校验方式） |
+| 3 | 两份 SECURITY.md | 「完整性验证」章节补充不可复现性说明 |
+
+**纯文档改动**：无代码/构建脚本变化，测试基线保持 **277 项**，无需重新打包 EXE。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.67 审查整改 WP-D4：文档一致性总修订（2026-08-06）
+
+审查整改计划收尾（纯文档修订）：
+
+| # | 修订 | 说明 |
+|---|---|---|
+| 1 | 需求文档 | 文档信息表最后核对 2026-08-06；第 8 节配置清单补文件大小/数量上限与抬刀阈值；第 13 节补 D1–D7 决策确认记录；第 15 节状态表更新 FR-04/05/07.2/07.3/8/9/11（基线 277/9） |
+| 2 | 发布说明 | 主项目 1.0.0 附「审查整改工作包摘要」（WP-A/B/C/D 全部）；查看器发布说明更新六页签、第 12 节消费与测试基线 9 项 |
+| 3 | 查看器需求文档 | 最后核对日期更新 |
+
+**审查整改计划 P0–P3 全部完成**：WP-A1/A2、B1–B3、C1–C9、D1–D4。主工具 277 项、查看器 9 项测试全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.68 性能计划 WP-P1：正则提升 + F 离群单次遍历（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 模块级正则常量 | 新增 `S_RE`/`MOTION_ANY_RE`/`TOOL_REF_RE`/`STANDALONE_CHANGE_RE`；`add_m03`/`_insert_standalone_m03`/`add_initial_tool_change` 删除每次调用的内部编译 |
+| 2 | F 离群单次遍历 | `validate_program` 主遍历单次解析地址参数并判定阶段（复用 `g00_matches`、`config.retract_z_threshold`），F 直接收集进 `stage_feeds`；删除原第二遍 stage 收集循环 |
+
+**性能基准**：build_plan（HASS 25 MPF）**2.072s → 1.450s（-30%**，3 次平均），100 文件外推约 5.8s；全量 277 项测试全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.69 性能计划 WP-S1：FNV-1a 替代 md5，排除 hashlib/libcrypto（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `single_instance_mutex_name` | 改用 FNV-1a 64 位（`NCodeProcess_` + 16 位 hex，非密码学用途），删除 `import hashlib` |
+| 2 | 主 spec excludes | 追加 `hashlib`/`_hashlib`（查看器 spec 已含；本地 spec 不入库） |
+| 3 | 测试 | 互斥体名测试补充格式断言 `^NCodeProcess_[0-9a-f]{16}$` |
+
+**体积基准**：`dist/NCodeProcess.exe` **8.95MB → 7.13MB（-1.82MB）**；归档内 `libcrypto-3-x64.dll` 不再出现；277 项全绿，打包版冒烟正常。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.70 性能计划 WP-S2：补充 excludes 裁剪无用标准库（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 两个 spec excludes | 统一追加 `email`/`http`/`pydoc_data`/`ensurepip`/`distutils`/`setuptools`/`pip`/`venv`/`tkinter.test`/`tkinter.tix`/`cgi`/`telnetlib`/`ftplib`/`smtplib`/`imaplib`/`nntplib`/`socketserver`/`http.server`/`wsgiref`/`json.tool`/`xmlrpc`/`asyncio` |
+| 2 | `urllib` 回退 | 首次构建报 `ImportError: No module named 'urllib.error'`（PyInstaller 分析期有模块依赖 urllib）；从排除列表移除 `urllib` 后构建成功（email/http 保留） |
+
+**体积基准**：主 EXE **7.13 → 6.98MB（-0.15MB）**、查看器 EXE **7.06 → 6.90MB（-0.16MB）**；两个打包版冒烟正常（主工具扫描/查看器启动）。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.71 性能计划 WP-S3：安装并启用 UPX（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | UPX 就位 | conda-forge 镜像无 `upx` 包，改用下载 UPX 3.96 win64（PyInstaller 5.13 官方验证版本），置于两项目 `tools\upx\upx.exe` |
+| 2 | 构建脚本 | 两个 `build_portable.ps1` 在 PyInstaller 调用前将 `tools\upx` 加入 PATH（存在则启用，缺失自动跳过）；注释用 ASCII 避免 PowerShell 5.1 无 BOM UTF-8 误解析 |
+| 3 | 体积 | 主 EXE **6.98 → 6.02MB（-14%）**、查看器 **6.90 → 5.94MB（-14%）**；构建日志显示大量 DLL 经 upx 压缩；VCRUNTIME140.dll/ucrtbase.dll 因 CFG 由 PyInstaller 自动禁用 UPX（正常） |
+| 4 | 杀软复测门 | Windows Defender `MpCmdRun -Scan` 扫描主 EXE：**未检出威胁**（exit 0）；360/火绒本机未安装，登记留待车间实测；Windows 7 真机冒烟同样留待车间 |
+| 5 | 文档 | `requirements-build.txt` 注明 UPX 为可选构建依赖；README 记录启用状态 |
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.72 性能计划 WP-P3：全部应用改为内存局部重处理（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `apply_info` 重构 | 「全部应用」不再仅靠整目录 `scan()` 生成预览：先对全部 MPF 内存 `reprocess_file`（立即生成预览）→ `populate_file_tables` + 恢复选中 + `show_selected`；末尾保留一次 `scan()` 刷新图号候选等目录级全局数据 |
+| 2 | 交互提速 | 点击「全部应用」后预览立即刷新（内存操作），不再等待整目录重扫完成 |
+
+**测试基线**：277 → **278 项**（全部应用内存重处理不依赖整目录重扫 1 项），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.73 性能与打包体积计划收尾（2026-08-06）
+
+**完成 WP**：
+
+| WP | 成果 |
+|---|---|
+| WP-P1 | build_plan（HASS 25 MPF）2.072s → 1.450s（-30%）；正则模块常量复用 + F 离群单次遍历 |
+| WP-P3 | 「全部应用」内存局部重处理，预览立即刷新，不再依赖整目录重扫 |
+| WP-S1 | 互斥体名 FNV-1a，排除 hashlib/libcrypto，EXE 8.95 → 7.13MB |
+| WP-S2 | 两个 spec 补充 excludes，主 7.13 → 6.98MB、查看器 7.06 → 6.90MB（urllib 因分析依赖回退保留） |
+| WP-S3 | UPX 3.96 启用（tools\upx + build_portable.ps1 PATH 注入），主 6.98 → 6.02MB、查看器 6.90 → 5.94MB；Defender 复测通过，360/火绒与 Win7 真机留待车间 |
+
+**跳过登记（可选待办）**：WP-P2（管线单次切行重构——P1 已达 -30% 目标，重构面大风险中）；WP-S4（tcl/tk 数据裁剪——收益小、Win7 渲染风险中）；WP-S5（ZIP 更高压缩比——EXE 已 UPX，ZIP 再压收益有限）。
+
+**累计成果**：build_plan -30%（100 文件约 5.8s，接近 5s 目标）；主 EXE -33%、查看器 -16%。测试基线主 **278 项**、查看器 **9 项**全绿。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.74 报告完善 WP-R1：快照补键、CLI 事件、查看器展示（2026-08-06）
+
+按报告完善建议 A 组落地，并同步完善查看器：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `config_snapshot` 补键 | `_config_snapshot` 补 `max_file_size`/`max_files`/`retract_z_threshold`/`ask_backup`（WP-C1/C9 新增配置此前未进快照，报告可复现性不完整） |
+| 2 | CLI 事件埋点 | `_config_from_args` 加载持久化偏好时 `emit settings_loaded`，CLI 报告运行日志事件枚举与 GUI 对齐 |
+| 3 | 查看器概览 | 概览页元信息新增「备份目录」（`backup_dir`）展示 |
+| 4 | 查看器运行日志 | 「运行日志」页新增「详情」列（`runtime_log[].detail`，error 事件 traceback 可见）；压缩列宽保持 1290×720 布局锁定（此前加列撑宽挤压左栏文件表） |
+
+**测试基线**：主工具 278 → **280 项**（快照补键、CLI settings_loaded 各 1 项）；查看器 9 项（扩展现有断言：备份目录展示、日志详情列），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.75 设置保存位置启动检测（2026-08-06）
+
+按用户要求：主程序启动时实际检测三个保存位置，哪个位置有配置，哪个位置就是设置的保存位置。
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `_selected_backend` 存在性检测 | 由「找 storage_backend 键声明」改为「注册表→appdata→home 顺序，第一个有已持久化值的位置即保存位置」；多后端残留时按此顺序优先 |
+| 2 | `load_all` 单选 | 按检测到的后端读取，不再跨后端合并（删除 `_load_settings_file` 死代码）；注册表有配置即用注册表，不再被历史文件旧值覆盖 |
+| 3 | GUI 启动显示 | 「配置保存位置」下拉初始化改用 `storage_backend()[0]`（检测到的后端），与保存行为一致 |
+
+**测试基线**：280 → **281 项**（无 storage_backend 键时按存在性检测定位 appdata 1 项；`test_load_uses_selected_backend` 断言更新为注册表残留优先），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.76 NCodeProcessData 与日志不再自动生成（2026-08-06）
+
+按用户要求：主程序启动不再自动创建 `NCodeProcessData` 目录与日志文件，只有导出报告时才生成（log 内容内嵌报告 `runtime_log`，磁盘日志随导出落盘）：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | RuntimeLog 补写历史 | `attach()` 时把此前仅在内存缓冲的事件一并写盘（按事件对象 id 去重），磁盘日志覆盖完整会话 |
+| 2 | `save_timestamped_report` | 写报告前 `attach(directory)`（创建 `directory/logs/`）→ 写报告 → `finally detach()`；导出完成后后续事件只进内存缓冲，不再自动写盘 |
+| 3 | GUI 启动 | `main()` 删除启动 attach，启动/扫描事件仅进内存缓冲（报告导出时内嵌 `runtime_log`） |
+| 4 | CLI | 删除启动 attach；无 `--json-report` 时不再自动 `save_timestamped_report`（仅打印摘要，不生成报告/NCodeProcessData）；`--json-report` 显式导出时 attach 报告目录并生成 log |
+
+**验证**：打包版启动后 `NCodeProcessData` 不创建（实测通过）；CLI 无 `--json-report` 不生成、`--json-report` 生成报告 + `logs/` 日志文件（实测通过）。
+
+**测试基线**：281 → **283 项**（导出时生成 log 且导出后不再写盘、attach 补写历史缓冲各 1 项），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.77 报告仅单个 JSON、日志完整内嵌（2026-08-06）
+
+按用户澄清要求（log 不再额外生成文件，最终报告就是一个 JSON，里面包含 log）：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | RuntimeLog 精简 | 彻底移除磁盘日志机制：删除 `attach`/`detach`/`_append_disk`/`_rotate`/`log_path`/`_disk_written_ids` 及 `MAX_LOG_BYTES`/`MAX_LOG_FILES` 常量；仅保留内存环形缓冲（500 条）+ `snapshot()`（截断说明不再指向磁盘日志） |
+| 2 | `log_path` 恒空 | `ProcessReport.refresh_runtime_log` 将 `log_path` 置空（兼容保留字段）；报告即单个 JSON，`runtime_log` 完整内嵌 |
+| 3 | 导出落盘 | `save_timestamped_report`/CLI `--json-report` 均不再生成 logs 目录与日志文件；`write_json` 自动创建父目录（CLI 显式路径可用） |
+| 4 | 查看器 | 运行日志页底部提示改为「运行日志已内嵌本报告，不再生成磁盘日志文件」；移除 log_path 失效相关提示分支 |
+
+**实测**：CLI `--json-report` 导出后目标目录**仅含 report.json**（9 条运行事件内嵌、`log_path` 为空、无 logs 目录）；打包版启动后不创建 `NCodeProcessData`。
+
+**测试基线**：283 → **280 项**（删除 3 项磁盘日志测试：磁盘写入/轮转/补写历史；保留并改造导出不生成日志文件、报告内嵌且 log_path 空 2 项），全量通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
+
+### 2.78 设置页说明「?」紧邻控件（2026-08-06）
+
+按用户要求（问号与输入框/选项紧邻，一行最后只放按钮）重构 `open_settings` 布局：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 内容容器 | 每行改为「label（col0）+ 内容容器（col1）」，容器内按 pack 顺序排列：控件 → 「?」说明 → 行尾按钮（恢复默认等），「?」不再放在行尾列（原 col2/col3 移除） |
+| 2 | 覆盖范围 | 基本设置（文件编码/程序名允许字符/文件上限/扩展名/归档目录/备份/保存位置）与校验规则（G00/必填字段/M03/F-S 上下限/F 离群/多 S 警告/换行/辅助顺序）全部行 |
+| 3 | 布局锁定 | 设置对话框仍满足宽 ≤640、高 ≤500；两页框宽一致测试保持通过 |
+
+**测试基线**：保持 **280 项**（布局重构，SettingsDialogTests 56 项全过），全量通过。
 
 **执行确认（2026-08-05 新流程）**：改动完成、测试通过、文档同步后，先打包 EXE 供用户测试；用户确认后再统一提交 git。
 

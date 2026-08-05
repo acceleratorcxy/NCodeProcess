@@ -103,6 +103,37 @@
 4. **版本号**：`__version__` 仍 1.0.0，正式发版前建议按需提升并同步 `VERSION.txt`/`version_info.txt`。
 5. **未处理项**：线程安全、子窗口适配、备份/只读预检等见 `docs/NCodeProcess-审查与待办.md`。
 
+## 附：审查整改工作包摘要（2026-08-05/06，未独立发版）
+
+按「NCodeProcess 审查整改实施计划」完成 P0–P3 全部工作包（版本号保持 1.0.0，待正式发版统一提升）：
+
+- **WP-A1**（P0）：M04 反转禁止自动补写 M03，报 `spindle-direction` error；同段 M03+M04 互斥。
+- **WP-A2**（P1）：多刀程序跳过自动换刀改写并警告（`auto-tool-change-skipped`），执行确认页列出。
+- **WP-B1**（P1）：代码编辑器保存忽略 CRLF/LF 差异。
+- **WP-B2**（P1）：PROGRAM 经「修改程序名」同步；NC MACHINE/CONTROL SYSTEM 永久保护；DATE 自动更新。
+- **WP-B3**（P1）：M06 检查排除括号与分号注释。
+- **WP-C1**（P2）：文件大小/数量上限可配置（默认不限制）；设置对话框两页框宽统一。
+- **WP-C3**（P2）：CLI 补齐 GUI 全部持久化配置参数并加载偏好。
+- **WP-C4**（P2）：扫描期间禁用应用操作，避免共享数据竞争。
+- **WP-C5**（P2）：递归扫描跳过任意深度数据/归档目录；未知扩展名口径统一为完全忽略。
+- **WP-C6**（P2）：运行日志双轨（磁盘滚动 + 报告内嵌 `runtime_log`/`log_path`）；查看器新增运行日志页签；报告第 12 节增强字段（`app_version`/`config_snapshot`/`user_confirmations`/`files[].target` 等）。
+- **WP-C7**（P2）：`process_plan` 按动作拆分为私有执行器。
+- **WP-C8**（P2）：删除「清除注册表」按钮；恢复默认自动切回注册表并清空另两处残留。
+- **WP-C9**（P2）：抬刀高度阈值进 Config（默认 20），50 样例 0 误报。
+- **WP-C2/D1/D2**（P2/P3）：死代码清理、程序名默认正则提为模块常量。
+- **WP-D3/D4**（P3）：构建不可复现性文档化、文档一致性总修订。
+
+测试基线：主工具 **277 项**、查看器 **9 项**。完整记录见 `docs/NCodeProcess-程序理解与操作记录.md` 与 `docs/NCodeProcess-审查与待办.md`。
+
+## 附：性能与打包体积优化摘要（2026-08-06，未独立发版）
+
+按「NCodeProcess 性能与打包体积优化实施计划」完成 WP-P1/P3/S1/S2/S3：
+
+- **性能**：`build_plan`（25 MPF）2.072s → **1.450s（-30%）**；「全部应用」改为内存局部重处理、预览立即刷新（WP-P1/P3）。
+- **体积**：互斥体名 FNV-1a 替代 md5（排除 hashlib/libcrypto，-1.9MB）；spec 补充 excludes；启用 UPX 3.96 压缩——主 EXE **8.95 → 6.02MB（-33%）**、查看器 **7.06 → 5.94MB**（WP-S1/S2/S3）。
+- **安全**：Windows Defender 复测未检出威胁；360/火绒与 Windows 7 真机冒烟登记留待车间实测。
+- **跳过（可选待办）**：WP-P2（管线重构）、WP-S4（tcl/tk 裁剪）、WP-S5（ZIP 再压缩），详见审查与待办。
+
 ## 八、相关文档
 
 - 实施计划（已归档，仅本地保留、git 不跟踪）：`docs/archive/superpowers/plans/2026-08-04-gui-config-settings-batch2-plan.md`

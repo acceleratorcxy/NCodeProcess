@@ -8,7 +8,7 @@
 
 无 MSG 头部的程序默认按 HASS 处理，机床为 `HASS`；已有 MSG 头部的程序默认机床为 `2500B`；控制系统均固定为 `SIE840D`。程序信息填写后必须点击“应用设置”才会进入预览和处理，未点击时按默认规则处理。生成的 MSG 头部与第一条 NC 正文之间不额外添加空行。
 
-图号和版次为必填项，未填写或未点击“应用设置”时会放弃修改。图号默认保持为空，界面提供当前目录以及向上三层目录的选择框，点击读取按钮后才填入所选文件夹名。新增的特殊刀具类型和按程序修改的刀具信息保存在 `NCodeProcessData/special_tools.json`。处理报告默认不输出；点击“导出报告”后，无需选择路径，带时间的 JSON 报告会自动保存到当前目录的 `NCodeProcessData` 文件夹，并只保留最新三份。默认刀具类型还包括钻头和中心钻，刀具 MSG 始终位于程序头信息最后。
+图号和版次为必填项，未填写或未点击“应用设置”时会放弃修改。图号默认保持为空，界面提供当前目录以及向上三层目录的选择框，点击读取按钮后才填入所选文件夹名。新增的特殊刀具类型和按程序修改的刀具信息保存在 `NCodeProcessData/special_tools.json`。处理报告默认不输出；点击“导出报告”后，无需选择路径，带时间的 JSON 报告会自动保存到当前目录的 `NCodeProcessData` 文件夹，并只保留最新三份。程序启动与扫描阶段不会自动生成 `NCodeProcessData` 目录或任何日志文件；导出报告时仅生成**单个 JSON 报告文件**，运行日志完整内嵌其 `runtime_log` 字段，并记录工具版本、报告来源、用户确认项、处理配置快照以及每文件目标路径与程序名来源。默认刀具类型还包括钻头和中心钻，刀具 MSG 始终位于程序头信息最后。
 
 升级自旧版时，程序仍会读取旧 `NCPostProcessData/special_tools.json` 和旧注册表偏好项；新增配置与报告统一写入 `NCodeProcessData`，报告文件名统一为 `ncodeprocess-report-*.json`。
 
@@ -48,7 +48,7 @@
 python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe GAOWEI --drawing-number D0354F31311-201 --part-version A --nc-machine 2500B --control-system SIE840D
 ```
 
-预览不会修改文件；确认执行时追加 `--yes`。命令行如需保存 APTSOURCE，应追加 `--save-aptsource`。此外支持 `--output` 指定独立输出目录、`--overwrite`、`--overwrite-fields`、`--g00-level`、`--no-m03`、`--tool number,dia,tool_coner,tool_type` 和 JSON/CSV 报告导出。
+预览不会修改文件；确认执行时追加 `--yes`。命令行如需保存 APTSOURCE，应追加 `--save-aptsource`。此外支持 `--output` 指定独立输出目录、`--overwrite`、`--overwrite-fields`、`--g00-level`、`--no-m03`、`--tool number,dia,tool_coner,tool_type` 和 JSON/CSV 报告导出。校验与处理策略参数与 GUI 设置一致：`--m03-position`、`--newline`、`--feed-min/--feed-max/--spindle-min/--spindle-max`、`--aux-m03/--aux-m05/--aux-m08/--aux-m09`（及 `--no-` 前缀禁用）、`--feed-outlier-iqr/--feed-outlier-low/--feed-outlier-high`、`--multiple-spindle/--no-multiple-spindle`、`--max-file-size/--max-files`、`--retract-z-threshold`；未显式传参的项自动读取 GUI 持久化偏好（注册表/AppData/用户主目录）。
 
 ## 处理内容
 
@@ -61,7 +61,7 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 
 ## 程序设置
 
-「程序设置…」对话框分两页：**基本设置**（编码、待删除扩展名、允许字符、APTSOURCE 子目录、主程序扩展名、输出扩展名、配置保存位置：注册表/AppData/用户主目录、导出设置）与**校验规则**（结束标记/M06/S 检查开关，G00 级别：错误/警告/允许，必填 MSG 字段：编制/审核/图号/版次可勾选、程序/机床/控制系统固定必填，M03 补写位置：贴 S 后/独立行，F/S 上下限，F 离群校验：按移动/进刀/切削阶段分组检测常见档位（可调 IQR 倍数与低值/高值比例，孤立异常提示），多 S 值警告开关，换行策略：自动/CRLF/LF，辅助指令顺序：M03/M05/M08/M09）。全部设置持久化保存，重启后自动恢复。
+「程序设置…」对话框分两页并按分类分组：**基本设置**（文件处理：文件编码、程序名允许字符、单文件大小上限、扫描文件数量上限；文件类型：待删除扩展名、主程序扩展名、输出扩展名；目录与存储：APTSOURCE 归档子目录、处理前询问备份、配置保存位置：注册表/AppData/用户主目录、导出设置）与**校验规则**（基础检查：结束标记/M06/S；工艺校验：G00 级别、必填 MSG 字段、M03 补写位置、F/S 上下限；F 离群与 S 警告：按移动/进刀/切削阶段分组检测常见档位（可调 IQR 倍数、低值/高值比例与抬刀高度阈值）；输出格式：换行策略、辅助指令顺序）。全部设置持久化保存，重启后自动恢复。文件大小/数量上限留空或 0 表示不限制，超限文件跳过或停止扫描并提示。
 
 ## 便携打包
 
@@ -73,9 +73,9 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 
 输出为单文件 `dist\NCodeProcess.exe`，同时生成 `dist\NCodeProcess-Windows7-Portable.zip`。把 EXE 移到待处理目录即可使用，不会创建安装项、启动项或文件关联。编制和审核/校对信息保存在当前 Windows 用户设置中，不会在 NC 目录生成配置文件，因此移动 EXE 后仍可保留。
 
-打包脚本会排除程序未使用的网络、SSL、通用压缩、多进程和 XML 模块，以减小发布文件体积；这些排除项不影响 NC 文件扫描、统计、校验、目录处理和报告导出功能。
+打包脚本会排除程序未使用的网络、SSL、通用压缩、多进程和 XML 模块，以减小发布文件体积；这些排除项不影响 NC 文件扫描、统计、校验、目录处理和报告导出功能。构建脚本支持可选 UPX 压缩（`tools\upx\upx.exe` 存在时自动启用，当前构建已启用），进一步减小 EXE 体积；压缩后需以发布包内 `SHA256SUMS.txt` 校验完整性。
 
-发布构建已启用随机密钥字节码加密、`-OO` 优化、运行时反调试、调试模块裁剪、临时构建痕迹清理和 SHA-256 完整性记录；还可通过证书指纹启用 Authenticode 数字签名。具体构建与验证方法见 [SECURITY.md](SECURITY.md)。
+发布构建已启用随机密钥字节码加密、`-OO` 优化、运行时反调试、调试模块裁剪、临时构建痕迹清理和 SHA-256 完整性记录；还可通过证书指纹启用 Authenticode 数字签名。由于每次构建使用随机 PYZ 加密密钥与随机 hash seed，同一源码构建出的 EXE 不可逐字节复现，这是防破解/防提取的有意设计；完整性校验请以发布包内 `SHA256SUMS.txt` 为准。具体构建与验证方法见 [SECURITY.md](SECURITY.md)。
 
 ## 已知规则
 

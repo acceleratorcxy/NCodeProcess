@@ -11,7 +11,7 @@
 
 - **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `Python 3.8 环境`，3.8.19）。
 - **目录**：`tests/`（与 `ncodeprocess/` 同级），模块划分与源码分层一一对应。
-- **当前基线**：**235 项全部通过**（2026-08-05 合并精简后 159 项；WP-01~WP-09、用户测试修正、覆盖选项说明文案锁定测试、WP-10 启发式阈值阶段分组化与 WP-11 设置持久化各新增项累计后为 235 项），全量运行约 50 秒。
+- **当前基线**：**280 项全部通过**（2026-08-05 合并精简后 159 项；WP-01~WP-09、用户测试修正、覆盖选项说明文案锁定测试、WP-10 启发式阈值阶段分组化、WP-11 设置持久化、WP-12 细节清理、WP-C6 运行日志、报告第 12 节增强字段、WP-A1 M04 校验、WP-A2 多刀换刀防护、WP-B1 换行保护、WP-B3 M06 注释修复、WP-B2 PROGRAM/DATE 口径、WP-C1 文件上限/布局统一、WP-C4 扫描应用互斥、WP-C5 嵌套忽略目录、WP-C8 恢复默认回注册表、WP-C9 抬刀阈值、WP-C3 CLI 配置面统一、WP-P3 应用局部重处理、WP-R1 报告完善、WP-R2 保存位置启动检测、WP-R3 日志按需生成与 WP-R4 报告单 JSON 化各新增项累计后为 280 项），全量运行约 50 秒。
 - **运行命令**（cwd 为 `NCodeProcess` 项目目录）：
 
 | 场景 | 命令 |
@@ -24,8 +24,8 @@
 
 | 模块 | 文件 | 对应源码 | 覆盖内容 |
 |---|---|---|---|
-| `CoreTests` | `tests/test_core.py` | `ncodeprocess/core.py` | 纯逻辑：目录扫描、计划构建、头部补全（HASS/V5-2500B）、刀具解析（APT/特殊刀具/优先级）、M03 补写（after-s/standalone）、校验（必填/G00/S·F 上下限/辅助顺序/F0/重复字段/结束标记/M06/S）、换行策略、统计、报告保留三份、图号候选、扩展名配置 |
-| `test_gui.py` | `tests/test_gui.py` | `ncodeprocess/gui.py` | 纯函数（差异对比/图号合并/确认阈值/列宽分配/字体选择/布局档案）+ Tk 交互（表格布局与列宽、设置对话框两页、必填字段与 F/S 间距、程序编辑/对比、悬停提示、导出报告、启动回调） |
+| `CoreTests` | `tests/test_core.py` | `ncodeprocess/core.py` | 纯逻辑：目录扫描、计划构建、头部补全（HASS/V5-2500B）、刀具解析（APT/特殊刀具/优先级）、M03 补写（after-s/standalone）、校验（必填/G00/S·F 上下限/辅助顺序/F0/重复字段/结束标记/M06/S）、换行策略、统计、报告保留三份、图号候选、扩展名配置、运行日志（WP-C6）、报告第 12 节增强字段（app_version/config_snapshot/user_confirmations/files[].target/program_name_source） |
+| `test_gui.py` | `tests/test_gui.py` | `ncodeprocess/gui.py` | 纯函数（差异对比/图号合并/确认阈值/列宽分配/字体选择/布局档案）+ Tk 交互（表格布局与列宽、设置对话框两页、必填字段与 F/S 间距、程序编辑/对比、悬停提示、导出报告、启动回调、运行日志事件埋点 settings_loaded/settings_saved） |
 | `PreferencesTests` / `FileBackendPreferencesTests` | `tests/test_preferences.py` | `ncodeprocess/preferences.py` | 注册表读写/清除/遗留键；注册表不可写时回退 `%APPDATA%` 设置文件，再回退用户主目录 |
 | `ReleaseAssetTests` | `tests/test_release_assets.py` | `version_info.txt` / `build_portable.ps1` / `VERSION.txt` / `NCodeProcess.spec` | 发布资产一致性：版本资源文件、打包脚本引用、版本号同步 |
 
@@ -54,7 +54,7 @@
    - `LayoutWidgetTests`（`SettingsDialogTests` 继承）：`_build_app(w, h)`、`_descendants(widget)`、`_collect_buttons(widget)`、`_relative_x_to_root(widget, root)`、`_column_total`。
    - 成对/同模式场景用 `subTest` 表驱动合并（如 `test_fit_column_widths_cases`、`test_feed_limits_check_both_ends`、`test_drill_types_detected_independent_of_diameter`），减少重复同时保留全部断言。
 5. **Python 3.8 兼容**：测试代码同样避免 3.9+ 语法（如 `str.removeprefix`、`dict |` 合并）。
-6. **运行与验证**：改动后先跑目标模块，再跑全量回归；保持基线 **235 项全绿**。
+6. **运行与验证**：改动后先跑目标模块，再跑全量回归；保持基线 **280 项全绿**（查看器基线 10 项）。
 
 ## 六、与其他文档的关系
 

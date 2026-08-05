@@ -11,7 +11,7 @@
 **关联文档：**
 - 需求基线：`NCodeProcess-需求文档.md`（V1.1，第 13 节待确认事项、FR-07.2/07.3、第 15 节实施状态）
 - 待办来源：`NCodeProcess-审查与待办.md`、`NCodeProcessReportViewer-审查与待办.md`
-- 测试基线：`NCodeProcess-测试指南.md`（235 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
+- 测试基线：`NCodeProcess-测试指南.md`（239 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
 - 前置工作：Batch 1 / Batch 2 计划（已完成，见 `docs/archive/superpowers/plans/`）
 
 ---
@@ -596,6 +596,8 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 - 单实例：启动时以工作目录下锁文件或 `CreateMutex`（Win32）防止双 EXE 竞态写 `special_tools.json`/报告时间戳；次实例提示后退出。
 - 杀软误报：按 `SECURITY.md` 构建一次发布包，在本机主流杀软实测并记录结果，必要时准备误报申诉说明（对应审查问题 14）。
 
+> ✅ **已完成（2026-08-05）**：① `apply_header` 替换保留原行缩进、插入沿用首条 MSG 行缩进（FR-4.2.5）；② 单实例：按 EXE 绝对路径的 Win32 命名互斥体，同目录第二实例提示后退出，不同目录互不影响；③ 杀软实测：Windows Defender MpCmdRun 扫描最新 EXE 未检出威胁（退出码 0），第三方杀软留待车间实测。测试 +4 项（缩进 2 + 单实例 2），基线 235 → 239，全量通过。
+
 ### WP-13: 查看器柱状图容错与索引校验
 
 - `_draw_bar_chart`：`float(value)` 包 `try/except (TypeError, ValueError)`，失败按 0 处理并继续。
@@ -633,7 +635,7 @@ git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查�
 2. **Python 3.8 兼容**：代码与测试避免 3.9+ 语法；测试必须用 conda Python 3.8 环境运行。
 3. **提交规范**：小步提交，提交信息含 `feat/fix/refactor/docs` 前缀与中文说明；不提交构建产物（`build/`、`dist/`、`Publish/`）、样例目录、`NCodeProcessData/`。
 4. **隐私审核**：提交前检查本机路径/用户名/邮箱/代理地址，一律通用化（占位符）。
-5. **测试基线**：主工具 235 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
+5. **测试基线**：主工具 239 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
 6. **文档同步**：见 WP-17，任何变更不得遗漏受影响文档。
 7. **执行确认**：每个 WP/Task 启动前须经用户确认（见「〇、决策点」的执行确认流程），不得擅自连续执行多个工作包。**提交顺序（2026-08-05 用户要求）**：改动完成并全量回归通过后先打包 EXE 供用户测试；用户确认后再统一提交 git（可一次或分批提交），未获确认不得提交。
 
