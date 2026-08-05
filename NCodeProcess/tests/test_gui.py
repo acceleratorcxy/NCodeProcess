@@ -495,8 +495,8 @@ class LayoutWidgetTests(unittest.TestCase):
             root.destroy()
 
     def test_compare_gutters_keep_per_side_line_numbers(self):
-        # Each comparison pane numbers its own program's lines: an added line
-        # on one side leaves the other side's gutter blank at that row.
+        # 对比窗格各自为程序行连续编号；对齐产生的空行占位被压缩，
+        # 短程序一侧不出现无编号空白（2026-08-05 修复）。
         root, app = self._build_app(1286, 668)
         try:
             plans = [
@@ -509,7 +509,7 @@ class LayoutWidgetTests(unittest.TestCase):
             app.populate_file_tables()
             app.keep_table.selection_set(("0", "1"))
             app.compare_selected_programs()
-            self.assertEqual(app.program_compare_left_gutter.get("1.0", "end-1c"), "1\n\n2")
+            self.assertEqual(app.program_compare_left_gutter.get("1.0", "end-1c"), "1\n2")
             self.assertEqual(app.program_compare_right_gutter.get("1.0", "end-1c"), "1\n2\n3")
         finally:
             root.destroy()
@@ -1520,6 +1520,38 @@ class ScanLifecycleTests(unittest.TestCase):
                     combo_values.update(widget.cget("values"))
             self.assertIn("gbk", combo_values)
             self.assertIn("gb2312", combo_values)
+        finally:
+            root.destroy()
+
+    def test_settings_window_size_matches_content(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            app.settings_window.update_idletasks()
+            geometry = app.settings_window.geometry()
+            width = int(geometry.split("x")[0])
+            height = int(geometry.split("x")[1].split("+")[0])
+            self.assertGreaterEqual(width, 400)
+            self.assertGreaterEqual(height, 300)
+        finally:
+            root.destroy()
+
+    def test_compare_window_does_not_pad_shorter_program(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            left_text = "\n".join(f"N{i}G1X{i}" for i in range(1, 21))
+            right_text = "\n".join(f"N{i}G1X{i}" for i in range(1, 401))
+            plans = []
+            for index, text in enumerate((left_text, right_text)):
+                plan = FilePlan(f"{index}.MPF", "mpf", f"P{index}", f"P{index}.MPF", "keep")
+                plan.original_text = text
+                plans.append(plan)
+            app.scan_result = ScanResult("tmp", plans)
+            app.populate_file_tables()
+            app.keep_table.selection_set("0", "1")
+            app.compare_selected_programs()
+            left_lines = int(app.program_compare_left.index("end-1c").split(".")[0])
+            self.assertLessEqual(left_lines, 21)
         finally:
             root.destroy()
 

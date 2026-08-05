@@ -430,15 +430,22 @@ class App(ttk.Frame):
     def _show_centered(self, window, width=None, height=None, min_width=0, min_height=0):
         """Place a Toplevel child window centered on the main window.
 
-        Width/height default to the window's requested size; both are clamped
-        to the screen so the window never starts off-screen.
+        The window is kept hidden while its requested size is measured, then
+        sized/clamped to the screen and revealed. This avoids a visible flash
+        at the wrong location/size, so call this after the window's widgets
+        have been built. Width/height default to the window's requested size;
+        explicit sizes are also raised to the minimums and clamped to the
+        screen so the window is always fully displayable.
         """
+        window.withdraw()
+        window.update_idletasks()
         if width is None or height is None:
-            window.update_idletasks()
             width = width or window.winfo_reqwidth()
             height = height or window.winfo_reqheight()
         screen_w = window.winfo_screenwidth()
         screen_h = window.winfo_screenheight()
+        width = max(width, min_width)
+        height = max(height, min_height)
         width = min(width, screen_w)
         height = min(height, screen_h)
         parent_x = self.master.winfo_rootx()
@@ -449,6 +456,7 @@ class App(ttk.Frame):
         window.geometry(f"{width}x{height}+{x}+{y}")
         if min_width:
             window.minsize(min_width, min_height)
+        window.deiconify()
 
     def _schedule_startup_callback(self, delay, callback):
         """Schedule a startup callback that can be cancelled with this App."""
@@ -1097,7 +1105,6 @@ class App(ttk.Frame):
         win.title("程序设置")
         win.transient(self.master)
         win.resizable(False, False)
-        self._show_centered(win)
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
         basic = ttk.Frame(notebook, padding=8)
@@ -1201,6 +1208,7 @@ class App(ttk.Frame):
         ttk.Button(actions, text="取消", command=self._cancel_settings).pack(side="right", padx=(0, 8))
         win.bind("<Return>", lambda _event: self._confirm_settings())
         win.bind("<Escape>", lambda _event: self._cancel_settings())
+        self._show_centered(win)
         self.settings_window = win
 
     def _parsed_delete_extensions(self):
@@ -1594,11 +1602,6 @@ class App(ttk.Frame):
         window = tk.Toplevel(self.master)
         self.all_stats_window = window
         window.title("全部程序参数统计")
-        screen_width = window.winfo_screenwidth()
-        screen_height = window.winfo_screenheight()
-        width = min(1500, max(1050, screen_width - 80))
-        height = min(720, max(560, screen_height - 100))
-        self._show_centered(window, width, height, min_width=1050, min_height=420)
         window.transient(self.master)
         table = self._table(
             window,
@@ -1630,6 +1633,11 @@ class App(ttk.Frame):
                 window.destroy()
             self.all_stats_window = None
 
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        width = min(1500, max(1050, screen_width - 80))
+        height = min(720, max(560, screen_height - 100))
+        self._show_centered(window, width, height, min_width=1050, min_height=420)
         window.protocol("WM_DELETE_WINDOW", close_window)
 
     def render_diff(self, before, after):
@@ -1779,7 +1787,6 @@ class App(ttk.Frame):
         window = tk.Toplevel(self.master)
         self.program_compare_window = window
         window.title(f"程序差异对比：{compare_label(left)} vs {compare_label(right)}")
-        self._show_centered(window, 1100, 650, min_width=800, min_height=480)
         window.transient(self.master)
         frame = ttk.Frame(window, padding=8)
         frame.pack(fill="both", expand=True)
@@ -1850,24 +1857,20 @@ class App(ttk.Frame):
         right_numbers: List[str] = []
         left_num = right_num = 0
         for left_row, left_tag, right_row, right_tag in align_lines(left.original_text, right.original_text):
-            left_tag = (left_tag or "equal") if left_row else ""
-            right_tag = (right_tag or "equal") if right_row else ""
-            left_text.configure(state="normal")
-            left_text.insert("end", left_row + "\n", left_tag)
-            left_text.configure(state="disabled")
-            right_text.configure(state="normal")
-            right_text.insert("end", right_row + "\n", right_tag)
-            right_text.configure(state="disabled")
+            # 只插入实际内容行，行号连续；对齐产生的空行占位被压缩，
+            # 避免短程序一侧出现大片无编号空白。
             if left_row:
+                left_text.configure(state="normal")
+                left_text.insert("end", left_row + "\n", left_tag or "equal")
+                left_text.configure(state="disabled")
                 left_num += 1
                 left_numbers.append(str(left_num))
-            else:
-                left_numbers.append("")
             if right_row:
+                right_text.configure(state="normal")
+                right_text.insert("end", right_row + "\n", right_tag or "equal")
+                right_text.configure(state="disabled")
                 right_num += 1
                 right_numbers.append(str(right_num))
-            else:
-                right_numbers.append("")
         for gutter, numbers in ((left_gutter, left_numbers), (right_gutter, right_numbers)):
             gutter.configure(state="normal")
             gutter.delete("1.0", "end")
@@ -1878,6 +1881,7 @@ class App(ttk.Frame):
             window.destroy()
             self.program_compare_window = None
 
+        self._show_centered(window, 1100, 650, min_width=800, min_height=480)
         window.protocol("WM_DELETE_WINDOW", close)
 
     def edit_program_code(self, _event=None):
@@ -1897,7 +1901,6 @@ class App(ttk.Frame):
         window = tk.Toplevel(self.master)
         self.program_editor_window = window
         window.title("编辑程序代码：" + f.program)
-        self._show_centered(window, 900, 650, min_width=700, min_height=480)
         window.transient(self.master)
         container = ttk.Frame(window, padding=8)
         container.pack(fill="both", expand=True)
@@ -1983,6 +1986,7 @@ class App(ttk.Frame):
         ttk.Button(buttons, text="取消", command=close).pack(side="right", padx=(0, 8))
         ttk.Button(buttons, text="保存并重新审查", command=save).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", close)
+        self._show_centered(window, 900, 650, min_width=700, min_height=480)
         text.focus_set()
 
     def process(self):
@@ -2056,9 +2060,7 @@ class App(ttk.Frame):
         result = {"confirmed": False}
         window = tk.Toplevel(self.master)
         window.title("确认目录处理")
-        self._show_centered(window, 900, 650, min_width=700, min_height=460)
         window.transient(self.master)
-        window.grab_set()
         container = ttk.Frame(window, padding=12)
         container.pack(fill="both", expand=True)
         container.columnconfigure(0, weight=1)
@@ -2079,6 +2081,8 @@ class App(ttk.Frame):
         ttk.Button(buttons, text="取消", command=lambda: close(False)).pack(side="right", padx=(8, 0))
         ttk.Button(buttons, text="确认执行", command=lambda: close(True)).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", lambda: close(False))
+        self._show_centered(window, 900, 650, min_width=700, min_height=460)
+        window.grab_set()
         window.wait_window()
         return result["confirmed"]
 
