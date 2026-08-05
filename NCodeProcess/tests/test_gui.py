@@ -1548,75 +1548,8 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_apply_selected_writes_selected_files_and_rescans(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
-            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
-            app.scan_result = ScanResult("tmp", [plan])
-            app.populate_file_tables()
-            app.keep_table.selection_set("0")
-            app.info_vars["drawing"].set("NEWDRAW")
-            app.info_vars["version"].set("V9")
-            app.overwrite_fields.set(True)
-            with patch.object(app, "scan") as scan_mock, \
-                 patch("ncodeprocess.gui._atomic_write") as atomic_write, \
-                 patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")), \
-                 patch.object(app, "show_selected") as show_mock:
-                app.apply_selected()
-            atomic_write.assert_called_once()
-            scan_mock.assert_called_once()
-            show_mock.assert_called_once()
-            self.assertIn("NEWDRAW", plan.output_text or "")
-        finally:
-            root.destroy()
-
-    def test_apply_selected_without_overwrite_is_preview_only(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
-            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
-            app.scan_result = ScanResult("tmp", [plan])
-            app.populate_file_tables()
-            app.keep_table.selection_set("0")
-            app.info_vars["drawing"].set("NEWDRAW")
-            app.info_vars["version"].set("V9")
-            app.overwrite_fields.set(False)
-            with patch.object(app, "scan") as scan_mock, \
-                 patch("ncodeprocess.gui._atomic_write") as atomic_write, \
-                 patch.object(app, "show_selected") as show_mock:
-                app.apply_selected()
-            atomic_write.assert_not_called()
-            scan_mock.assert_not_called()
-            show_mock.assert_called_once()
-            self.assertIn("NEWDRAW", plan.output_text or "")
-        finally:
-            root.destroy()
-
-    def test_apply_selected_preview_renders_processed_fields(self):
-        # 未勾选覆盖时应用所选：右侧解析信息表应真实渲染“处理后”的新字段。
-        root, app = self._build_app(1286, 668)
-        try:
-            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
-            plan.original_text = "%\nN1G1X10F1000S5000M03\nM30\n"
-            app.scan_result = ScanResult("tmp", [plan])
-            app.populate_file_tables()
-            app.keep_table.selection_set("0")
-            app.info_vars["drawing"].set("NEWDRAW")
-            app.info_vars["version"].set("V9")
-            app.overwrite_fields.set(False)
-            with patch.object(app, "scan"), patch("ncodeprocess.gui._atomic_write"):
-                app.apply_selected()
-            values = [app.info_table.item(item, "values") for item in app.info_table.get_children()]
-            self.assertTrue(
-                any(str(value[0]) == "处理后/DRAWING NUMBER" and str(value[1]) == "NEWDRAW" for value in values),
-                f"预览未渲染新字段: {values}",
-            )
-        finally:
-            root.destroy()
-
-    def test_apply_selected_preview_shows_new_value_even_without_overwrite(self):
-        # 程序已有旧图号，未勾选覆盖时预览也应展示表单新值（覆盖效果），文件不写。
+    def test_apply_selected_never_writes_file_even_with_overwrite(self):
+        # 应用所选只生成预览：即使勾选覆盖也不写文件，写入统一由“确认并执行处理”完成。
         root, app = self._build_app(1286, 668)
         try:
             plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
@@ -1626,27 +1559,86 @@ class ScanLifecycleTests(unittest.TestCase):
             app.keep_table.selection_set("0")
             app.info_vars["drawing"].set("NEWDRAW")
             app.info_vars["version"].set("V9")
-            app.overwrite_fields.set(False)
-            with patch.object(app, "scan"), patch("ncodeprocess.gui._atomic_write") as atomic_write:
+            app.overwrite_fields.set(True)
+            with patch.object(app, "scan") as scan_mock, \
+                 patch.object(app, "show_selected") as show_mock:
                 app.apply_selected()
-            atomic_write.assert_not_called()
+            scan_mock.assert_not_called()
+            show_mock.assert_called_once()
+            self.assertIn("NEWDRAW", plan.output_text or "")
+            self.assertIn("OLD", plan.original_text)
+        finally:
+            root.destroy()
+
+    def test_apply_selected_without_overwrite_is_preview_only(self):
+        # 未勾选覆盖：程序无旧图号时按默认逻辑插入，预览更新但不写文件。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.info_vars["drawing"].set("NEWDRAW")
+            app.info_vars["version"].set("V9")
+            app.overwrite_fields.set(False)
+            with patch.object(app, "scan") as scan_mock, \
+                 patch.object(app, "show_selected") as show_mock:
+                app.apply_selected()
+            scan_mock.assert_not_called()
+            show_mock.assert_called_once()
+            self.assertIn("NEWDRAW", plan.output_text or "")
+        finally:
+            root.destroy()
+
+    def test_apply_selected_preview_shows_new_value_with_overwrite(self):
+        # 程序已有旧图号，勾选覆盖后预览展示表单新值；未勾选时保留旧值。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nMSG("DRAWING NUMBER:OLD")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.info_vars["drawing"].set("NEWDRAW")
+            app.info_vars["version"].set("V9")
+            app.overwrite_fields.set(True)
+            with patch.object(app, "scan"):
+                app.apply_selected()
             values = [app.info_table.item(item, "values") for item in app.info_table.get_children()]
             self.assertTrue(
                 any(str(value[0]) == "处理后/DRAWING NUMBER" and str(value[1]) == "NEWDRAW" for value in values),
-                f"预览未显示新图号: {values}",
+                f"勾选覆盖后预览未显示新图号: {values}",
             )
         finally:
             root.destroy()
 
-    def test_apply_info_scans_with_overwrite_preview(self):
+    def test_apply_info_records_applied_header_values(self):
         root, app = self._build_app(1286, 668)
         try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
             app.info_vars["drawing"].set("NEWDRAW")
             app.info_vars["version"].set("V9")
-            with patch.object(app, "scan") as scan_mock:
+            with patch.object(app, "scan"):
                 app.apply_info()
-            kwargs = scan_mock.call_args.kwargs
-            self.assertEqual(kwargs.get("overwrite_fields"), True)
+            self.assertEqual(app.program_header_values.get("A", {}).get("drawing"), "NEWDRAW")
+        finally:
+            root.destroy()
+
+    def test_show_selected_keeps_applied_header_values(self):
+        # 程序已有旧图号但已应用过新图号：切换选择后顶部仍显示应用后的值，不被文件旧值刷回。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nMSG("DRAWING NUMBER:OLD")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [plan])
+            app.program_header_values["A"] = {"bianzhi": "", "shenhe": "", "drawing": "NEWDRAW", "version": "V9", "date": ""}
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            self.assertEqual(app.info_vars["drawing"].get(), "NEWDRAW")
         finally:
             root.destroy()
 
@@ -1677,9 +1669,7 @@ class ScanLifecycleTests(unittest.TestCase):
             app.keep_table.selection_set("0")
             app.info_vars["drawing"].set("NEWDRAW")
             app.info_vars["version"].set("V9")
-            with patch.object(app, "scan"), \
-                 patch("ncodeprocess.gui._atomic_write"), \
-                 patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")):
+            with patch.object(app, "scan"):
                 app.apply_selected()
             self.assertIn('MSG("T1:DIA=10.000,TOOL_TYPE=圆鼻立铣刀")', plan.output_text or "")
         finally:

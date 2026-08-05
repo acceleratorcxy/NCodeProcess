@@ -24,12 +24,10 @@ from .core import (
     extract_tools,
     format_nc_date,
     process_plan,
-    read_text,
     reprocess_file,
     save_timestamped_report,
     scan_directory,
     validate_program,
-    _atomic_write,
 )
 from .preferences import (
     KEY as PREFERENCES_KEY,
@@ -347,6 +345,7 @@ class App(ttk.Frame):
         self.info_vars = {}
         self.info_defaults = {key: "" for key in ("bianzhi", "shenhe", "drawing", "version", "date")}
         self.applied_info = ProgramInfo()
+        self.program_header_values = {}
         self.program_tools = {}
         self.current_program = None
         self.detail_notebook = None
@@ -1372,8 +1371,18 @@ class App(ttk.Frame):
             return
         self.applied_info = ProgramInfo(v["bianzhi"].get().strip(), v["shenhe"].get().strip(), v["drawing"].get().strip(), v["version"].get().strip(), "", "SIE840D", v["date"].get().strip())
         self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
+        if self.scan_result is not None:
+            for plan_file in self.scan_result.files:
+                if plan_file.kind == "mpf" and plan_file.program:
+                    self.program_header_values[plan_file.program] = {
+                        "bianzhi": v["bianzhi"].get().strip(),
+                        "shenhe": v["shenhe"].get().strip(),
+                        "drawing": v["drawing"].get().strip(),
+                        "version": v["version"].get().strip(),
+                        "date": v["date"].get().strip(),
+                    }
         self.status.set("程序信息已应用，正在刷新预览……")
-        self.scan(overwrite_fields=True)
+        self.scan()
 
     def _show_overwrite_help(self):
         messagebox.showinfo(
@@ -1397,8 +1406,7 @@ class App(ttk.Frame):
             return
         self.applied_info = ProgramInfo(v["bianzhi"].get().strip(), v["shenhe"].get().strip(), v["drawing"].get().strip(), v["version"].get().strip(), "", "SIE840D", v["date"].get().strip())
         self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
-        preview_config = self.config()
-        preview_config.overwrite_fields = True   # 预览始终按表单新值覆盖可编辑字段，展示修改效果
+        preview_config = self.config()   # 覆盖勾选时按表单新值覆盖可编辑字段，未勾选时按默认逻辑（保留已有值）
         applied_plans = []
         for iid in selection:
             try:
@@ -1407,24 +1415,19 @@ class App(ttk.Frame):
                 continue
             if plan_file.kind == "mpf" and plan_file.program and plan_file.original_text is not None:
                 reprocess_file(plan_file, self.info(), preview_config, tools=self.program_tools.get(plan_file.program, []))
+                self.program_header_values[plan_file.program] = {
+                    "bianzhi": v["bianzhi"].get().strip(),
+                    "shenhe": v["shenhe"].get().strip(),
+                    "drawing": v["drawing"].get().strip(),
+                    "version": v["version"].get().strip(),
+                    "date": v["date"].get().strip(),
+                }
                 applied_plans.append(plan_file)
         if not applied_plans:
             return
-        if self.overwrite_fields.get():
-            # 勾选「覆盖已有非空 MSG 字段」：直接写入所选文件（刀具信息由 reprocess 回退保留）。
-            try:
-                for plan_file in applied_plans:
-                    source = Path(self.workdir) / plan_file.source
-                    _text, enc, _newline = read_text(source, self.config().encoding)
-                    _atomic_write(source, plan_file.output_text, enc)
-            except OSError as exc:
-                messagebox.showerror("写入失败", f"应用所选写入文件失败：\n{exc}", parent=self.master)
-                return
-            self.status.set(f"已应用并写入 {len(applied_plans)} 个文件，正在重新扫描……")
-            self.scan()
-        else:
-            self.status.set(f"已生成 {len(applied_plans)} 个程序的预览（显示表单新值；未勾选“覆盖已有非空 MSG 字段”，未写入文件）。")
-        # 立即用内存预览刷新表格与右侧信息（含新的头部/刀具），再后台扫描确认。
+        mode = "覆盖修改" if self.overwrite_fields.get() else "按默认逻辑（保留已有值）"
+        self.status.set(f"已生成 {len(applied_plans)} 个程序的预览（{mode}）。确认无误后点击“确认并执行处理”写入文件。")
+        # 立即用内存预览刷新表格与右侧信息（含新的头部/刀具）。
         self.populate_file_tables()
         for plan_file in applied_plans:
             row = next((str(i) for i, item in enumerate(self.scan_result.files) if item is plan_file), None)
@@ -1730,12 +1733,17 @@ class App(ttk.Frame):
             "version": "PART VERSION",
             "date": "DATE",
         }
+        applied_override = self.program_header_values.get(f.program or "", {})
         for key, header_key in header_mapping.items():
-            existing_value = existing_fields.get(header_key, "").strip()
-            fallback = self.info_defaults.get(key, "").strip()
-            if key == "date" and not fallback:
-                fallback = format_nc_date()
-            self.info_vars[key].set(existing_value or fallback)
+            if key in applied_override and applied_override[key]:
+                # 该程序已应用过顶部信息：保持显示更改后的值，不被文件旧值刷回。
+                self.info_vars[key].set(applied_override[key])
+            else:
+                existing_value = existing_fields.get(header_key, "").strip()
+                fallback = self.info_defaults.get(key, "").strip()
+                if key == "date" and not fallback:
+                    fallback = format_nc_date()
+                self.info_vars[key].set(existing_value or fallback)
         self.add_msg_rows(f.original_text, "已有/")
         self.add_msg_rows(f.output_text, "处理后/")
         if f.kind != "mpf":
