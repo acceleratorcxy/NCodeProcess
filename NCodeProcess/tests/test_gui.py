@@ -1560,10 +1560,13 @@ class ScanLifecycleTests(unittest.TestCase):
             app.info_vars["version"].set("V9")
             with patch.object(app, "scan") as scan_mock, \
                  patch("ncodeprocess.gui._atomic_write") as atomic_write, \
-                 patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")):
+                 patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")), \
+                 patch.object(app, "show_selected") as show_mock:
                 app.apply_selected()
             atomic_write.assert_called_once()
             scan_mock.assert_called_once()
+            show_mock.assert_called_once()
+            self.assertIn("NEWDRAW", plan.output_text or "")
         finally:
             root.destroy()
 

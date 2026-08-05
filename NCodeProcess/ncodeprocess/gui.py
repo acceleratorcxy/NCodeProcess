@@ -1403,16 +1403,16 @@ class App(ttk.Frame):
         except OSError as exc:
             messagebox.showerror("写入失败", f"应用所选写入文件失败：\n{exc}", parent=self.master)
             return
-        self.status.set(f"已应用并写入 {len(applied_plans)} 个文件，正在重新扫描……")
-        self.scan()
-        return
+        # 立即用内存预览刷新表格与右侧信息（含新的头部/刀具），再后台扫描确认。
         self.populate_file_tables()
         for plan_file in applied_plans:
             row = next((str(i) for i, item in enumerate(self.scan_result.files) if item is plan_file), None)
             if row is not None and self.keep_table.exists(row):
                 self.keep_table.selection_add(row)
-        self.status.set(f"已应用程序信息到 {len(applied_plans)} 个所选程序。")
         self.show_selected()
+        self.status.set(f"已应用并写入 {len(applied_plans)} 个文件，正在重新扫描……")
+        self.scan()
+        return
 
     def add_tool_type(self):
         value = self.new_type_var.get().strip()
