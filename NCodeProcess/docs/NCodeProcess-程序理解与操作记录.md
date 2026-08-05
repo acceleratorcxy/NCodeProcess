@@ -218,6 +218,19 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 **测试基线**：合并精简后 159 项 → WP-01 新增 4 项测试后 **163 项**，全量通过（conda Python 3.8）。新增测试：`ScanLifecycleTests`（独立类，含 `_build_app` 隔离 helper，不继承 `LayoutWidgetTests` 以免重复计数）与 `CoreTests.test_process_plan_reports_progress`。
 
+### 2.12 Post-Batch 2 WP-02 子窗口居中与屏幕适配（2026-08-05）
+
+按 Post-Batch 2 路线图第二批高优先级项执行，处理审查与待办问题 9，并按用户要求扩展到**全部子窗口**：
+
+| # | 改动 | 说明 | 提交 |
+|---|---|---|---|
+| 1 | 居中定位纯函数 | `centered_position(parent_x, parent_y, parent_w, parent_h, width, height, screen_w, screen_h)`：按父窗口中心计算子窗口左上角，并 clamp 到屏幕内 | `1f79a6a` |
+| 2 | 统一居中方法 | `App._show_centered(window, width, height, min_width, min_height)`：尺寸缺省用请求尺寸，均 clamp 到屏幕，定位后设置 geometry/minsize | `1f79a6a` |
+| 3 | 全部子窗口居中 | 程序设置对话框、全部程序信息、程序对比（1100×650）、程序编辑（900×650）、处理确认页（900×650）全部改为经 `_show_centered` 定位，不再默认出现在屏幕左上角 | `1f79a6a` |
+| 4 | 全部程序信息屏幕适配 | 窗口尺寸改为 `min(1500, max(1050, 屏宽-80)) × min(720, max(560, 屏高-100))`，不再固定 1500×620 | `1f79a6a` |
+
+**测试基线**：163 项 → WP-02 新增 4 项（`centered_position` 纯函数 2 项 + all_stats 窗口适配、settings 窗口居中集成测试各 1 项）→ **167 项**，全量通过。Toplevel 未映射时 `geometry()` 读尺寸为 1x1，集成测试在读前 `update_idletasks()`。
+
 ---
 
 ## 三、后续建议（可选）

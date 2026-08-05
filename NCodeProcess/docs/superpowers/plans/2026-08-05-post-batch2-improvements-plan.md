@@ -11,7 +11,7 @@
 **关联文档：**
 - 需求基线：`NCodeProcess-需求文档.md`（V1.1，第 13 节待确认事项、FR-07.2/07.3、第 15 节实施状态）
 - 待办来源：`NCodeProcess-审查与待办.md`、`NCodeProcessReportViewer-审查与待办.md`
-- 测试基线：`NCodeProcess-测试指南.md`（163 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
+- 测试基线：`NCodeProcess-测试指南.md`（167 项）、`NCodeProcessReportViewer-测试指南.md`（6 项）
 - 前置工作：Batch 1 / Batch 2 计划（已完成，见 `docs/archive/superpowers/plans/`）
 
 ---
@@ -44,7 +44,7 @@
 | WP | 主题 | 优先级 | 项目 | 主要文件 | 依赖 | 验收标准（一句话） |
 |---|---|---|---|---|---|---|
 | WP-01 | 后台线程安全与生命周期 | 高 | 主 | `gui.py`、`core.py` | 无 | 重复扫描旧结果不覆盖新结果；窗口销毁后线程不抛残留异常；处理过程显示「处理中 i/N」进度 |
-| WP-02 | 「全部程序信息」子窗口屏幕适配 | 高 | 主 | `gui.py` | 无 | 1366×768 下窗口不超屏幕，表头完整可见 |
+| WP-02 | 全部子窗口居中与「全部程序信息」窗口屏幕适配 | 高 | 主 | `gui.py` | 无 | 设置/统计/对比/编辑/确认页 5 个子窗口全部居中显示；1366×768 下「全部程序信息」窗口不超屏幕、表头完整可见 |
 | WP-03 | M03 紧贴 S 口径 | 中 | 主 | `core.py`、需求文档 | D1 | 按 D1 选定口径实现并同步需求文字 |
 | WP-04 | 备份/回收站兜底与只读目录预检 | 中 | 主 | `core.py`、`gui.py` | 无 | 只读目录启动/扫描后有提示；处理前可选备份，删除/覆盖可恢复 |
 | WP-05 | 编码回环校验 | 中 | 主 | `core.py` | 无 | 无法可靠识别编码时不写入并提示；强制编码下可读性校验通过 |
@@ -155,7 +155,7 @@ Expected: PASS
 - [ ] **Step 5: 全量回归并提交**
 
 Run: `conda run -n python38 python -m unittest discover -s tests -v`
-Expected: 159 项全部通过（WP-01 全部完成后基线更新为 163 项，测试指南同步）。
+Expected: 159 项全部通过（WP-01/WP-02 全部完成后基线更新为 167 项，测试指南同步）。
 
 ```bash
 git add NCodeProcess/ncodeprocess/gui.py NCodeProcess/tests/test_gui.py
@@ -364,13 +364,32 @@ git commit -m "docs: WP-01 线程安全与进度反馈完成，同步审查待�
 
 ---
 
-### WP-02 Task 2.1: 「全部程序信息」子窗口屏幕适配
+### WP-02 Task 2.1: 全部子窗口居中与「全部程序信息」窗口屏幕适配
+
+> 2026-08-05 用户要求扩大范围：所有程序里的子窗口都要居中显示，不要默认出现在屏幕左上角。
 
 **Files:**
-- Modify: `NCodeProcess/ncodeprocess/gui.py`（`App.show_all_program_stats`）
+- Modify: `NCodeProcess/ncodeprocess/gui.py`（新增 `centered_position`、`App._show_centered`；替换 `open_settings`/`show_all_program_stats`/`compare_selected_programs`/`edit_program_code`/`confirm_processing` 5 处窗口定位）
 - Test: `NCodeProcess/tests/test_gui.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
+
+纯函数测试（`LayoutMetricTests`）：
+
+```python
+def test_centered_position_places_window_at_parent_center(self):
+    x, y = centered_position(100, 80, 1000, 600, 800, 600, 1366, 768)
+    self.assertEqual((x, y), (200, 80))
+
+def test_centered_position_clamps_inside_screen(self):
+    x, y = centered_position(1200, 700, 1000, 600, 800, 600, 1366, 768)
+    self.assertLessEqual(x + 800, 1366)
+    self.assertLessEqual(y + 600, 768)
+    x, y = centered_position(-500, -300, 400, 300, 800, 600, 1366, 768)
+    self.assertEqual((x, y), (0, 0))
+```
+
+集成测试（`ScanLifecycleTests`，读 geometry 前先 `update_idletasks()`，因 Toplevel 未映射时读取尺寸为 1x1）：
 
 ```python
 def test_all_stats_window_uses_screen_fitted_geometry(self):
@@ -380,49 +399,93 @@ def test_all_stats_window_uses_screen_fitted_geometry(self):
         with patch.object(tk.Toplevel, "winfo_screenwidth", return_value=1366), \
              patch.object(tk.Toplevel, "winfo_screenheight", return_value=768):
             app.show_all_program_stats()
+        app.all_stats_window.update_idletasks()
         geometry = app.all_stats_window.geometry()
         width = int(geometry.split("x")[0])
         self.assertLessEqual(width, 1366)
         self.assertGreaterEqual(width, 1050)
+        self.assertIn("+", geometry)
+        x = int(geometry.split("+")[1])
+        y = int(geometry.split("+")[2])
+        self.assertGreaterEqual(x, 0)
+        self.assertGreaterEqual(y, 0)
+    finally:
+        root.destroy()
+
+def test_settings_window_is_centered(self):
+    root, app = self._build_app(1286, 668)
+    try:
+        app.open_settings()
+        app.settings_window.update_idletasks()
+        geometry = app.settings_window.geometry()
+        self.assertIn("+", geometry)
+        x = int(geometry.split("+")[1])
+        y = int(geometry.split("+")[2])
+        self.assertGreaterEqual(x, 0)
+        self.assertGreaterEqual(y, 0)
     finally:
         root.destroy()
 ```
 
-（`patch.object(tk.Toplevel, ...)` 类级 patch 使 `show_all_program_stats` 内创建的窗口报告 1366×768 屏幕。）
+- [x] **Step 2: 运行确认失败**
 
-- [ ] **Step 2: 运行确认失败**
+Run: `conda run -n python38 python -m unittest tests.test_gui.LayoutMetricTests.test_centered_position_places_window_at_parent_center tests.test_gui.ScanLifecycleTests.test_all_stats_window_uses_screen_fitted_geometry -v`
+Expected: FAIL（`ImportError: cannot import name 'centered_position'`）。
 
-Run: `conda run -n python38 python -m unittest tests.test_gui.LayoutWidgetTests.test_all_stats_window_uses_screen_fitted_geometry -v`
-Expected: FAIL（当前 `window.geometry("1500x620")` 固定 1500 宽，> 1366）。
+- [x] **Step 3: 实现居中定位与统一方法**
 
-- [ ] **Step 3: 实现屏幕适配**
-
-`show_all_program_stats` 中：
+模块级纯函数（`gui.py`，放在 `window_geometry_for_screen` 之后）：
 
 ```python
-screen_width = window.winfo_screenwidth()
-screen_height = window.winfo_screenheight()
-width = min(1500, max(1050, screen_width - 80))
-height = min(720, max(560, screen_height - 100))
-window.geometry(f"{width}x{height}")
-window.minsize(1050, 420)
+def centered_position(parent_x, parent_y, parent_w, parent_h, width, height, screen_w, screen_h):
+    """Return the top-left position that centers a child window on its parent."""
+    x = max(0, min(parent_x + (parent_w - width) // 2, screen_w - width))
+    y = max(0, min(parent_y + (parent_h - height) // 2, screen_h - height))
+    return x, y
 ```
 
-（与主窗口 `window_geometry_for_screen` 同思路；若后续希望完全复用该函数可再抽取，本任务保持最小改动。）
+`App._show_centered`（放在 `_safe_after` 之后）：
 
-- [ ] **Step 4: 运行确认通过**
+```python
+def _show_centered(self, window, width=None, height=None, min_width=0, min_height=0):
+    if width is None or height is None:
+        window.update_idletasks()
+        width = width or window.winfo_reqwidth()
+        height = height or window.winfo_reqheight()
+    screen_w = window.winfo_screenwidth()
+    screen_h = window.winfo_screenheight()
+    width = min(width, screen_w)
+    height = min(height, screen_h)
+    parent_x = self.master.winfo_rootx()
+    parent_y = self.master.winfo_rooty()
+    parent_w = max(self.master.winfo_width(), 1)
+    parent_h = max(self.master.winfo_height(), 1)
+    x, y = centered_position(parent_x, parent_y, parent_w, parent_h, width, height, screen_w, screen_h)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    if min_width:
+        window.minsize(min_width, min_height)
+```
 
-Run: 同 Step 2
+替换 5 处窗口定位：
+- `open_settings`：`win.resizable(False, False)` 后加 `self._show_centered(win)`（尺寸用请求尺寸，消除默认左上角）；
+- `show_all_program_stats`：`window.geometry("1500x620")`/`minsize` 改为屏幕适配后 `self._show_centered(window, width, height, min_width=1050, min_height=420)`；
+- `compare_selected_programs`：`self._show_centered(window, 1100, 650, min_width=800, min_height=480)`；
+- `edit_program_code`：`self._show_centered(window, 900, 650, min_width=700, min_height=480)`；
+- `confirm_processing`：`self._show_centered(window, 900, 650, min_width=700, min_height=460)`。
+
+- [x] **Step 4: 运行确认通过**
+
+Run: 同 Step 2 + settings 集成测试
 Expected: PASS
 
-- [ ] **Step 5: 回归并提交**
+- [x] **Step 5: 回归并提交**
 
-Run: 全量测试
+Run: 全量测试（163 → 167 项）
 Expected: 全部通过
 
 ```bash
 git add NCodeProcess/ncodeprocess/gui.py NCodeProcess/tests/test_gui.py
-git commit -m "fix(gui): 全部程序信息子窗口按屏幕尺寸适配，不再固定 1500x620"
+git commit -m "fix(gui): 全部子窗口居中显示（设置/统计/对比/编辑/确认页），全部程序信息窗口按屏幕适配"
 ```
 
 ---
@@ -430,18 +493,21 @@ git commit -m "fix(gui): 全部程序信息子窗口按屏幕尺寸适配，不�
 ### WP-02 Task 2.2: 文档同步
 
 **Files:**
-- Modify: `NCodeProcess/docs/NCodeProcess-审查与待办.md`（问题 9 标记 ✅）
-- Modify: `NCodeProcess/docs/NCodeProcess-程序理解与操作记录.md`
+- Modify: `NCodeProcess/docs/NCodeProcess-审查与待办.md`（问题 9 标记 ✅，待办清单移除）
+- Modify: `NCodeProcess/docs/NCodeProcess-程序理解与操作记录.md`（追加 2.12 条目）
+- Modify: `NCodeProcess/docs/NCodeProcess-测试指南.md`、需求文档第 15 节、本地流程文档（基线 163 → 167）
 
-- [ ] **Step 1: 更新审查与待办**
+- [x] **Step 1: 更新审查与待办**
 
-将设计审查问题 9 状态改为 ✅ 已修复并注明提交；待办清单移除该项。
+问题 9 状态改为 ✅ 已修复（注明 `centered_position`/`_show_centered`、5 窗口居中、提交 `1f79a6a`）；待办清单对应行标记已处理。
 
-- [ ] **Step 2: 操作记录追加并提交**
+- [x] **Step 2: 操作记录追加并提交**
+
+追加 2.12 条目（居中纯函数、统一方法、5 窗口替换、屏幕适配、测试基线 167），并同步测试指南/需求文档/流程文档/计划文档。
 
 ```bash
 git add NCodeProcess/docs
-git commit -m "docs: WP-02 子窗口适配完成，同步审查待办与操作记录"
+git commit -m "docs: WP-02 子窗口居中与屏幕适配完成，同步审查待办/操作记录/测试基线为 167 项"
 ```
 
 ---
@@ -543,7 +609,7 @@ git commit -m "docs: WP-02 子窗口适配完成，同步审查待办与操作�
 2. **Python 3.8 兼容**：代码与测试避免 3.9+ 语法；测试必须用 conda Python 3.8 环境运行。
 3. **提交规范**：小步提交，提交信息含 `feat/fix/refactor/docs` 前缀与中文说明；不提交构建产物（`build/`、`dist/`、`Publish/`）、样例目录、`NCodeProcessData/`。
 4. **隐私审核**：提交前检查本机路径/用户名/邮箱/代理地址，一律通用化（占位符）。
-5. **测试基线**：主工具 163 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
+5. **测试基线**：主工具 167 项、查看器 6 项为基线；每个 WP 完成后同步更新测试指南与需求文档第 15 节。
 6. **文档同步**：见 WP-17，任何变更不得遗漏受影响文档。
 7. **执行确认**：每个 WP/Task 启动前须经用户确认（见「〇、决策点」的执行确认流程），不得擅自连续执行多个工作包。
 
@@ -554,7 +620,7 @@ git commit -m "docs: WP-02 子窗口适配完成，同步审查待办与操作�
 | 来源 | 要求 | 对应任务 |
 |---|---|---|
 | 审查与待办（主）高优先级 1-3 | 线程安全、代际防护、进度反馈 | WP-01（第三节 Task 1.1–1.3） |
-| 审查与待办（主）高优先级 9 | 全部程序信息子窗口适配 | WP-02（第三节 Task 2.1） |
+| 审查与待办（主）高优先级 9 | 全部子窗口居中 + 全部程序信息窗口屏幕适配 | WP-02（第三节 Task 2.1） |
 | 审查与待办（主）中优先级 4-5 | 备份/回收站、只读预检 | WP-04 |
 | 审查与待办（主）中优先级 8 | 编码回环校验 | WP-05 |
 | 审查与待办（主）中优先级 13 | 注释边界统一、圆角比较 | WP-06 |
