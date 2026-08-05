@@ -3,16 +3,56 @@ from __future__ import annotations
 import json
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 
 REPORT_PATTERNS = ("ncodeprocess-report-*.json", "ncpostprocess-report-*.json")
 DATA_DIR_NAMES = ("NCodeProcessData", "NCPostProcessData")
 PARAMETERS = ("F", "S", "X", "Y", "Z")
+# 鼠标悬停在单元格上多久后弹出内容提示（毫秒）。
+CELL_TOOLTIP_DELAY_MS = 1500
+
+
+class CellTooltip:
+    """A small always-on-top window that shows a cell's full content."""
+
+    def __init__(self, master):
+        self.window = tk.Toplevel(master)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        self.label = ttk.Label(
+            self.window,
+            background="#ffffe0",
+            foreground="#333333",
+            relief="solid",
+            borderwidth=1,
+            padding=(4, 2),
+            justify="left",
+        )
+        self.label.pack()
+
+    def show(self, text, x, y):
+        """Position the window next to the cursor and make it visible."""
+        self.label.configure(text=text)
+        self.window.update_idletasks()
+        width = self.window.winfo_reqwidth()
+        height = self.window.winfo_reqheight()
+        screen_w = self.window.winfo_screenwidth()
+        screen_h = self.window.winfo_screenheight()
+        x = min(x + 12, screen_w - width - 4)
+        y = min(y + 14, screen_h - height - 4)
+        self.window.geometry(f"+{max(4, x)}+{max(4, y)}")
+        self.window.deiconify()
+        self.window.lift()
+
+    def hide(self):
+        self.window.withdraw()
 
 
 def application_directory() -> Path:
@@ -82,7 +122,7 @@ def iter_stats_rows(data: dict, selected_file: Optional[dict] = None) -> Iterabl
                 str(counts.get(parameter, 0)),
                 format_number(minimum.get(parameter)),
                 format_number(maximum.get(parameter)),
-                "是" if parameter == "G00" and stats.get("g00_count", 0) else "否",
+                "否",
             )
         yield (name, "G00", str(stats.get("g00_count", 0) or 0), "", "", "发现" if stats.get("g00_count", 0) else "未发现")
 
@@ -95,6 +135,25 @@ def format_number(value) -> str:
     except (TypeError, ValueError):
         return str(value)
     return f"{number:.3f}".rstrip("0").rstrip(".")
+
+
+def runtime_log_events(data: dict, event_filter: str = "") -> List[dict]:
+    """返回安全可展示的运行日志条目（非对象项过滤，缺字段回退空串）。"""
+    entries = []
+    for entry in data.get("runtime_log") or []:
+        if not isinstance(entry, dict):
+            continue
+        event = str(entry.get("event") or "")
+        if event_filter and event != event_filter:
+            continue
+        entries.append({
+            "time": str(entry.get("time") or ""),
+            "level": str(entry.get("level") or "info"),
+            "event": event,
+            "message": str(entry.get("message") or ""),
+            "detail": str(entry.get("detail") or ""),
+        })
+    return entries
 
 
 def window_geometry_for_screen(screen_width, screen_height):
@@ -130,6 +189,11 @@ class ReportViewer(ttk.Frame):
         self.report_data: Optional[dict] = None
         self.selection = ReportSelection()
         self.file_items: List[dict] = []
+        self.cell_tooltip = CellTooltip(self.master)
+        self._cell_tip_key = None
+        self._cell_tip_after = None
+        self._cell_tip_text = ""
+        self._treeview_font = tkfont.Font(root=self.master, family="Microsoft YaHei UI", size=9)
         self._build()
         self.refresh_reports()
 
@@ -174,7 +238,7 @@ class ReportViewer(ttk.Frame):
         file_box.grid(row=1, column=0, sticky="nsew")
         file_box.rowconfigure(0, weight=1)
         file_box.columnconfigure(0, weight=1)
-        self.file_table = self._table(file_box, ("program", "action", "issue"), ("程序/文件", "动作", "校验"), (140, 75, 80))
+        self.file_table = self._table(file_box, ("program", "action", "issue", "target"), ("程序/文件", "动作", "校验", "目标"), (115, 62, 70, 105))
         self.file_table._container.grid(row=0, column=0, sticky="nsew")
         self.file_table.bind("<<TreeviewSelect>>", self._on_file_selected)
 
@@ -184,17 +248,75 @@ class ReportViewer(ttk.Frame):
         self.stats_page = ttk.Frame(self.notebook)
         self.issues_page = ttk.Frame(self.notebook)
         self.changes_page = ttk.Frame(self.notebook)
+        self.log_page = ttk.Frame(self.notebook)
         self.raw_page = ttk.Frame(self.notebook)
         self.notebook.add(self.overview_page, text="概览与可视化")
         self.notebook.add(self.stats_page, text="参数统计")
         self.notebook.add(self.issues_page, text="校验问题")
         self.notebook.add(self.changes_page, text="修改与差异")
+        self.notebook.add(self.log_page, text="运行日志")
         self.notebook.add(self.raw_page, text="原始 JSON")
         self._build_overview()
         self._build_stats()
         self._build_issues()
         self._build_changes()
+        self._build_log()
         self._build_raw()
+        for tree in (self.report_table, self.file_table, self.stats_table, self.issue_table, self.log_table):
+            self._bind_cell_tooltip(tree)
+
+    def _bind_cell_tooltip(self, tree):
+        """Show a floating hint with the full cell content after a hover delay.
+
+        The hint only appears when the cell's text is cut off by the column
+        width, i.e. when the visible part is not the whole value.
+        """
+
+        def on_motion(event):
+            row = tree.identify_row(event.y)
+            column = tree.identify_column(event.x)
+            value = ""
+            if row and column != "#0":
+                value = tree.set(row, column) or ""
+            if not value or not self._cell_truncated(tree, row, column, value):
+                self._cancel_cell_tooltip()
+                return
+            key = (id(tree), row, column)
+            if key == self._cell_tip_key:
+                return
+            self._cancel_cell_tooltip()
+            self._cell_tip_key = key
+            self._cell_tip_text = value
+            self._cell_tip_after = self.master.after(
+                CELL_TOOLTIP_DELAY_MS,
+                lambda: self.cell_tooltip.show(self._cell_tip_text, event.x_root, event.y_root),
+            )
+
+        def on_leave(_event):
+            self._cancel_cell_tooltip()
+
+        tree.bind("<Motion>", on_motion, add="+")
+        tree.bind("<Leave>", on_leave, add="+")
+        for sequence in ("<ButtonPress-1>", "<ButtonPress-3>", "<MouseWheel>", "<Button-4>", "<Button-5>"):
+            tree.bind(sequence, lambda _event: self._cancel_cell_tooltip(), add="+")
+
+    def _cell_truncated(self, tree, row, column, value):
+        """True when the cell value is wider than the column's visible area."""
+        try:
+            bbox = tree.bbox(row, column)
+        except tk.TclError:
+            return False
+        if not bbox:
+            return False
+        return self._treeview_font.measure(value) > bbox[2] - 6
+
+    def _cancel_cell_tooltip(self):
+        self._cell_tip_key = None
+        if self._cell_tip_after is not None:
+            self.master.after_cancel(self._cell_tip_after)
+            self._cell_tip_after = None
+        if self.cell_tooltip is not None:
+            self.cell_tooltip.hide()
 
     def _table(self, parent, columns, headings, widths):
         frame = ttk.Frame(parent)
@@ -263,6 +385,23 @@ class ReportViewer(ttk.Frame):
         self.change_text.tag_configure("header", foreground="#0969da")
         self.change_text.tag_configure("hidden", foreground="#0969da")
 
+    def _build_log(self):
+        self.log_page.columnconfigure(0, weight=1)
+        self.log_page.rowconfigure(1, weight=1)
+        filter_bar = ttk.Frame(self.log_page)
+        filter_bar.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
+        ttk.Label(filter_bar, text="事件筛选：").pack(side="left")
+        self.log_filter_var = tk.StringVar(value="全部")
+        self.log_filter_combo = ttk.Combobox(filter_bar, textvariable=self.log_filter_var, state="readonly", width=22)
+        self.log_filter_combo.pack(side="left", padx=(4, 0))
+        self.log_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._fill_log(self._selected_item()))
+        self.log_table = self._table(self.log_page, ("time", "level", "event", "message", "detail"), ("时间", "级别", "事件", "消息", "详情"), (140, 55, 120, 220, 160))
+        self.log_table._container.grid(row=1, column=0, sticky="nsew", padx=6)
+        self.log_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
+        self.log_table.tag_configure("warning", foreground="#b54708", font=("Microsoft YaHei UI", 9, "bold"))
+        self.log_path_label = ttk.Label(self.log_page, text="", foreground="#57606a", wraplength=700, justify="left")
+        self.log_path_label.grid(row=2, column=0, sticky="ew", padx=6, pady=4)
+
     def _build_raw(self):
         self.raw_page.rowconfigure(0, weight=1)
         self.raw_page.columnconfigure(0, weight=1)
@@ -329,11 +468,15 @@ class ReportViewer(ttk.Frame):
             self.file_table.delete(item)
         if not self.file_items:
             return
-        self.file_table.insert("", "end", iid="all", values=("全部文件", "汇总", ""))
+        self.file_table.insert("", "end", iid="all", values=("全部文件", "汇总", "", ""))
         for index, item in enumerate(self.file_items):
             errors, warnings, total = file_issue_counts(item)
             issue_text = f"{errors} 错 / {warnings} 警" if total else "无"
-            self.file_table.insert("", "end", iid=str(index), values=(item.get("program") or item.get("file") or "", item.get("status") or item.get("action") or "", issue_text), tags=(("error",) if errors else (("warning",) if warnings else ())))
+            program = item.get("program") or item.get("file") or ""
+            source = item.get("program_name_source") or ""
+            program_cell = f"{program}（{source}）" if source else program
+            target = item.get("target") or ""
+            self.file_table.insert("", "end", iid=str(index), values=(program_cell, item.get("status") or item.get("action") or "", issue_text, target), tags=(("error",) if errors else (("warning",) if warnings else ())))
         self.file_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
         self.file_table.tag_configure("warning", foreground="#b54708", font=("Microsoft YaHei UI", 9, "bold"))
         self.file_table.selection_set("all")
@@ -358,11 +501,42 @@ class ReportViewer(ttk.Frame):
         for label, value in report_summary(data):
             if label in self.summary_vars:
                 self.summary_vars[label].set(value)
-        self.meta_text.set("输入目录：{0}\n输出目录：{1}\n开始时间：{2}    完成时间：{3}".format(data.get("input_dir", ""), data.get("output_dir", ""), data.get("started_at", ""), data.get("finished_at", "")))
+        meta_parts = [
+            "输入目录：{0}".format(data.get("input_dir", "")),
+            "输出目录：{0}".format(data.get("output_dir", "")),
+            "开始时间：{0}    完成时间：{1}".format(data.get("started_at", ""), data.get("finished_at", "")),
+        ]
+        extra = []
+        if data.get("app_version"):
+            extra.append("工具版本：{0}".format(data.get("app_version")))
+        if data.get("generator"):
+            extra.append("报告来源：{0}".format(data.get("generator")))
+        if data.get("report_schema_version") is not None:
+            extra.append("报告结构版本：{0}".format(data.get("report_schema_version")))
+        elapsed = data.get("elapsed_seconds")
+        if elapsed not in (None, ""):
+            try:
+                extra.append("处理耗时：{0:.1f} 秒".format(float(elapsed)))
+            except (TypeError, ValueError):
+                extra.append("处理耗时：{0}".format(elapsed))
+        if data.get("archive_stamp"):
+            extra.append("APTSOURCE 归档时间戳：{0}".format(data.get("archive_stamp")))
+        if data.get("backup_dir"):
+            extra.append("备份目录：{0}".format(data.get("backup_dir")))
+        if extra:
+            meta_parts.append("　　".join(extra))
+        confirmations = [str(item) for item in (data.get("user_confirmations") or [])]
+        if confirmations:
+            meta_parts.append("用户确认项：" + "；".join(confirmations))
+        warnings = [str(item) for item in (data.get("scan_warnings") or [])]
+        if warnings:
+            meta_parts.append("扫描警告：" + "；".join(warnings))
+        self.meta_text.set("\n".join(meta_parts))
         self._draw_charts()
         self._fill_stats(selected)
         self._fill_issues(selected)
         self._fill_changes(selected)
+        self._fill_log(selected)
         self.raw_text.configure(state="normal")
         self.raw_text.delete("1.0", "end")
         self.raw_text.insert("1.0", json.dumps(data, ensure_ascii=False, indent=2))
@@ -405,6 +579,30 @@ class ReportViewer(ttk.Frame):
                 self.change_text.insert("end", line + "\n", tag)
             self.change_text.insert("end", "\n")
         self.change_text.configure(state="disabled")
+
+    def _fill_log(self, selected):
+        for item in self.log_table.get_children():
+            self.log_table.delete(item)
+        data = self.report_data or {}
+        events = runtime_log_events(data)
+        event_names = sorted({entry["event"] for entry in events})
+        current = self.log_filter_var.get()
+        self.log_filter_combo.configure(values=["全部"] + event_names)
+        if current not in ("", "全部") and current not in event_names:
+            self.log_filter_var.set("全部")
+        filter_value = "" if self.log_filter_var.get() == "全部" else self.log_filter_var.get()
+        rows = runtime_log_events(data, event_filter=filter_value)
+        for index, entry in enumerate(rows):
+            tags = (entry["level"],) if entry["level"] in ("error", "warning") else ()
+            self.log_table.insert("", "end", iid=str(index),
+                                  values=(entry["time"], entry["level"], entry["event"], entry["message"], entry["detail"]),
+                                  tags=tags)
+        log_path = str(data.get("log_path") or "")
+        if not events and not log_path:
+            self.log_path_label.config(text="当前报告不包含运行日志（runtime_log）")
+        else:
+            # WP-R4：运行日志完整内嵌报告，不再生成磁盘日志文件。
+            self.log_path_label.config(text="运行日志已内嵌本报告（runtime_log），不再生成磁盘日志文件")
 
     def _clear_view(self, message):
         self.report_data = None

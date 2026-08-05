@@ -9,6 +9,7 @@ from ncodeprocessreportviewer.viewer import (
     iter_stats_rows,
     load_report,
     report_summary,
+    runtime_log_events,
     window_geometry_for_screen,
 )
 
@@ -79,6 +80,24 @@ class ReportViewerTests(unittest.TestCase):
         self.assertIn(("P.MPF", "F", "3", "10", "3000", "否"), rows)
         self.assertIn(("P.MPF", "G00", "1", "", "", "发现"), rows)
 
+    def test_runtime_log_rows_filter_and_tolerate_missing_or_bad_entries(self):
+        self.assertEqual(list(runtime_log_events(self.sample_report())), [])
+        data = self.sample_report()
+        data["runtime_log"] = [
+            {"time": "2026-08-05T09:30:01", "level": "info", "event": "scan_start", "message": "开始扫描目录"},
+            "not-a-dict",
+            {"time": "2026-08-05T09:30:02", "level": "error", "event": "error", "message": "读取文件失败"},
+        ]
+        events = list(runtime_log_events(data))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["event"], "scan_start")
+        self.assertEqual(events[1]["level"], "error")
+        filtered = list(runtime_log_events(data, event_filter="error"))
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["message"], "读取文件失败")
+        filtered = list(runtime_log_events(data, event_filter="missing"))
+        self.assertEqual(filtered, [])
+
 
 class LayoutMetricTests(unittest.TestCase):
     def test_supported_screen_geometry(self):
@@ -125,6 +144,81 @@ class ReportViewerLayoutTests(unittest.TestCase):
                 app.notebook.select(index)
                 root.update_idletasks()
                 self.assertGreaterEqual(float(table.xview()[1]), 0.999, label)
+        finally:
+            root.destroy()
+
+    def test_log_page_shows_events_and_log_path_hint(self):
+        root, app = self._build_viewer(1290, 720)
+        try:
+            app.report_data = {
+                "runtime_log": [
+                    {"time": "2026-08-05T09:30:01", "level": "info", "event": "scan_start", "message": "开始扫描目录", "detail": ""},
+                    {"time": "2026-08-05T09:30:02", "level": "error", "event": "error", "message": "读取文件失败", "detail": "Traceback: OSError"},
+                ],
+                "log_path": "C:\\nonexistent\\logs\\ncodeprocess-20260805.log",
+            }
+            app.file_items = []
+            app._update_views()
+            self.assertEqual(len(app.log_table.get_children()), 2)
+            values = app.log_table.item("1", "values")
+            self.assertEqual(values[1], "error")
+            self.assertEqual(values[2], "error")
+            # WP-R1：运行日志页展示 detail（error 事件 traceback）。
+            self.assertEqual(values[4], "Traceback: OSError")
+            # WP-R4：日志内嵌报告，不再生成磁盘日志文件。
+            self.assertIn("运行日志已内嵌本报告", app.log_path_label.cget("text"))
+        finally:
+            root.destroy()
+
+    def test_overview_meta_and_file_table_show_section12_fields(self):
+        root, app = self._build_viewer(1290, 720)
+        try:
+            app.report_data = {
+                "input_dir": "D:\\NC",
+                "output_dir": "D:\\NC",
+                "started_at": "2026-08-05T09:30:00",
+                "finished_at": "2026-08-05T09:30:05",
+                "backup_dir": "D:\\NC\\backup\\20260805_093000",
+                "app_version": "1.0.0",
+                "generator": "cli",
+                "report_schema_version": 1,
+                "elapsed_seconds": 5.0,
+                "archive_stamp": "20260805_093000",
+                "user_confirmations": ["已确认：执行目录处理"],
+                "scan_warnings": ["目录中未找到 MPF"],
+                "files": [
+                    {"file": "x_P.MPF", "program": "P", "program_name_source": "MSG", "status": "success", "target": "D:\\NC\\P.MPF", "issues": []},
+                    {"file": "y_Q.MPF", "program": "Q", "program_name_source": "文件名", "status": "success", "target": "D:\\NC\\Q.MPF", "issues": []},
+                ],
+            }
+            app.file_items = app.report_data["files"]
+            app._populate_files()
+            app._update_views()
+            values = app.file_table.item("0", "values")
+            self.assertEqual(values[0], "P（MSG）")
+            self.assertEqual(values[3], "D:\\NC\\P.MPF")
+            meta = app.meta_text.get()
+            self.assertIn("工具版本：1.0.0", meta)
+            self.assertIn("报告来源：cli", meta)
+            self.assertIn("报告结构版本：1", meta)
+            self.assertIn("处理耗时：5.0 秒", meta)
+            self.assertIn("备份目录：D:\\NC\\backup\\20260805_093000", meta)
+            self.assertIn("已确认：执行目录处理", meta)
+            self.assertIn("目录中未找到 MPF", meta)
+        finally:
+            root.destroy()
+
+    def test_cell_tooltip_truncation_detection(self):
+        # 查看器悬停浮窗：超长单元格判定为截断（显示提示），短内容不提示。
+        root, app = self._build_viewer(1290, 720)
+        try:
+            app.notebook.select(1)  # 参数统计页
+            root.update_idletasks()
+            long_value = "很长很长的文件名_" * 20
+            iid = app.stats_table.insert("", "end", values=(long_value, "F", "1", "10", "20", "否"))
+            root.update_idletasks()
+            self.assertTrue(app._cell_truncated(app.stats_table, iid, "#1", long_value))
+            self.assertFalse(app._cell_truncated(app.stats_table, iid, "#1", "短"))
         finally:
             root.destroy()
 
