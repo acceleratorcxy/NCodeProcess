@@ -1,8 +1,76 @@
+import contextlib
+import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from ncodeprocess.cli import main
 import ncodeprocess.cli as cli
 from ncodeprocess.core import reset_runtime_log, runtime_log
+
+
+FULL_HEADER = (
+    'MSG("BIANZHI:A")\n'
+    'MSG("SHENHE:B")\n'
+    'MSG("PROGRAM:P")\n'
+    'MSG("DRAWING NUMBER:D")\n'
+    'MSG("PART VERSION:V")\n'
+    'MSG("NC MACHINE:M")\n'
+    'MSG("CONTROL SYSTEM:SIE840D")\n'
+    'MSG("DATE:Jul 31 09:38:23 2026")\n'
+)
+
+
+class CliTests(unittest.TestCase):
+    def make_dir(self):
+        return Path(tempfile.mkdtemp(prefix="ncodeprocess-cli-"))
+
+    @staticmethod
+    def _run(argv):
+        buffer = io.StringIO()
+        with patch("ncodeprocess.cli.load_all", return_value={}), contextlib.redirect_stdout(buffer):
+            code = main(argv)
+        return code, buffer.getvalue()
+
+    def test_preview_without_yes_never_writes(self):
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(FULL_HEADER + "N1S1000M03\nN2M30\n", encoding="utf-8")
+        code, _out = self._run(["--input", str(root)])
+        self.assertEqual(code, 0)
+        self.assertFalse((root / "P.MPF").exists())
+        self.assertFalse((root / "NCodeProcessData").exists())
+
+    def test_yes_requires_drawing_and_part_version(self):
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(FULL_HEADER + "N1S1000M03\nN2M30\n", encoding="utf-8")
+        code, _out = self._run(["--input", str(root), "--yes"])
+        self.assertEqual(code, 2)
+
+    def test_yes_executes_and_writes_report_with_json_report(self):
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(FULL_HEADER + "N1S1000M03\nN2M30\n", encoding="utf-8")
+        json_path = root / "report.json"
+        code, _out = self._run(["--input", str(root), "--yes", "--drawing-number", "D", "--part-version", "V",
+                                "--json-report", str(json_path)])
+        self.assertEqual(code, 0)
+        self.assertTrue((root / "P.MPF").exists())
+        self.assertTrue(json_path.exists())
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("success"), 1)
+        # WP-R4：导出仅生成单个 JSON，不生成日志文件。
+        self.assertFalse((root / "logs").exists())
+
+    def test_csv_report_written(self):
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(FULL_HEADER + "N1S1000M03\nN2M30\n", encoding="utf-8")
+        csv_path = root / "issues.csv"
+        code, _out = self._run(["--input", str(root), "--yes", "--drawing-number", "D", "--part-version", "V",
+                                "--csv-report", str(csv_path)])
+        self.assertEqual(code, 0)
+        content = csv_path.read_text(encoding="utf-8-sig")
+        self.assertTrue(content.startswith("file,line,text,kind,severity,suggestion"))
 
 
 class CliConfigTests(unittest.TestCase):

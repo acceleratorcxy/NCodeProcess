@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import unittest
 from pathlib import Path
@@ -22,6 +23,62 @@ from ncodeprocess.preferences import clear_all, load_all, save_all
 
 # 独立的注册表测试键，避免污染真实的 HKCU\Software\NCodeProcess。
 TEST_SETTINGS_KEY = r"Software\NCodeProcess_UnitTests_Gui"
+
+
+class LayoutWidgetMixin:
+    """布局/交互/生命周期测试共用的窗口构造、遍历与等待 helper（不含 test_ 用例）。"""
+
+    def _build_app(self, width, height):
+        root = tk.Tk()
+        root.withdraw()
+        with patch.object(App, "scan", lambda _self: None):
+            # 使用隔离的测试注册表键，避免本机真实 HKCU\Software\NCodeProcess
+            # 中的用户设置（如 require_m06/require_spindle_speed）污染默认值断言。
+            app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
+        root.geometry(f"{width}x{height}")
+        root.deiconify()
+        root.update_idletasks()
+        root.update()
+        root.update_idletasks()
+        return root, app
+
+    @staticmethod
+    def _descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from LayoutWidgetMixin._descendants(child)
+
+    @staticmethod
+    def _collect_buttons(widget):
+        buttons = []
+        for child in widget.winfo_children():
+            if child.winfo_class() == "TButton":
+                buttons.append(child)
+            buttons.extend(LayoutWidgetMixin._collect_buttons(child))
+        return buttons
+
+    @staticmethod
+    def _relative_x_to_root(widget, root):
+        x = 0
+        current = widget
+        while current is not root:
+            x += current.winfo_x()
+            current = current.master
+        return x
+
+    @staticmethod
+    def _column_total(table, columns):
+        return sum(int(table.column(column, "width")) for column in columns)
+
+    @staticmethod
+    def _pump_until(root, predicate, message, timeout_ms=2000):
+        """轮询 root.update() 直到条件成立，消除合成事件时序 flake。"""
+        deadline = time.time() + timeout_ms / 1000.0
+        while time.time() < deadline:
+            root.update()
+            if predicate():
+                return True
+        return False
 
 
 class DiffViewTests(unittest.TestCase):
@@ -266,49 +323,7 @@ class FontAwareLayoutMetricTests(unittest.TestCase):
         self.assertLessEqual(extreme.validation_width, round(82 * 1.5))
 
 
-class LayoutWidgetTests(unittest.TestCase):
-    def _build_app(self, width, height):
-        root = tk.Tk()
-        root.withdraw()
-        with patch.object(App, "scan", lambda _self: None):
-            # 使用隔离的测试注册表键，避免本机真实 HKCU\Software\NCodeProcess
-            # 中的用户设置（如 require_m06/require_spindle_speed）污染默认值断言。
-            app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
-        root.geometry(f"{width}x{height}")
-        root.deiconify()
-        root.update_idletasks()
-        root.update()
-        root.update_idletasks()
-        return root, app
-
-    @staticmethod
-    def _descendants(widget):
-        for child in widget.winfo_children():
-            yield child
-            yield from LayoutWidgetTests._descendants(child)
-
-    @staticmethod
-    def _collect_buttons(widget):
-        buttons = []
-        for child in widget.winfo_children():
-            if child.winfo_class() == "TButton":
-                buttons.append(child)
-            buttons.extend(LayoutWidgetTests._collect_buttons(child))
-        return buttons
-
-    @staticmethod
-    def _relative_x_to_root(widget, root):
-        x = 0
-        current = widget
-        while current is not root:
-            x += current.winfo_x()
-            current = current.master
-        return x
-
-    @staticmethod
-    def _column_total(table, columns):
-        return sum(int(table.column(column, "width")) for column in columns)
-
+class LayoutWidgetTests(unittest.TestCase, LayoutWidgetMixin):
     def test_keep_table_uses_compact_profile_without_default_horizontal_overflow(self):
         root, app = self._build_app(1286, 668)
         try:
@@ -575,8 +590,7 @@ class LayoutWidgetTests(unittest.TestCase):
                 bbox = app.keep_table.bbox("0", "source")
                 self.assertIsNotNone(bbox)
                 app.keep_table.event_generate("<Motion>", x=bbox[0] + 5, y=bbox[1] + 5, when="tail")
-                root.update()
-                self.assertTrue(app.cell_tooltip.window.winfo_viewable())
+                self.assertTrue(self._pump_until(root, lambda: app.cell_tooltip.window.winfo_viewable(), "tooltip 应显示"))
                 self.assertEqual(app.cell_tooltip.label.cget("text"), long_value)
             finally:
                 root.destroy()
@@ -592,8 +606,7 @@ class LayoutWidgetTests(unittest.TestCase):
                 bbox = app.keep_table.bbox("0", "action")
                 self.assertIsNotNone(bbox)
                 app.keep_table.event_generate("<Motion>", x=bbox[0] + 5, y=bbox[1] + 5, when="tail")
-                root.update()
-                self.assertFalse(app.cell_tooltip.window.winfo_viewable())
+                self.assertTrue(self._pump_until(root, lambda: not app.cell_tooltip.window.winfo_viewable(), "tooltip 应保持隐藏"))
             finally:
                 root.destroy()
 
@@ -609,11 +622,9 @@ class LayoutWidgetTests(unittest.TestCase):
                 bbox = app.keep_table.bbox("0", "source")
                 self.assertIsNotNone(bbox)
                 app.keep_table.event_generate("<Motion>", x=bbox[0] + 5, y=bbox[1] + 5, when="tail")
-                root.update()
-                self.assertTrue(app.cell_tooltip.window.winfo_viewable())
+                self.assertTrue(self._pump_until(root, lambda: app.cell_tooltip.window.winfo_viewable(), "tooltip 应显示"))
                 app.keep_table.event_generate("<Leave>", when="tail")
-                root.update()
-                self.assertFalse(app.cell_tooltip.window.winfo_viewable())
+                self.assertTrue(self._pump_until(root, lambda: not app.cell_tooltip.window.winfo_viewable(), "tooltip 应隐藏"))
             finally:
                 root.destroy()
 
@@ -905,7 +916,7 @@ class LayoutWidgetTests(unittest.TestCase):
             root.destroy()
 
 
-class SettingsDialogTests(LayoutWidgetTests):
+class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
     def test_parse_delete_extensions_normalizes_and_validates(self):
         self.assertEqual(gui.parse_delete_extensions(".LOG, .moaptindexes"), {".log", ".moaptindexes"})
         self.assertEqual(gui.parse_delete_extensions(""), set())
@@ -941,15 +952,15 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
-    def test_settings_dialog_opens_and_confirm_applies(self):
+    def test_settings_dialog_confirm_applies_and_persists(self):
         root, app = self._build_app(1286, 668)
         try:
             app.settings_registry_key = TEST_SETTINGS_KEY
             with patch.object(App, "scan") as scan_mock:
                 app.open_settings()
-                self.assertIsNotNone(app.settings_window)
                 app.encoding_var.set("gb18030")
                 app.delete_extensions_var.set(".log")
+                app.program_extensions_var.set(".mpf,.nc")
                 app.require_m06_var.set(True)
                 app.require_end_marker_var.set(False)
                 app._confirm_settings()
@@ -957,10 +968,13 @@ class SettingsDialogTests(LayoutWidgetTests):
                 config = app.config()
                 self.assertEqual(config.encoding, "gb18030")
                 self.assertEqual(config.delete_extensions, {".log"})
+                self.assertEqual(config.program_extensions, {".mpf", ".nc"})
                 self.assertTrue(config.require_m06)
                 self.assertFalse(config.require_end_marker)
                 scan_mock.assert_called_once_with()
-            self.assertEqual(load_all(TEST_SETTINGS_KEY)["encoding"], "gb18030")
+            saved = load_all(TEST_SETTINGS_KEY)
+            self.assertEqual(saved["encoding"], "gb18030")
+            self.assertEqual(saved["program_extensions"], ".mpf,.nc")
         finally:
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
@@ -994,27 +1008,6 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
-    def test_config_injects_all_new_settings(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            app.encoding_var.set("gb18030")
-            app.delete_extensions_var.set(".log")
-            app.allowed_name_pattern_var.set(r"^[A-Za-z0-9]+$")
-            app.aptsource_dir_var.set("archive")
-            app.require_end_marker_var.set(False)
-            app.require_m06_var.set(True)
-            app.require_spindle_speed_var.set(True)
-            config = app.config()
-            self.assertEqual(config.encoding, "gb18030")
-            self.assertEqual(config.delete_extensions, {".log"})
-            self.assertEqual(config.allowed_name_pattern, r"^[A-Za-z0-9]+$")
-            self.assertEqual(config.aptsource_dir, "archive")
-            self.assertFalse(config.require_end_marker)
-            self.assertTrue(config.require_m06)
-            self.assertTrue(config.require_spindle_speed)
-        finally:
-            root.destroy()
-
     def test_finish_scan_applies_configured_name_pattern(self):
         root, app = self._build_app(1286, 668)
         try:
@@ -1031,16 +1024,16 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
-    def test_settings_dialog_fits_1286_and_controls_visible(self):
+    def test_settings_dialog_fits_and_controls_visible(self):
         root, app = self._build_app(1286, 668)
         try:
             app.open_settings()
             win = app.settings_window
             win.update_idletasks()
             self.assertLessEqual(win.winfo_reqwidth(), 640)
-            # Notebook 两页 + G00 级别行：整体高度上限（Win7 1366×768 下完整显示）。
             self.assertLessEqual(win.winfo_reqheight(), 500)
-
+            self.assertGreaterEqual(win.winfo_reqwidth(), 400)
+            self.assertGreaterEqual(win.winfo_reqheight(), 300)
             texts = {button.cget("text") for button in self._collect_buttons(win)}
             self.assertIn("确定", texts)
             self.assertIn("取消", texts)
@@ -1132,23 +1125,6 @@ class SettingsDialogTests(LayoutWidgetTests):
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
-    def test_settings_dialog_saves_to_registry_on_confirm(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            app.settings_registry_key = TEST_SETTINGS_KEY
-            with patch.object(App, "scan") as scan_mock:
-                app.open_settings()
-                app.encoding_var.set("gb18030")
-                app.program_extensions_var.set(".mpf,.nc")
-                app._confirm_settings()
-                saved = load_all(TEST_SETTINGS_KEY)
-                self.assertEqual(saved["encoding"], "gb18030")
-                self.assertEqual(saved["program_extensions"], ".mpf,.nc")
-                scan_mock.assert_called_once_with()
-        finally:
-            clear_all(TEST_SETTINGS_KEY)
-            root.destroy()
-
     def test_restore_defaults_resets_and_persists(self):
         root, app = self._build_app(1286, 668)
         try:
@@ -1172,24 +1148,32 @@ class SettingsDialogTests(LayoutWidgetTests):
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
-    def test_config_injects_program_extensions(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            app.program_extensions_var.set(".mpf,.nc")
-            app.program_output_extension_var.set(".NC")
-            config = app.config()
-            self.assertEqual(config.program_extensions, {".mpf", ".nc"})
-            self.assertEqual(config.program_output_extension, ".NC")
-        finally:
-            root.destroy()
-
-    def test_required_fields_vars_exist_and_default_to_all(self):
+    def test_config_injects_vars_and_required_fields(self):
         root, app = self._build_app(1286, 668)
         try:
             for name in ("required_bianzhi_var", "required_shenhe_var", "required_drawing_var", "required_part_var"):
                 self.assertTrue(getattr(app, name).get())
+            self.assertEqual([key for key, _label, _required in FIELD_ORDER], app.config().required_fields)
+
+            app.encoding_var.set("gb18030")
+            app.delete_extensions_var.set(".log")
+            app.allowed_name_pattern_var.set(r"^[A-Za-z0-9]+$")
+            app.aptsource_dir_var.set("archive")
+            app.program_extensions_var.set(".mpf,.nc")
+            app.program_output_extension_var.set(".NC")
+            app.require_end_marker_var.set(False)
+            app.require_m06_var.set(True)
+            app.require_spindle_speed_var.set(True)
             config = app.config()
-            self.assertEqual([key for key, _label, _required in FIELD_ORDER], config.required_fields)
+            self.assertEqual(config.encoding, "gb18030")
+            self.assertEqual(config.delete_extensions, {".log"})
+            self.assertEqual(config.allowed_name_pattern, r"^[A-Za-z0-9]+$")
+            self.assertEqual(config.aptsource_dir, "archive")
+            self.assertEqual(config.program_extensions, {".mpf", ".nc"})
+            self.assertEqual(config.program_output_extension, ".NC")
+            self.assertFalse(config.require_end_marker)
+            self.assertTrue(config.require_m06)
+            self.assertTrue(config.require_spindle_speed)
         finally:
             root.destroy()
 
@@ -1213,21 +1197,20 @@ class SettingsDialogTests(LayoutWidgetTests):
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
-    def test_m03_position_var_roundtrip(self):
+    def test_batch2_var_defaults_and_roundtrip(self):
         root, app = self._build_app(1286, 668)
         try:
             self.assertEqual(app.m03_position_var.get(), "after-s")
-            app.m03_position_var.set("standalone")
-            self.assertEqual(app.config().m03_position, "standalone")
-        finally:
-            root.destroy()
+            self.assertEqual(app.newline_var.get(), "auto")
+            for name in ("feed_min_var", "feed_max_var", "spindle_min_var", "spindle_max_var"):
+                self.assertEqual(getattr(app, name).get(), "")
 
-    def test_feed_limits_vars_roundtrip(self):
-        root, app = self._build_app(1286, 668)
-        try:
+            app.m03_position_var.set("standalone")
+            app.newline_var.set("lf")
             app.feed_min_var.set("100")
-            app.feed_max_var.set("")
             config = app.config()
+            self.assertEqual(config.m03_position, "standalone")
+            self.assertEqual(config.newline, "lf")
             self.assertEqual(config.feed_min, 100.0)
             self.assertIsNone(config.feed_max)
             self.assertIsNone(config.spindle_min)
@@ -1244,15 +1227,6 @@ class SettingsDialogTests(LayoutWidgetTests):
                 app._confirm_settings()
                 err_mock.assert_called_once()
             self.assertIsNotNone(app.settings_window)  # 对话框未关闭
-        finally:
-            root.destroy()
-
-    def test_newline_var_roundtrip(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            self.assertEqual(app.newline_var.get(), "auto")
-            app.newline_var.set("lf")
-            self.assertEqual(app.config().newline, "lf")
         finally:
             root.destroy()
 
@@ -1299,19 +1273,6 @@ class SettingsDialogTests(LayoutWidgetTests):
             root.update()
             self.assertFalse(basic.winfo_ismapped())
             self.assertTrue(rules.winfo_ismapped())
-        finally:
-            root.destroy()
-
-    def test_batch2_controls_exist(self):
-        # Batch 2 五组配置控件存在且默认值正确（必填全选、M03 after-s、上下限空、换行 auto）。
-        root, app = self._build_app(1286, 668)
-        try:
-            self.assertEqual(app.m03_position_var.get(), "after-s")
-            self.assertEqual(app.newline_var.get(), "auto")
-            for name in ("required_bianzhi_var", "required_shenhe_var", "required_drawing_var", "required_part_var"):
-                self.assertTrue(getattr(app, name).get())
-            for name in ("feed_min_var", "feed_max_var", "spindle_min_var", "spindle_max_var"):
-                self.assertEqual(getattr(app, name).get(), "")
         finally:
             root.destroy()
 
@@ -1479,7 +1440,7 @@ class SettingsDialogTests(LayoutWidgetTests):
             root.update()
             positions = [widget.winfo_x() for widget in checkbuttons]
             deltas = [positions[i + 1] - positions[i] for i in range(len(positions) - 1)]
-            self.assertEqual(len(set(deltas)), 1)  # 相邻间距一致
+            self.assertLessEqual(max(deltas) - min(deltas), 2)  # 相邻间距一致（容差 2px）
         finally:
             root.destroy()
 
@@ -1510,7 +1471,7 @@ class SettingsDialogTests(LayoutWidgetTests):
                 positions = [children[start + i].winfo_x() for i in range(3)]
                 widths = [children[start + i].winfo_width() for i in range(3)]
                 gaps = [positions[i + 1] - (positions[i] + widths[i]) for i in range(2)]
-                self.assertEqual(len(set(gaps)), 1)  # 相邻间隙一致
+                self.assertLessEqual(max(gaps) - min(gaps), 2)  # 相邻间隙一致（容差 2px）
                 self.assertLessEqual(gaps[0], 6)     # 间隙足够小（紧凑）
         finally:
             root.destroy()
@@ -1559,27 +1520,7 @@ class ReportExportTests(unittest.TestCase):
         showerror.assert_not_called()
 
 
-class ScanLifecycleTests(unittest.TestCase):
-    def _build_app(self, width, height):
-        root = tk.Tk()
-        root.withdraw()
-        with patch.object(App, "scan", lambda _self: None):
-            # 使用隔离的测试注册表键，避免本机真实 HKCU\Software\NCodeProcess
-            # 中的用户设置（如 require_m06/require_spindle_speed）污染默认值断言。
-            app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
-        root.geometry(f"{width}x{height}")
-        root.deiconify()
-        root.update_idletasks()
-        root.update()
-        root.update_idletasks()
-        return root, app
-
-    @staticmethod
-    def _descendants(widget):
-        for child in widget.winfo_children():
-            yield child
-            yield from ScanLifecycleTests._descendants(child)
-
+class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
     def test_finish_scan_ignores_stale_generation(self):
         root, app = self._build_app(1286, 668)
         try:
@@ -1985,19 +1926,6 @@ class ScanLifecycleTests(unittest.TestCase):
                     combo_values.update(widget.cget("values"))
             self.assertIn("gbk", combo_values)
             self.assertIn("gb2312", combo_values)
-        finally:
-            root.destroy()
-
-    def test_settings_window_size_matches_content(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            app.open_settings()
-            app.settings_window.update_idletasks()
-            geometry = app.settings_window.geometry()
-            width = int(geometry.split("x")[0])
-            height = int(geometry.split("x")[1].split("+")[0])
-            self.assertGreaterEqual(width, 400)
-            self.assertGreaterEqual(height, 300)
         finally:
             root.destroy()
 

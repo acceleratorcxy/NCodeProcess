@@ -66,30 +66,16 @@ class CoreTests(unittest.TestCase):
         # An S value that only appears inside a parenthetical comment is not
         # a real spindle command: M03 must be inserted as a standalone line
         # before the first body instruction, never appended to the comment.
-        text = (
-            '%\n'
-            'MSG("PROGRAM:P")\n'
-            'N1G1X10 (FEED S5000 OK)\n'
-            'N2M30\n'
-            '%\n'
-        )
-        out, changed, note = add_m03(text, Config())
+        comment_only = '%\nMSG("PROGRAM:P")\nN1G1X10 (FEED S5000 OK)\nN2M30\n%\n'
+        out, changed, _note = add_m03(comment_only, Config())
         self.assertTrue(changed)
         self.assertNotIn("(FEED S5000 OK)M03", out)
         self.assertIn("M03\nN1G1X10 (FEED S5000 OK)", out)
 
-    def test_m03_attaches_to_real_spindle_block_not_comment_mention(self):
         # A comment mentioning S must not capture the M03 insertion; the real
         # S instruction later in the body is the one that receives M03.
-        text = (
-            '%\n'
-            'MSG("PROGRAM:P")\n'
-            'N1G1X10 (FEED S5000 MAX)\n'
-            'N2G1X20S1000\n'
-            'N3M30\n'
-            '%\n'
-        )
-        out, changed, note = add_m03(text, Config())
+        real_spindle = '%\nMSG("PROGRAM:P")\nN1G1X10 (FEED S5000 MAX)\nN2G1X20S1000\nN3M30\n%\n'
+        out, changed, _note = add_m03(real_spindle, Config())
         self.assertTrue(changed)
         self.assertNotIn("(FEED S5000 MAX)M03", out)
         self.assertIn("N2G1X20S1000M03", out)
@@ -137,7 +123,7 @@ class CoreTests(unittest.TestCase):
         reprocess_file(plan, DEFAULT_INFO, self._cfg(), tools=[])
         self.assertIn('MSG("T1:DIA=10.000,TOOL_TYPE=圆鼻立铣刀")', plan.output_text or "")
 
-    def test_align_lines_tags_changed_and_equal_rows(self):
+    def test_align_lines_tags(self):
         rows = align_lines("A\nB\nC\nD", "A\nB\nX\nD")
         self.assertEqual(
             rows,
@@ -148,12 +134,8 @@ class CoreTests(unittest.TestCase):
                 ("D", "", "D", ""),
             ],
         )
-
-    def test_align_lines_tags_added_and_removed_rows(self):
-        inserted = align_lines("A\nC", "A\nB\nC")
-        self.assertIn(("", "", "B", "added"), inserted)
-        removed = align_lines("A\nB\nC", "A\nC")
-        self.assertIn(("B", "removed", "", ""), removed)
+        self.assertIn(("", "", "B", "added"), align_lines("A\nC", "A\nB\nC"))
+        self.assertIn(("B", "removed", "", ""), align_lines("A\nB\nC", "A\nC"))
 
     def test_tool_type_omitted_and_apt_defaults_detected(self):
         root = self.make_dir()
@@ -203,31 +185,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(tool.tool_type, "铅笔铣刀")
         self.assertEqual(tool.tool_angle, "3.000")
 
-    def test_matching_cutter_and_toolno_is_ordinary_end_mill(self):
-        text = "CUTTER/ 16.000000, 3.000000\nTOOLNO/5, 16.000000, 3.000000,, 120.000000,$\n"
-        tool = extract_tools(text)[0]
-        self.assertEqual(tool.dia, "16.000")
-        self.assertEqual(tool.tool_coner, "3.000")
-        self.assertEqual(tool.tool_type, "圆鼻立铣刀")
-        self.assertEqual(tool.tool_angle, "")
-
-    def test_ordinary_mill_requires_matching_corner_radius(self):
-        # FR-4.3.16: 直径与圆角都一致才判普通立铣刀族；圆角不一致不得误判。
-        text = "CUTTER/10,2\nTOOLNO/1,10,1,,\n"
-        tools = extract_tools(text)
-        self.assertEqual(tools[0].tool_type, "")
-
-    def test_round_nose_split_into_ball_flat_and_round_nose(self):
-        # 普通立铣刀按 R 与 D 的关系细分：球头 R=D/2、平底 R=0、其余圆鼻。
+    def test_ordinary_mill_family_detection(self):
         cases = (
-            ("CUTTER/ 10.000000,  5.000000\nTOOLNO/1, 10.000000, 5.000000,, 120.000000,$\n", "球头立铣刀"),
-            ("CUTTER/ 10.000000,  0.000000\nTOOLNO/2, 10.000000, 0.000000,, 120.000000,$\n", "平底立铣刀"),
-            ("CUTTER/ 20.000000,  3.000000\nTOOLNO/3, 20.000000, 3.000000,, 120.000000,$\n", "圆鼻立铣刀"),
+            ("CUTTER/ 16.000000, 3.000000\nTOOLNO/5, 16.000000, 3.000000,, 120.000000,$\n", "16.000", "3.000", "圆鼻立铣刀"),
+            ("CUTTER/ 10.000000,  5.000000\nTOOLNO/1, 10.000000, 5.000000,, 120.000000,$\n", "10.000", "5.000", "球头立铣刀"),
+            ("CUTTER/ 10.000000,  0.000000\nTOOLNO/2, 10.000000, 0.000000,, 120.000000,$\n", "10.000", "0.000", "平底立铣刀"),
+            ("CUTTER/ 20.000000,  3.000000\nTOOLNO/3, 20.000000, 3.000000,, 120.000000,$\n", "20.000", "3.000", "圆鼻立铣刀"),
+            ("CUTTER/10,2\nTOOLNO/1,10,1,,\n", "10.000", "2.000", ""),
         )
-        for text, expected in cases:
-            with self.subTest(text=text.splitlines()[0]):
+        for text, dia, coner, tool_type in cases:
+            with self.subTest(tool_type=tool_type or "none"):
                 tool = extract_tools(text)[0]
-                self.assertEqual(tool.tool_type, expected)
+                self.assertEqual(tool.dia, dia)
+                self.assertEqual(tool.tool_coner, coner)
+                self.assertEqual(tool.tool_type, tool_type)
 
     def test_t_slot_mill_recognized_when_diameter_ratio_large(self):
         # 刀具说明：T 形刀直径与切削刃差异很大、无锥度角度。
@@ -243,22 +214,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(tool.tool_type, "反锥立铣刀")
         self.assertEqual(tool.tool_angle, "-2.000")
 
-    def test_sample_apt_round_nose_ball_and_flat_mills_are_ordinary(self):
-        # 样例刀具说明：圆鼻/球头/平底立铣刀（D20R3/D10R5/D10R0）→ 细分类型。
-        # 使用样例真实格式：CUTTER 5 参 + TOOLNO 第 3 参圆角 + 第 5 参 120。
-        cases = (
-            ("CUTTER/ 20.000000,  3.000000,  7.000000,  3.000000,  0.000000,$\nTOOLNO/1,   20.000000,    3.000000,,  120.000000,$\n", "20.000", "3.000", "圆鼻立铣刀"),
-            ("CUTTER/ 10.000000,  5.000000,  0.000000,  5.000000,  0.000000,$\nTOOLNO/6,   10.000000,    5.000000,,  120.000000,$\n", "10.000", "5.000", "球头立铣刀"),
-            ("CUTTER/ 10.000000,  0.000000,  5.000000,  0.000000,  0.000000,$\nTOOLNO/14,   10.000000,    0.000000,,  120.000000,$\n", "10.000", "0.000", "平底立铣刀"),
-        )
-        for text, dia, coner, tool_type in cases:
-            with self.subTest(text=text.splitlines()[0]):
-                tool = extract_tools(text)[0]
-                self.assertEqual(tool.dia, dia)
-                self.assertEqual(tool.tool_coner, coner)
-                self.assertEqual(tool.tool_type, tool_type)
-                self.assertEqual(tool.tool_angle, "")
-
     def test_sample_apt_reverse_taper_mill_with_angle(self):
         # 样例 D12R3A2 反锥立铣刀：CUTTER 直径 12、TOOLNO 名义直径 10.467、包含角 -4。
         text = ("CUTTER/ 12.000000,  3.000000,  3.000000,  3.000000,  0.000000,$\n"
@@ -269,53 +224,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(tool.tool_type, "反锥立铣刀")
         self.assertEqual(tool.tool_angle, "-2.000")
 
-    def test_sample_apt_drill_and_center_drill_with_continuation(self):
-        # 样例钻头（D5.2）与中心钻（D2.5）：TOOLNO 第 4 参为 118/120（>100 触发钻类），
-        # 续行第 2 参为钻尖高度、第 4 参为刀具类型码；两者皆空时为中心钻。
-        drill = ("CUTTER/  5.200000,  0.000000,  2.600000,  1.501111, 30.000000,$\n"
-                 "TOOLNO/9,    5.200000,,  120.000000,  120.000000,$\n"
-                 "45.000000,    1.501000,   35.000000,2,    0.000000,NOTE\n")
-        tool = extract_tools(drill)[0]
-        self.assertEqual(tool.tool_type, "钻头")
-        self.assertEqual(tool.tool_angle, "")
-        self.assertEqual(tool.dia, "5.200")
-
-        center = ("CUTTER/  2.500000,  0.000000,  1.250000,  0.751076, 31.000000,$\n"
-                  "TOOLNO/13,    2.500000,,  118.000000,  120.000000,$\n"
-                  "5.000000,,   11.000000,,    0.000000,NOTE\n")
-        tool = extract_tools(center)[0]
-        self.assertEqual(tool.tool_type, "中心钻")
-        self.assertEqual(tool.tool_angle, "")
-        self.assertEqual(tool.dia, "2.500")
-
-    def test_code_part_strips_parenthesised_comment(self):
-        self.assertEqual(code_part("N1G1X10 (comment)"), "N1G1X10 ")
-        self.assertEqual(code_part("N1G1X10"), "N1G1X10")
-
-    def test_drill_types_detected_independent_of_diameter(self):
-        # 钻类判定仅依赖 APT 参数规律（TOOLNO 角度/续行），不限制直径规格。
-        center = (
-            "CUTTER/ 7.250000, 0.000000, 3.625000, 2.000000, 31.000000,$\n"
-            "         0.000000, 11.000000\n"
-            "TOOLNO/13, 7.250000,, 118.000000, 120.000000,$\n"
-            "    5.000000,, 11.000000,, 0.000000,NOTE\n"
+    def test_drill_and_center_drill_detection(self):
+        sample_drill = ("CUTTER/  5.200000,  0.000000,  2.600000,  1.501111, 30.000000,$\n"
+                        "TOOLNO/9,    5.200000,,  120.000000,  120.000000,$\n"
+                        "45.000000,    1.501000,   35.000000,2,    0.000000,NOTE\n")
+        sample_center = ("CUTTER/  2.500000,  0.000000,  1.250000,  0.751076, 31.000000,$\n"
+                         "TOOLNO/13,    2.500000,,  118.000000,  120.000000,$\n"
+                         "5.000000,,   11.000000,,    0.000000,NOTE\n")
+        size_independent = (
+            ("CUTTER/ 7.250000, 0.000000, 3.625000, 2.000000, 31.000000,$\n         0.000000, 11.000000\nTOOLNO/13, 7.250000,, 118.000000, 120.000000,$\n    5.000000,, 11.000000,, 0.000000,NOTE\n", "7.250", "中心钻"),
+            ("CUTTER/ 8.750000, 0.000000, 4.375000, 2.500000, 30.000000,$\n         0.000000, 35.000000\nTOOLNO/10, 8.750000,, 120.000000, 120.000000,$\n   45.000000, 2.500000, 35.000000,2, 0.000000,NOTE\n", "8.750", "钻头"),
         )
-        drill = (
-            "CUTTER/ 8.750000, 0.000000, 4.375000, 2.500000, 30.000000,$\n"
-            "         0.000000, 35.000000\n"
-            "TOOLNO/10, 8.750000,, 120.000000, 120.000000,$\n"
-            "   45.000000, 2.500000, 35.000000,2, 0.000000,NOTE\n"
+        cases = (
+            (sample_drill, "5.200", "钻头"),
+            (sample_center, "2.500", "中心钻"),
+            *size_independent,
         )
-        for text, dia, expected_type in (
-            (center, "7.250", "中心钻"),
-            (drill, "8.750", "钻头"),
-        ):
+        for text, dia, expected_type in cases:
             with self.subTest(tool_type=expected_type):
                 tool = extract_tools(text)[0]
                 self.assertEqual(tool.dia, dia)
                 self.assertEqual(tool.tool_type, expected_type)
                 self.assertEqual(tool.tool_angle, "")
                 self.assertNotIn("TOOL_ANGLE", tool.to_msg())
+
+    def test_code_part_strips_parenthesised_comment(self):
+        self.assertEqual(code_part("N1G1X10 (comment)"), "N1G1X10 ")
+        self.assertEqual(code_part("N1G1X10"), "N1G1X10")
 
     def test_special_tool_is_written_to_mpf_from_paired_apt(self):
         root = self.make_dir()
@@ -730,21 +665,20 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(conflicts[0].severity, "error")
 
-    def test_feed_outlier_high_value_warns(self):
-        # 主体 F 在千位范围，突然出现上万 F 时警告。
-        body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
-        text = body + "\nN6G1X60F15000\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)
-        self.assertIn("F15000", outliers[0].text)
+    def test_feed_outlier_high_and_low_detection(self):
+        def body(feed):
+            return "\n".join(f"N{i}G1X{i}F{feed}" for i in range(1, 6))
 
-    def test_feed_outlier_high_value_thresholds(self):
-        # 主体本身上万时正常变化不报（未超常见档位 1.5 倍）。
-        body = "\n".join(f"N{i}G1X{i}F20000" for i in range(1, 6))
-        text = body + "\nN6G1X60F25000\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+        cases = (
+            (body(3000) + "\nN6G1X60F15000\nN7M30\n", 1),   # 高值检出
+            (body(20000) + "\nN6G1X60F25000\nN7M30\n", 0),  # 主体本身上万不误报
+            (body(300) + "\nN6G1X60F5\nN7M30\n", 1),        # 小进给程序低值检出
+            (body(300) + "\nN6G1X60F1500\nN7M30\n", 1),     # 小进给程序高值检出
+        )
+        for text, expected in cases:
+            with self.subTest(feed=text.split("F")[1].split("\n")[0]):
+                issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+                self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), expected)
 
     def test_feed_outlier_ignores_high_frequency_second_mode(self):
         # 样例多模态：抬刀档位 F5000 出现多次属正常，不因相对中位数偏高误报；
@@ -792,25 +726,17 @@ class CoreTests(unittest.TestCase):
         issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, relaxed)
         self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 50 > 3000×0.01
 
-    def test_feed_outlier_high_ratio_configurable(self):
-        # 上离群按主体中位数倍数（默认 3）动态判定，倍数可在 Config 调整。
+    def test_feed_outlier_ratio_configurable(self):
         body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
-        text = body + "\nN6G1X60F15000\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), 1)  # 15000 ≥ 3000×3
-        raised = self._cfg(feed_outlier_high_ratio=6.0)
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, raised)
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 15000 < 3000×6
+        text = body + "\nN6G1X60F50\nN7M30\n"       # 50 < 3000×0.1
+        self.assertEqual(len([i for i in validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg()) if i.kind == "feed-outlier"]), 1)
+        relaxed = self._cfg(feed_outlier_low_ratio=0.01)
+        self.assertFalse(any(i.kind == "feed-outlier" for i in validate_program(text, "P.MPF", "P", DEFAULT_INFO, relaxed)))
 
-    def test_feed_outlier_dynamic_for_small_feed_program(self):
-        # 主体 F 为几百的程序同样按自身水平动态检出偏离（旧固定阈值逻辑会漏报）。
-        body = "\n".join(f"N{i}G1X{i}F300" for i in range(1, 6))
-        text = body + "\nN6G1X60F5\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), 1)  # 5 < 300×0.03
-        text = body + "\nN6G1X60F1500\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), 1)  # 1500 > 300×2
+        text = body + "\nN6G1X60F15000\nN7M30\n"    # 15000 ≥ 3000×3
+        self.assertEqual(len([i for i in validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg()) if i.kind == "feed-outlier"]), 1)
+        raised = self._cfg(feed_outlier_high_ratio=6.0)
+        self.assertFalse(any(i.kind == "feed-outlier" for i in validate_program(text, "P.MPF", "P", DEFAULT_INFO, raised)))
 
     def test_feed_outlier_uses_iqr_for_dispersed_distributions(self):
         # IQR 箱线图法：分布集中时即使未达中位数 3 倍也检出；均匀分散时不再误报。
@@ -1075,76 +1001,48 @@ class CoreTests(unittest.TestCase):
                                   self._cfg())
         self.assertFalse(any(i.kind in ("feed-range", "spindle-range") for i in issues))
 
-    def test_newline_force_lf_converts_crlf_source(self):
-        # 强制 LF：CRLF 源文件处理后输出为 LF，不保留源 CRLF。
-        root = self.make_dir()
-        (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\r\nN1S1000M03\r\nN2M30\r\n'.encode("utf-8"))
-        cfg = Config(g00_level="allow", newline="lf")
-        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
-        report = process_plan(plan, str(root), cfg)
-        self.assertEqual(report.success, 1)
-        data = (root / "P.MPF").read_bytes()
-        self.assertNotIn(b"\r\n", data)
-        self.assertIn(b"\n", data)
+    def test_newline_policy_converts_and_preserves_source_style(self):
+        def run(payload_bytes, cfg):
+            root = self.make_dir()
+            (root / "x_P.MPF").write_bytes(payload_bytes)
+            plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+            report = process_plan(plan, str(root), cfg)
+            self.assertEqual(report.success, 1)
+            return (root / "P.MPF").read_bytes()
 
-    def test_newline_force_crlf_converts_lf_source(self):
-        # 强制 CRLF：LF 源文件处理后输出为 CRLF。
-        root = self.make_dir()
-        (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S1000M03\nN2M30\n', encoding="utf-8")
-        cfg = Config(g00_level="allow", newline="crlf")
-        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
-        report = process_plan(plan, str(root), cfg)
-        self.assertEqual(report.success, 1)
-        data = (root / "P.MPF").read_bytes()
-        self.assertIn(b"\r\n", data)
-        self.assertNotIn(b"\n", data.replace(b"\r\n", b""))
+        crlf = b'MSG("PROGRAM:P")\r\nN1S1000M03\r\nN2M30\r\n'
+        lf = b'MSG("PROGRAM:P")\nN1S1000M03\nN2M30\n'
+        with self.subTest(mode="lf-from-crlf"):
+            data = run(crlf, Config(g00_level="allow", newline="lf"))
+            self.assertNotIn(b"\r\n", data)
+            self.assertIn(b"\n", data)
+        with self.subTest(mode="crlf-from-lf"):
+            data = run(lf, Config(g00_level="allow", newline="crlf"))
+            self.assertIn(b"\r\n", data)
+            self.assertNotIn(b"\n", data.replace(b"\r\n", b""))
+        with self.subTest(mode="auto-preserves-crlf"):
+            data = run(crlf, self._cfg())
+            self.assertIn(b"\r\n", data)
 
-    def test_newline_auto_preserves_source_style(self):
-        # 默认 auto：CRLF 源保持 CRLF（锁定现行为）。
-        root = self.make_dir()
-        (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\r\nN1S1000M03\r\nN2M30\r\n'.encode("utf-8"))
-        cfg = self._cfg()
-        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
-        report = process_plan(plan, str(root), cfg)
-        self.assertEqual(report.success, 1)
-        self.assertIn(b"\r\n", (root / "P.MPF").read_bytes())
-
-    def test_aux_m03_rule_reports_only_when_violated(self):
-        # m03-before-motion：M03 出现在首次切削运动之后 → error；之前 → 无问题。
-        info = DEFAULT_INFO
-        violated = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M03\nN3M30\n%\n'
-        ok = '%\nMSG("PROGRAM:P")\nN1M03\nN2G1X10\nN3M30\n%\n'
-        issues = validate_program(violated, "P.MPF", "P", info,
-                                  self._cfg(aux_checks={"m03-before-motion"}))
-        self.assertTrue(any(i.kind == "aux-order" and i.severity == "error" for i in issues))
-        issues = validate_program(ok, "P.MPF", "P", info,
-                                  self._cfg(aux_checks={"m03-before-motion"}))
-        self.assertFalse(any(i.kind == "aux-order" for i in issues))
-
-    def test_aux_m05_after_end_is_warning(self):
-        text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\nN3M05\n%\n'
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
-                                  Config(g00_level="allow", aux_checks={"m05-before-end"}))
-        self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
-
-    def test_aux_m08_after_first_cut_is_warning(self):
-        text = '%\nMSG("PROGRAM:P")\nN1G1X10\nN2M08\nN3M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
-                                  Config(g00_level="allow", aux_checks={"m08-before-cut"}))
-        self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
-
-    def test_aux_m09_absent_produces_no_warning(self):
-        # M09 未出现时不提示 m09-before-end；出现且晚于结束指令时才提示。
-        text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\n%\n'
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
-                                  Config(g00_level="allow", aux_checks={"m09-before-end"}))
-        self.assertFalse(any(i.kind == "aux-order" for i in issues))
-
-    def test_aux_m09_after_end_is_warning(self):
-        text = '%\nMSG("PROGRAM:P")\nN1M03\nN2M30\nN3M09\n%\n'
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
-                                  Config(g00_level="allow", aux_checks={"m09-before-end"}))
-        self.assertTrue(any(i.kind == "aux-order" and i.severity == "warning" for i in issues))
+    def test_aux_order_rules(self):
+        cases = (
+            ("m03-before-motion", "N1G1X10\nN2M03\nN3M30\n", True, "error"),
+            ("m03-before-motion", "N1M03\nN2G1X10\nN3M30\n", False, None),
+            ("m05-before-end", "N1M03\nN2M30\nN3M05\n", True, "warning"),
+            ("m08-before-cut", "N1G1X10\nN2M08\nN3M30\n", True, "warning"),
+            ("m09-before-end", "N1M03\nN2M30\nN3M09\n", True, "warning"),
+            ("m09-before-end", "N1M03\nN2M30\n", False, None),
+        )
+        for rule, body, expected, severity in cases:
+            with self.subTest(rule=rule, body=body[:12]):
+                text = '%\nMSG("PROGRAM:P")\n' + body + '%\n'
+                issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
+                                          Config(g00_level="allow", aux_checks={rule}))
+                found = [i for i in issues if i.kind == "aux-order"]
+                if expected:
+                    self.assertTrue(any(i.severity == severity for i in found))
+                else:
+                    self.assertFalse(found)
 
     def test_aux_checks_empty_disables_all(self):
         # 未启用任何顺序规则时（默认）不产生 aux-order，锁定默认行为。
@@ -1215,6 +1113,36 @@ class CoreTests(unittest.TestCase):
         cfg = self._cfg(require_m06=True)
         issues = validate_program("N10 T1;\nN20 M06;\nN30 M30;\n", "t.MPF", "T", DEFAULT_INFO, cfg)
         self.assertFalse(any(i.kind == "tool-change" for i in issues))
+
+    def test_write_csv_emits_header_and_issue_rows(self):
+        report = ProcessReport("in", "out", "start")
+        report.files = [{
+            "file": "A.MPF",
+            "action": "keep",
+            "issues": [{"file": "A.MPF", "line": 3, "text": "N3", "kind": "feed-zero", "severity": "error", "suggestion": "修正 F0"}],
+        }]
+        root = self.make_dir()
+        path = root / "report.csv"
+        report.write_csv(path)
+        content = path.read_text(encoding="utf-8-sig")
+        lines = content.splitlines()
+        self.assertEqual(lines[0], "file,line,text,kind,severity,suggestion")
+        self.assertIn("A.MPF,3,N3,feed-zero,error,修正 F0", lines[1])
+
+    def test_extract_program_name_priority_and_suffix_rules(self):
+        from ncodeprocess.core import extract_program_name
+        root = self.make_dir()
+        cases = (
+            ('MSG("PROGRAM:FROM_MSG")\n', "from-msg.MPF", "FROM_MSG"),
+            ("PPRINT PROGNAME FROM_PPRINT\n", "x.MPF", "FROM_PPRINT"),
+            ("", "prefix_AG6D311A0101.MPF", "AG6D311A0101"),
+            ("", "AG6D311A0101_I.MPF", "AG6D311A0101"),
+        )
+        for text, name, expected in cases:
+            with self.subTest(name=name):
+                path = root / name
+                path.write_text(text, encoding="utf-8")
+                self.assertEqual(extract_program_name(path, text), expected)
 
     def test_program_field_updates_when_overwrite_enabled(self):
         # WP-B2：PROGRAM 不保护，勾选覆盖时头部 PROGRAM 与程序名对齐。

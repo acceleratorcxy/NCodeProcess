@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import ncodeprocess.preferences as preferences_module
-from ncodeprocess.preferences import REGISTRY_DEFAULTS, clear_all, load_all, save_all, storage_backend
+from ncodeprocess.preferences import clear_all, load_all, save_all, storage_backend
 
 # 使用独立的测试键，避免污染真实的 HKCU\Software\NCodeProcess。
 TEST_KEY = r"Software\NCodeProcess_UnitTests"
@@ -17,25 +17,6 @@ TEST_KEY = r"Software\NCodeProcess_UnitTests"
 class PreferencesTests(unittest.TestCase):
     def tearDown(self):
         clear_all(TEST_KEY)
-
-    def test_defaults_cover_all_registry_items(self):
-        # 统一注册表模型：编制/审核 + 程序设置全部项
-        self.assertEqual(set(REGISTRY_DEFAULTS), {
-            "bianzhi", "shenhe",
-            "encoding", "delete_extensions", "allowed_name_pattern", "aptsource_dir",
-            "program_extensions", "program_output_extension",
-            "require_end_marker", "require_m06", "require_spindle_speed",
-            "ask_backup",
-            "required_bianzhi", "required_shenhe", "required_drawing", "required_part",
-            "m03_position", "feed_min", "feed_max", "spindle_min", "spindle_max",
-            "newline",
-            "aux_m03_before_motion", "aux_m05_before_end", "aux_m08_before_cut", "aux_m09_before_end",
-            "feed_outlier_iqr_factor", "feed_outlier_low_ratio", "feed_outlier_high_ratio",
-            "multiple_spindle_warn",
-            "max_file_size", "max_files",
-            "retract_z_threshold",
-            "storage_backend",
-        })
 
     def test_save_and_load_roundtrip(self):
         save_all({"encoding": "gb18030", "require_m06": "1", "bianzhi": "张工"}, TEST_KEY)

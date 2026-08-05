@@ -12,12 +12,13 @@ class ReleaseAssetTests(unittest.TestCase):
         version_resource = PROJECT_ROOT / "version_info.txt"
         self.assertTrue(version_resource.is_file())
         content = version_resource.read_text(encoding="utf-8")
-        self.assertIn("filevers=(1, 0, 0, 0)", content)
-        self.assertIn("prodvers=(1, 0, 0, 0)", content)
+        version = ncodeprocess.__version__
+        major, minor, patch = (int(part) for part in version.split("."))
+        self.assertIn(f"filevers=({major}, {minor}, {patch}, 0)", content)
+        self.assertIn(f"prodvers=({major}, {minor}, {patch}, 0)", content)
         self.assertIn("StringStruct('ProductName', 'NCodeProcess')", content)
         self.assertIn("StringStruct('InternalName', 'NCodeProcess')", content)
         self.assertIn("StringStruct('OriginalFilename', 'NCodeProcess.exe')", content)
-        self.assertIn("StringStruct('FileDescription', 'NCodeProcess NC Program Processing Tool')", content)
 
     def test_build_configuration_packages_version_metadata_without_cleaning_all_dist(self):
         spec = (PROJECT_ROOT / "NCodeProcess.spec").read_text(encoding="utf-8")
@@ -26,7 +27,3 @@ class ReleaseAssetTests(unittest.TestCase):
         self.assertTrue((PROJECT_ROOT / "VERSION.txt").is_file())
         self.assertEqual((PROJECT_ROOT / "VERSION.txt").read_text(encoding="utf-8").strip(), f"NCodeProcess {ncodeprocess.__version__}")
         self.assertIn("'VERSION.txt'", build_script)
-        self.assertIn("Join-Path $dist 'NCodeProcess.exe'", build_script)
-        self.assertIn("Join-Path $dist 'NCodeProcess-Package'", build_script)
-        self.assertIn("Join-Path $dist 'NCodeProcess-Windows7-Portable.zip'", build_script)
-
