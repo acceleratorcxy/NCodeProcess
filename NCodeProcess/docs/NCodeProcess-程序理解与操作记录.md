@@ -206,6 +206,18 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 - **同步更新**：两个项目 README 的「项目文档」列表、仓库根总 README 的文档说明均加入「发布安全说明」。
 - **约定**：docs 版为开发侧文档，根目录 `SECURITY.md` 随发布包分发，两者内容同步维护；构建脚本/spec/运行时钩子变化时两处一并核对。
 
+### 2.11 Post-Batch 2 WP-01 线程安全与生命周期（2026-08-05）
+
+按 `docs/superpowers/plans/2026-08-05-post-batch2-improvements-plan.md`（Post-Batch 2 路线图）执行第一批高优先级项，处理审查与待办「线程与生命周期」问题 1-3：
+
+| # | 改动 | 说明 | 提交 |
+|---|---|---|---|
+| 1 | 扫描代际防护 | `App._scan_generation` 递增；`finish_scan(result, generation)` 只接受当前代，旧扫描线程结果不再覆盖新结果 | `b95ffcc` |
+| 2 | 后台线程 Tk 调用安全 | 新增 `App._safe_after`（try/except tk.TclError），`scan`/`process` 线程回调统一经其回主线程，窗口销毁后不再残留异常 | `7840844` |
+| 3 | 处理进度反馈 | `process_plan` 新增可选 `progress_callback`；GUI 用锁保护进度槽 + `_poll_process_progress` 每 100ms 轮询，状态栏显示「正在处理……（i/N）文件」 | `8ffa82d` |
+
+**测试基线**：合并精简后 159 项 → WP-01 新增 4 项测试后 **163 项**，全量通过（conda Python 3.8）。新增测试：`ScanLifecycleTests`（独立类，含 `_build_app` 隔离 helper，不继承 `LayoutWidgetTests` 以免重复计数）与 `CoreTests.test_process_plan_reports_progress`。
+
 ---
 
 ## 三、后续建议（可选）
