@@ -493,9 +493,15 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
                     drawing_candidates.append((drawing_label, drawing))
                 if not program:
                     plan.issues.append(Issue(rel, 1, "", "program-name", "error", "请手动确认程序名"))
-            except Exception as e:
+            except UnicodeError as e:
                 plan = FilePlan(rel, "mpf", None, None, "error")
                 plan.issues.append(Issue(rel, 1, "", "encoding", "error", str(e)))
+            except PermissionError as e:
+                plan = FilePlan(rel, "mpf", None, None, "error")
+                plan.issues.append(Issue(rel, 1, "", "permission", "error", f"无权限读取文件：{e}"))
+            except OSError as e:
+                plan = FilePlan(rel, "mpf", None, None, "error")
+                plan.issues.append(Issue(rel, 1, "", "io", "error", f"读取文件失败：{e}"))
             files.append(plan)
         elif ext == ".aptsource":
             program = extract_program_name(path, None, config.allowed_name_pattern)
@@ -1468,9 +1474,25 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
                     report.skipped += 1; item["status"] = "skipped"
             else:
                 report.skipped += 1; item["status"] = "review"
+        except UnicodeError as e:
+            report.failed += 1
+            item["status"] = "failed"
+            item["error_kind"] = "encoding"
+            item.setdefault("runtime_error", str(e))
+        except PermissionError as e:
+            report.failed += 1
+            item["status"] = "failed"
+            item["error_kind"] = "permission"
+            item.setdefault("runtime_error", str(e))
+        except OSError as e:
+            report.failed += 1
+            item["status"] = "failed"
+            item["error_kind"] = "io"
+            item.setdefault("runtime_error", str(e))
         except Exception as e:
             report.failed += 1
             item["status"] = "failed"
+            item["error_kind"] = "other"
             item.setdefault("runtime_error", str(e))
         report.files.append(item)
     report.finished_at = datetime.now().isoformat(timespec="seconds")

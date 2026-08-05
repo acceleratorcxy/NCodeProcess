@@ -567,6 +567,28 @@ class CoreTests(unittest.TestCase):
         plan = self._mpf(scan)
         self.assertTrue(any(issue.kind == "encoding" for issue in plan.issues))
 
+    def test_scan_classifies_permission_and_io_errors(self):
+        root = self.make_dir()
+        (root / "A.MPF").write_text("%\nM30\n", encoding="utf-8")
+        with patch("ncodeprocess.core._read_text_cached", side_effect=PermissionError("denied")):
+            scan = scan_directory(str(root), self._cfg(require_end_marker=False))
+        plan = self._mpf(scan)
+        self.assertEqual(plan.issues[0].kind, "permission")
+        with patch("ncodeprocess.core._read_text_cached", side_effect=OSError("io fail")):
+            scan = scan_directory(str(root), self._cfg(require_end_marker=False))
+        plan = self._mpf(scan)
+        self.assertEqual(plan.issues[0].kind, "io")
+
+    def test_process_plan_records_error_kind(self):
+        root = self.make_dir()
+        (root / "A.MPF").write_text("%\nN1G1X0Y0Z0F1000S5000M03\nM30\n", encoding="utf-8")
+        config = self._cfg(require_end_marker=False)
+        scan = build_plan(scan_directory(str(root), config), DEFAULT_INFO, config)
+        with patch("ncodeprocess.core._atomic_write", side_effect=PermissionError("denied")):
+            report = process_plan(scan, str(root), config)
+        self.assertEqual(report.files[0]["status"], "failed")
+        self.assertEqual(report.files[0].get("error_kind"), "permission")
+
     def test_report_records_file_encoding(self):
         root = self.make_dir()
         (root / "A.MPF").write_text("%\nN1G1X0Y0Z0F1000S5000M03\nM30\n", encoding="utf-8")
