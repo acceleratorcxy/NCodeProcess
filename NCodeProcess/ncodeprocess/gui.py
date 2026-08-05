@@ -192,6 +192,16 @@ def window_geometry_for_screen(screen_width, screen_height):
     return width, height, width, height
 
 
+def centered_position(parent_x, parent_y, parent_w, parent_h, width, height, screen_w, screen_h):
+    """Return the top-left position that centers a child window on its parent.
+
+    The result is clamped so the child window never starts outside the screen.
+    """
+    x = max(0, min(parent_x + (parent_w - width) // 2, screen_w - width))
+    y = max(0, min(parent_y + (parent_h - height) // 2, screen_h - height))
+    return x, y
+
+
 def fit_column_widths(available_width, specs):
     """Fit ordered column specifications into an available pixel width."""
     widths = {name: initial for name, initial, _minimum, _stretch in specs}
@@ -416,6 +426,29 @@ class App(ttk.Frame):
             return self.after(ms, callback)
         except tk.TclError:
             return None
+
+    def _show_centered(self, window, width=None, height=None, min_width=0, min_height=0):
+        """Place a Toplevel child window centered on the main window.
+
+        Width/height default to the window's requested size; both are clamped
+        to the screen so the window never starts off-screen.
+        """
+        if width is None or height is None:
+            window.update_idletasks()
+            width = width or window.winfo_reqwidth()
+            height = height or window.winfo_reqheight()
+        screen_w = window.winfo_screenwidth()
+        screen_h = window.winfo_screenheight()
+        width = min(width, screen_w)
+        height = min(height, screen_h)
+        parent_x = self.master.winfo_rootx()
+        parent_y = self.master.winfo_rooty()
+        parent_w = max(self.master.winfo_width(), 1)
+        parent_h = max(self.master.winfo_height(), 1)
+        x, y = centered_position(parent_x, parent_y, parent_w, parent_h, width, height, screen_w, screen_h)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        if min_width:
+            window.minsize(min_width, min_height)
 
     def _schedule_startup_callback(self, delay, callback):
         """Schedule a startup callback that can be cancelled with this App."""
@@ -1064,6 +1097,7 @@ class App(ttk.Frame):
         win.title("程序设置")
         win.transient(self.master)
         win.resizable(False, False)
+        self._show_centered(win)
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
         basic = ttk.Frame(notebook, padding=8)
@@ -1557,8 +1591,11 @@ class App(ttk.Frame):
         window = tk.Toplevel(self.master)
         self.all_stats_window = window
         window.title("全部程序参数统计")
-        window.geometry("1500x620")
-        window.minsize(1050, 420)
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        width = min(1500, max(1050, screen_width - 80))
+        height = min(720, max(560, screen_height - 100))
+        self._show_centered(window, width, height, min_width=1050, min_height=420)
         window.transient(self.master)
         table = self._table(
             window,
@@ -1739,8 +1776,7 @@ class App(ttk.Frame):
         window = tk.Toplevel(self.master)
         self.program_compare_window = window
         window.title(f"程序差异对比：{compare_label(left)} vs {compare_label(right)}")
-        window.geometry("1100x650")
-        window.minsize(800, 480)
+        self._show_centered(window, 1100, 650, min_width=800, min_height=480)
         window.transient(self.master)
         frame = ttk.Frame(window, padding=8)
         frame.pack(fill="both", expand=True)
@@ -1858,8 +1894,7 @@ class App(ttk.Frame):
         window = tk.Toplevel(self.master)
         self.program_editor_window = window
         window.title("编辑程序代码：" + f.program)
-        window.geometry("900x650")
-        window.minsize(700, 480)
+        self._show_centered(window, 900, 650, min_width=700, min_height=480)
         window.transient(self.master)
         container = ttk.Frame(window, padding=8)
         container.pack(fill="both", expand=True)
@@ -2009,8 +2044,7 @@ class App(ttk.Frame):
         result = {"confirmed": False}
         window = tk.Toplevel(self.master)
         window.title("确认目录处理")
-        window.geometry("900x650")
-        window.minsize(700, 460)
+        self._show_centered(window, 900, 650, min_width=700, min_height=460)
         window.transient(self.master)
         window.grab_set()
         container = ttk.Frame(window, padding=12)

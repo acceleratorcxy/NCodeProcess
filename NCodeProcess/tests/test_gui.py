@@ -9,6 +9,7 @@ import ncodeprocess.gui as gui
 from ncodeprocess.core import FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ScanResult
 from ncodeprocess.gui import (
     App,
+    centered_position,
     compact_diff_rows,
     merge_drawing_choices,
     needs_detailed_confirmation,
@@ -90,6 +91,19 @@ class LayoutMetricTests(unittest.TestCase):
         self.assertLessEqual(height, 600)
         self.assertEqual(min_width, width)
         self.assertEqual(min_height, height)
+
+    def test_centered_position_places_window_at_parent_center(self):
+        x, y = centered_position(100, 80, 1000, 600, 800, 600, 1366, 768)
+        self.assertEqual((x, y), (200, 80))
+
+    def test_centered_position_clamps_inside_screen(self):
+        # 父窗口超出屏幕右缘/下缘时，子窗口被限制在屏幕内
+        x, y = centered_position(1200, 700, 1000, 600, 800, 600, 1366, 768)
+        self.assertLessEqual(x + 800, 1366)
+        self.assertLessEqual(y + 600, 768)
+        # 父窗口在屏幕左侧之外时，子窗口贴到屏幕左缘
+        x, y = centered_position(-500, -300, 400, 300, 800, 600, 1366, 768)
+        self.assertEqual((x, y), (0, 0))
 
     def test_fit_column_widths_cases(self):
         # 各宽度档位下按「多余宽度只给伸缩列、收缩先缩伸缩列、不低于最小宽度」规则分配。
@@ -1419,6 +1433,40 @@ class ScanLifecycleTests(unittest.TestCase):
                 app.finish_process(ProcessReport("in", "out", "start"))
             self.assertFalse(app._processing)
             self.assertIsNone(app._process_progress)
+        finally:
+            root.destroy()
+
+    def test_all_stats_window_uses_screen_fitted_geometry(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.scan_result = ScanResult("tmp", [])
+            with patch.object(tk.Toplevel, "winfo_screenwidth", return_value=1366), \
+                 patch.object(tk.Toplevel, "winfo_screenheight", return_value=768):
+                app.show_all_program_stats()
+            app.all_stats_window.update_idletasks()
+            geometry = app.all_stats_window.geometry()
+            width = int(geometry.split("x")[0])
+            self.assertLessEqual(width, 1366)
+            self.assertGreaterEqual(width, 1050)
+            self.assertIn("+", geometry)
+            x = int(geometry.split("+")[1])
+            y = int(geometry.split("+")[2])
+            self.assertGreaterEqual(x, 0)
+            self.assertGreaterEqual(y, 0)
+        finally:
+            root.destroy()
+
+    def test_settings_window_is_centered(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            app.settings_window.update_idletasks()
+            geometry = app.settings_window.geometry()
+            self.assertIn("+", geometry)
+            x = int(geometry.split("+")[1])
+            y = int(geometry.split("+")[2])
+            self.assertGreaterEqual(x, 0)
+            self.assertGreaterEqual(y, 0)
         finally:
             root.destroy()
 
