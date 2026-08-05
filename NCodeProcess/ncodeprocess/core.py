@@ -377,6 +377,11 @@ def _safe_name(name: str, pattern: str = Config().allowed_name_pattern) -> bool:
     return bool(name and re.match(pattern, name) and not any(c in name for c in '\\/:*?"<>|'))
 
 
+def code_part(line: str) -> str:
+    """Return the NC code before any parenthesised comment."""
+    return line.split("(", 1)[0]
+
+
 def extract_program_name(path: Path, text: Optional[str] = None, pattern: str = Config().allowed_name_pattern) -> Optional[str]:
     if text:
         for line in _first_lines(text, 80):
@@ -640,9 +645,14 @@ def extract_tools(text: str) -> List[ToolInfo]:
             if cutter_dia and nominal_dia and tool_type not in ("钻头", "中心钻"):
                 try:
                     same_dia = abs(float(cutter_dia) - float(nominal_dia)) <= 1e-9
+                    if cutter_coner and nominal_coner:
+                        same_coner = abs(float(cutter_coner) - float(nominal_coner)) <= 1e-9
+                    else:
+                        same_coner = not cutter_coner and not nominal_coner
                 except ValueError:
                     same_dia = cutter_dia.strip() == nominal_dia.strip()
-                if same_dia:
+                    same_coner = cutter_coner.strip() == nominal_coner.strip()
+                if same_dia and same_coner:
                     tool_type = "普通立铣刀"
                 elif included_angle:
                     try:
@@ -796,7 +806,9 @@ def add_initial_tool_change(text: str, tools: Sequence[ToolInfo], config: Config
     for line in body:
         if standalone_change.match(line):
             continue
-        corrected.append(tool_ref.sub("T" + str(number), line))
+        # 只替换括号注释前的代码部分，注释中的 T 号（如 (T2 备用)）保持原样。
+        code, separator, comment = line.partition("(")
+        corrected.append(tool_ref.sub("T" + str(number), code) + (separator + comment if separator else ""))
 
     semicolon = any(line.rstrip().endswith(";") for line in corrected[:30] if line.strip())
     command = "T{}M6{}".format(number, ";" if semicolon else "")
@@ -817,7 +829,7 @@ def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
     for line in lines[start:]:
         if _parse_msg(line) or line.strip() in ("", "%"):
             continue
-        code = line.split("(", 1)[0]
+        code = code_part(line)
         if m03_re.search(code):
             return text, False, ""
     if config.m03_position == "standalone":
@@ -829,7 +841,7 @@ def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
             continue
         # Search only the code part: an S value inside a parenthetical
         # comment is not a spindle command and must not capture M03.
-        code = line.split("(", 1)[0]
+        code = code_part(line)
         if not s_re.search(code):
             continue
         if ";" in code:
@@ -855,7 +867,7 @@ def _insert_standalone_m03(text: str, lines: Sequence[str], start: int, newline:
     command = "M03;" if semicolon else "M03"
     motion_re = re.compile(r"(?<![A-Z])(?:G0*[0-3]|[XYZ]\s*" + NUM + r")", re.I)
     for idx in range(start, len(lines)):
-        code = lines[idx].split("(", 1)[0]
+        code = code_part(lines[idx])
         if _parse_msg(lines[idx]) or not code.strip():
             continue
         if motion_re.search(code):
@@ -885,7 +897,7 @@ def calculate_stats(text: str) -> Stats:
         stripped = line.strip()
         if not stripped or stripped == "%":
             continue
-        code = line.split("(", 1)[0]
+        code = code_part(line)
         g00_count += sum(1 for _match in G00_RE.finditer(code))
         for m in ADDR_RE.finditer(code):
             key, raw = m.group(1).upper(), m.group(2)
@@ -954,7 +966,7 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             issues.append(Issue(filename, i, raw_line, "unclosed-quote", "error", "补全或删除未闭合引号"))
         if CONTROL_CHAR_RE.search(raw_line):
             issues.append(Issue(filename, i, raw_line, "control-character", "error", "删除异常控制字符"))
-        code = raw_line.split("(", 1)[0]
+        code = code_part(raw_line)
         upper_code = code.upper()
         if not has_end and (line.startswith("%") and END_LINE_RE.match(line) or "M" in upper_code and END_CODE_RE.search(code)):
             has_end = True

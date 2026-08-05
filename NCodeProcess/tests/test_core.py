@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ToolInfo, _decode, add_m03, align_lines, apply_header, build_plan, calculate_stats, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ToolInfo, _decode, add_initial_tool_change, add_m03, align_lines, apply_header, build_plan, calculate_stats, code_part, extract_drawing_candidates, extract_header_fields, extract_tools, process_plan, program_defaults, reprocess_file, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
@@ -203,6 +203,16 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(tool.tool_type, "普通立铣刀")
         self.assertEqual(tool.tool_angle, "")
 
+    def test_ordinary_mill_requires_matching_corner_radius(self):
+        # FR-4.3.16: 直径与圆角都一致才判普通立铣刀；圆角不一致不得误判。
+        text = "CUTTER/10,2\nTOOLNO/1,10,1,,\n"
+        tools = extract_tools(text)
+        self.assertEqual(tools[0].tool_type, "")
+
+    def test_code_part_strips_parenthesised_comment(self):
+        self.assertEqual(code_part("N1G1X10 (comment)"), "N1G1X10 ")
+        self.assertEqual(code_part("N1G1X10"), "N1G1X10")
+
     def test_drill_types_detected_independent_of_diameter(self):
         # 钻类判定仅依赖 APT 参数规律（TOOLNO 角度/续行），不限制直径规格。
         center = (
@@ -354,6 +364,14 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(out.count("T1M6"), 1)
         self.assertIn("N3T1;", out)
         self.assertNotIn("T5", out)
+
+    def test_initial_tool_change_ignores_comment_tool_refs(self):
+        text = "%\nN2T2M06\n(T2 备用)\nN4G1X10\nM30\n"
+        config = Config(auto_tool_change=True, g00_level="allow", require_end_marker=False)
+        result, changed, note = add_initial_tool_change(text, [ToolInfo(1, "10")], config)
+        self.assertTrue(changed)
+        self.assertIn("(T2 备用)", result)
+        self.assertNotIn("(T1 备用)", result)
 
     def test_separate_output_keeps_input(self):
         root = self.make_dir(); out = self.make_dir()
