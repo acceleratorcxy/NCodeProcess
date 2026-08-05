@@ -24,12 +24,10 @@ from .core import (
     extract_tools,
     format_nc_date,
     process_plan,
-    read_text,
     reprocess_file,
     save_timestamped_report,
     scan_directory,
     validate_program,
-    _atomic_write,
 )
 from .preferences import (
     KEY as PREFERENCES_KEY,
@@ -715,7 +713,7 @@ class App(ttk.Frame):
         ttk.Label(actions, textvariable=self.status).grid(row=0, column=1, padx=12, sticky="w")
         self.export_button = ttk.Button(actions, text="导出报告", command=self.export_report, state="disabled")
         self.export_button.grid(row=0, column=2, padx=3, sticky="e")
-        self.process_button = ttk.Button(actions, text="确认并执行目录处理", command=self.process, state="disabled")
+        self.process_button = ttk.Button(actions, text="确认并执行处理", command=self.process, state="disabled")
         self.process_button.grid(row=0, column=3, padx=3, sticky="e")
 
         content = ttk.Frame(self)
@@ -1392,19 +1390,6 @@ class App(ttk.Frame):
             if plan_file.kind == "mpf" and plan_file.program and plan_file.original_text is not None:
                 reprocess_file(plan_file, self.info(), self.config(), tools=self.program_tools.get(plan_file.program, []))
                 applied_plans.append(plan_file)
-        if self.config().force_apply and applied_plans:
-            # 强制应用：直接写入所选文件，完成后重新扫描目录刷新新信息。
-            try:
-                for plan_file in applied_plans:
-                    source = Path(self.workdir) / plan_file.source
-                    _text, enc, _newline = read_text(source, self.config().encoding)
-                    _atomic_write(source, plan_file.output_text, enc)
-            except OSError as exc:
-                messagebox.showerror("写入失败", f"强制应用写入文件失败：\n{exc}", parent=self.master)
-                return
-            self.status.set(f"已强制应用并写入 {len(applied_plans)} 个文件，正在重新扫描……")
-            self.scan()
-            return
         self.populate_file_tables()
         for plan_file in applied_plans:
             row = next((str(i) for i, item in enumerate(self.scan_result.files) if item is plan_file), None)
@@ -2186,6 +2171,17 @@ class App(ttk.Frame):
                 detail_lines.append("")
             detail_lines.append("【待删除文件】")
             detail_lines.extend(deletes)
+        modified = [f for f in self.scan_result.files if f.kind == "mpf" and f.action in ("keep", "move") and f.changes and f.program]
+        if modified:
+            if detail_lines:
+                detail_lines.append("")
+            detail_lines.append("【将修改的 MPF】")
+            for plan_file in modified[:50]:
+                detail_lines.append(f"{plan_file.source} → {Path(plan_file.target).name if plan_file.target else ''}")
+                for change in plan_file.changes:
+                    detail_lines.append(f"  · {change}")
+            if len(modified) > 50:
+                detail_lines.append(f"  … 其余 {len(modified) - 50} 个文件略")
         if not self.confirm_processing(summary, detail_lines):
             return
         backup = self._backup_requested() if self.config().ask_backup else False

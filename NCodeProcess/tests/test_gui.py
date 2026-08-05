@@ -1548,7 +1548,7 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_apply_selected_with_force_writes_and_rescans(self):
+    def test_apply_selected_with_force_updates_preview_without_writing(self):
         root, app = self._build_app(1286, 668)
         try:
             plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
@@ -1559,12 +1559,35 @@ class ScanLifecycleTests(unittest.TestCase):
             app.info_vars["drawing"].set("NEWDRAW")
             app.info_vars["version"].set("V9")
             app.force_apply.set(True)
-            with patch.object(app, "scan") as scan_mock, \
-                 patch("ncodeprocess.gui._atomic_write") as atomic_write, \
-                 patch("ncodeprocess.gui.read_text", return_value=("x", "utf-8", "\n")):
+            with patch.object(app, "scan") as scan_mock:
                 app.apply_selected()
-            atomic_write.assert_called_once()
-            scan_mock.assert_called_once()
+            scan_mock.assert_not_called()
+            self.assertIn("NEWDRAW", plan.output_text or "")
+        finally:
+            root.destroy()
+
+    def test_process_button_label_is_confirm_and_execute(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            self.assertEqual(app.process_button.cget("text"), "确认并执行处理")
+        finally:
+            root.destroy()
+
+    def test_process_confirmation_includes_modified_file_changes(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
+            plan.changes = ["补全 DRAWING NUMBER", "插入 BIANZHI"]
+            app.scan_result = ScanResult("tmp", [plan])
+            app.applied_info = ProgramInfo("A", "B", "D", "V", "", "SIE840D", "")
+            captured = {}
+            with patch.object(app, "confirm_processing", side_effect=lambda summary, detail: captured.update(summary=summary, detail=detail) or False):
+                app.process()
+            joined = "\n".join(captured.get("detail", []))
+            self.assertIn("将修改的 MPF", joined)
+            self.assertIn("补全 DRAWING NUMBER", joined)
+            self.assertIn("A.MPF", joined)
         finally:
             root.destroy()
 
