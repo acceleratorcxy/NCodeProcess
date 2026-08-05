@@ -1537,6 +1537,13 @@ class App(ttk.Frame):
                         changed = True
         if changed:
             result = build_plan(result, self.info(), self.config(), self.program_tools)
+        # 记住当前选中程序，扫描完成后恢复选中并刷新右侧预览。
+        previous_program = None
+        if self.scan_result is not None and self.keep_table.selection():
+            try:
+                previous_program = self.scan_result.files[int(self.keep_table.selection()[0])].program
+            except (IndexError, TypeError, ValueError):
+                previous_program = None
         self.scan_result = result
         # A single existing PART VERSION/DRAWING NUMBER is a safe
         # preselection for the next processing pass. Both remain editable and
@@ -1565,6 +1572,19 @@ class App(ttk.Frame):
         if self.folder_choice_var.get() not in [item[0] for item in self.folder_choices]:
             self._set_drawing_choice(self.folder_choices[3][0])
         self.populate_file_tables()
+        restored = False
+        if previous_program:
+            for iid in self.keep_table.get_children():
+                try:
+                    if self.scan_result.files[int(iid)].program == previous_program:
+                        self.keep_table.selection_set(iid)
+                        self.keep_table.focus(iid)
+                        restored = True
+                        break
+                except (IndexError, TypeError, ValueError):
+                    continue
+        if restored:
+            self.show_selected()
         mpfs = sum(f.kind == "mpf" for f in result.files)
         self.status.set(f"扫描完成：{len(result.files)} 个文件，{mpfs} 个 MPF；从保留/归档表选择 MPF 查看解析信息。")
         self.process_button.configure(state="normal" if result.files else "disabled")

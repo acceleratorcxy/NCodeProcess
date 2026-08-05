@@ -1593,6 +1593,45 @@ class ScanLifecycleTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_apply_selected_preview_renders_processed_fields(self):
+        # 未勾选覆盖时应用所选：右侧解析信息表应真实渲染“处理后”的新字段。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            plan.original_text = "%\nN1G1X10F1000S5000M03\nM30\n"
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.info_vars["drawing"].set("NEWDRAW")
+            app.info_vars["version"].set("V9")
+            app.overwrite_fields.set(False)
+            with patch.object(app, "scan"), patch("ncodeprocess.gui._atomic_write"):
+                app.apply_selected()
+            values = [app.info_table.item(item, "values") for item in app.info_table.get_children()]
+            self.assertTrue(
+                any(str(value[0]) == "处理后/DRAWING NUMBER" and str(value[1]) == "NEWDRAW" for value in values),
+                f"预览未渲染新字段: {values}",
+            )
+        finally:
+            root.destroy()
+
+    def test_finish_scan_restores_selection_and_refreshes_preview(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            old_plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            old_plan.original_text = 'MSG("PROGRAM:A")\nN1G1X10F1000S5000M03\nM30\n'
+            app.scan_result = ScanResult("tmp", [old_plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            new_plan = FilePlan("A.MPF", "mpf", "A", "A.MPF", "keep")
+            new_plan.original_text = 'MSG("PROGRAM:A")\nMSG("DRAWING NUMBER:NEW")\nN1G1X10F1000S5000M03\nM30\n'
+            with patch.object(app, "show_selected") as show_mock:
+                app.finish_scan(ScanResult("tmp", [new_plan]), app._scan_generation)
+            show_mock.assert_called_once()
+            self.assertEqual(app.keep_table.selection(), ("0",))
+        finally:
+            root.destroy()
+
     def test_apply_selected_keeps_existing_tool_rows(self):
         root, app = self._build_app(1286, 668)
         try:
