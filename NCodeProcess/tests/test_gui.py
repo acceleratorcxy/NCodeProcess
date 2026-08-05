@@ -1293,6 +1293,55 @@ class SettingsDialogTests(LayoutWidgetTests):
         finally:
             root.destroy()
 
+    def test_settings_dialog_has_heuristic_threshold_controls(self):
+        # WP-10：校验规则页提供 F 离群 IQR 倍数与回退比例、多 S 警告开关。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            rules = app.settings_pages[1]
+            target_vars = (
+                str(app.feed_outlier_iqr_var),
+                str(app.feed_outlier_low_ratio_var),
+                str(app.feed_outlier_high_ratio_var),
+            )
+            entries = [
+                widget for widget in self._descendants(rules)
+                if widget.winfo_class() == "TEntry"
+                and str(widget.cget("textvariable")) in target_vars
+            ]
+            self.assertEqual(len(entries), 3)
+            checkbuttons = [
+                widget for widget in self._descendants(rules)
+                if widget.winfo_class() == "TCheckbutton" and widget.cget("text").startswith("多 S 值警告")
+            ]
+            self.assertEqual(len(checkbuttons), 1)
+        finally:
+            root.destroy()
+
+    def test_config_reads_heuristic_thresholds(self):
+        # WP-10：Config 读取 GUI 输入；留空或非法输入回退默认。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.feed_outlier_iqr_var.set("2")
+            app.feed_outlier_low_ratio_var.set("0.05")
+            app.feed_outlier_high_ratio_var.set("5")
+            app.multiple_spindle_var.set(False)
+            config = app.config()
+            self.assertEqual(config.feed_outlier_iqr_factor, 2.0)
+            self.assertEqual(config.feed_outlier_low_ratio, 0.05)
+            self.assertEqual(config.feed_outlier_high_ratio, 5.0)
+            self.assertFalse(config.multiple_spindle_warn)
+
+            app.feed_outlier_iqr_var.set("abc")
+            app.feed_outlier_low_ratio_var.set("")
+            app.feed_outlier_high_ratio_var.set("abc")
+            config = app.config()
+            self.assertEqual(config.feed_outlier_iqr_factor, 3.0)
+            self.assertEqual(config.feed_outlier_low_ratio, 0.1)
+            self.assertEqual(config.feed_outlier_high_ratio, 3.0)
+        finally:
+            root.destroy()
+
     def test_required_field_checkbuttons_have_equal_spacing(self):
         # 必填 MSG 字段的 4 个勾选项位于同一容器内等间距排列。
         root, app = self._build_app(1286, 668)

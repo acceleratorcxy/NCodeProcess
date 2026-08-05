@@ -701,16 +701,9 @@ class CoreTests(unittest.TestCase):
         issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
         self.assertFalse(any(issue.kind == "tool-number-missing" for issue in issues))
 
-    def test_isolated_feed_parameter_line_warns(self):
-        # FR-07.2: 无运动/坐标/辅助指令的孤立 F/S 参数行提示。
-        text = "N1G1X10F1000\nN2F3000\nN3M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        isolated = [issue for issue in issues if issue.kind == "isolated-parameter"]
-        self.assertEqual(len(isolated), 1)
-        self.assertIn("F3000", isolated[0].text)
-
-    def test_motion_line_with_feed_is_not_isolated(self):
-        text = "N1G1X10Y20F3000S5000M03\nN2M30\n"
+    def test_isolated_feed_parameter_line_is_not_flagged(self):
+        # 2026-08-05 用户决定：一行内只有 F/S 而无运动/辅助指令属正常设定行，不再报告。
+        text = "N1G1X10F1000\nN2F3000\nN3S5000\nN4M30\n"
         issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
         self.assertFalse(any(issue.kind == "isolated-parameter" for issue in issues))
 
@@ -731,16 +724,139 @@ class CoreTests(unittest.TestCase):
         self.assertIn("F15000", outliers[0].text)
 
     def test_feed_outlier_high_value_thresholds(self):
-        # 上万但不足主体 3 倍不报；主体本身上万不报。
-        body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
-        text = body + "\nN6G1X60F9000\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-
+        # 主体本身上万时正常变化不报（未超常见档位 1.5 倍）。
         body = "\n".join(f"N{i}G1X{i}F20000" for i in range(1, 6))
         text = body + "\nN6G1X60F25000\nN7M30\n"
         issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
         self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+
+    def test_feed_outlier_ignores_high_frequency_second_mode(self):
+        # 样例多模态：抬刀档位 F5000 出现多次属正常，不因相对中位数偏高误报；
+        # 单次出现且超出常见档位范围的值才报。
+        body = [900] * 70 + [5000] * 10
+        lines = [f"N{i}G1X{i}F{v}" for i, v in enumerate(body, start=1)]
+        text = "\n".join(lines) + "\nN99G1X99F3500\nN100M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 3500 落在常见档位范围内
+
+        text = "\n".join(lines) + "\nN99G1X99F20000\nN100M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))  # 20000 超出常见档位 1.5 倍
+
+        text = "\n".join(lines) + "\nN99G1X99F20\nN100M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))  # 20 低于常见档位 0.03 倍
+
+    def test_feed_outlier_detects_low_value_in_cut_stage(self):
+        # 300~6000 场景：进刀 F300、切削 F900、移动 F5000 均高频属正常；
+        # 切削段孤立 F20 应检出（全体统计会因最低常见档位 300 而漏报）。
+        lines, idx = [], 1
+        for _ in range(20):
+            lines.append(f"N{idx}G1X1Y1Z-10F900")
+            idx += 1
+        for _ in range(10):
+            lines.append(f"N{idx}Z100F5000")
+            idx += 1
+        for _ in range(8):
+            lines.append(f"N{idx}G1Z-5F300")
+            idx += 1
+        text = "\n".join(lines) + f"\nN{idx}G1X1Y1Z-10F20\nN{idx+1}M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)
+        self.assertIn("F20", outliers[0].text)
+
+    def test_feed_outlier_low_ratio_configurable(self):
+        # 低值离群按主体中位数比例（默认 10%）动态判定，比例可在 Config 调整。
+        body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
+        text = body + "\nN6G1X60F50\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), 1)  # 50 < 3000×0.1
+        relaxed = self._cfg(feed_outlier_low_ratio=0.01)
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, relaxed)
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 50 > 3000×0.01
+
+    def test_feed_outlier_high_ratio_configurable(self):
+        # 上离群按主体中位数倍数（默认 3）动态判定，倍数可在 Config 调整。
+        body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
+        text = body + "\nN6G1X60F15000\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), 1)  # 15000 ≥ 3000×3
+        raised = self._cfg(feed_outlier_high_ratio=6.0)
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, raised)
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 15000 < 3000×6
+
+    def test_feed_outlier_dynamic_for_small_feed_program(self):
+        # 主体 F 为几百的程序同样按自身水平动态检出偏离（旧固定阈值逻辑会漏报）。
+        body = "\n".join(f"N{i}G1X{i}F300" for i in range(1, 6))
+        text = body + "\nN6G1X60F5\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), 1)  # 5 < 300×0.03
+        text = body + "\nN6G1X60F1500\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), 1)  # 1500 > 300×2
+
+    def test_feed_outlier_uses_iqr_for_dispersed_distributions(self):
+        # IQR 箱线图法：分布集中时即使未达中位数 3 倍也检出；均匀分散时不再误报。
+        concentrated = "\n".join(f"N{i}G1X{i}F{1000 + i * 100}" for i in range(1, 6))  # 1100~1500
+        text = concentrated + "\nN6G1X60F3000\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)  # IQR 上界 1700，3000 为离群（中位数 3 倍比例法会漏报）
+
+        spread = "\n".join(f"N{i}G1X{i}F{i * 1000}" for i in range(1, 6))  # 1000~5000
+        text = spread + "\nN6G1X60F5500\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 均匀分布内不误报
+
+        text = concentrated + "\nN6G1X60F100\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)  # IQR 下界 900，100 为离群
+
+    def test_feed_outlier_iqr_factor_configurable(self):
+        # IQR 倍数（默认 1.5）可在 Config 调整，放大后不再误报。
+        concentrated = "\n".join(f"N{i}G1X{i}F{1000 + i * 100}" for i in range(1, 6))
+        text = concentrated + "\nN6G1X60F3000\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))
+        widened = self._cfg(feed_outlier_iqr_factor=10.0)
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, widened)
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 上界 3400 > 3000
+
+    def test_feed_outlier_tolerates_wide_normal_swing_ranges(self):
+        # 用户真实数据：300~6000、800~8000、30~300 的正常波动不得误报；
+        # 只有明显超出波动范围的值才提示（Tukey 极端值标准 k=3 + 分位数兜底）。
+        def program(values):
+            lines = [f"N{i}G1X{i}F{value}" for i, value in enumerate(values, start=1)]
+            return "\n".join(lines) + "\nN99M30\n"
+
+        wide = list(range(300, 6001, 300))   # 300~6000
+        issues = validate_program(program(wide + [7000]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+        issues = validate_program(program(wide + [20000]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))
+
+        mid = list(range(800, 8001, 800))    # 800~8000
+        issues = validate_program(program(mid + [9000]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+        issues = validate_program(program(mid + [20000]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))
+
+        small = list(range(30, 301, 30))     # 30~300
+        issues = validate_program(program(small + [500]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+        issues = validate_program(program(small + [900]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))
+
+    def test_multiple_spindle_warn_can_be_disabled(self):
+        # WP-10：多 S 值警告默认开启，可在 Config 中关闭。
+        text = "MSG(\"PROGRAM:P\")\nN1G1X10F1000S5000M03\nN2X20S6000\nN3M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(issue.kind == "multiple-spindle-speeds" for issue in issues))
+        disabled = self._cfg(multiple_spindle_warn=False)
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, disabled)
+        self.assertFalse(any(issue.kind == "multiple-spindle-speeds" for issue in issues))
 
     def test_duplicate_msg_field_is_reported_as_warning(self):
         # FR-04.2.4: when the same MSG key appears more than once, the first

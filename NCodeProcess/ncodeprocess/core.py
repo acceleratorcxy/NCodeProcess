@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import threading
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,8 @@ M08_RE = re.compile(r"(?<![A-Z])M0?8(?!\d)", re.I)
 M09_RE = re.compile(r"(?<![A-Z])M0?9(?!\d)", re.I)
 # 切削/进给运动：G1/G2/G3 或 X/Y/Z 坐标（G0 为快速定位，不计入切削）。
 CUT_RE = re.compile(r"(?<![A-Z])(?:G0*[123](?!\d)|[XYZ]\s*" + NUM + r")", re.I)
+# Z 值达到该阈值视为抬刀高度（移动/退刀阶段），微小正 Z（如 Z0.1）属切削面。
+RETRACT_Z_THRESHOLD = 5.0
 TOOL_CALL_RE = re.compile(r"(?<![A-Z])T(\d+)(?!\d)", re.I)
 MOTION_RE = re.compile(r"(?<![A-Z])G0*([0-3])(?!\d)", re.I)
 INVALID_ADDR_RE = re.compile(r"(?<![A-Za-z])([GTMFSXYZIJ])\s*(?=$|[;\s])", re.I)
@@ -96,6 +99,18 @@ class Config:
     #   m08-before-cut     M08 先于首次切削（warning）
     #   m09-before-end     M09 先于程序结束（warning，M09 未出现时不提示）
     aux_checks: set = field(default_factory=set)
+    # 启发式校验阈值（WP-10，仅本次运行生效，GUI 校验规则页可调）。
+    # F 离群按工艺阶段（移动/进刀/切削）分组检测：组内出现 ≥2 次的值构成常见
+    # 进给档位（多模态正常），仅检查出现 1 次的孤立值是否低于最低档 ×
+    # low_ratio（默认 0.1）或高于最高档 × high_ratio（默认 3 倍）；
+    # 组内无常见档位时回退 IQR 极端值标准（k=3）。
+    feed_outlier_iqr_factor: float = 3.0
+    # 低值口径：孤立值低于最低常见档位 × low_ratio；IQR 回退时低于 Q1 × low_ratio。
+    feed_outlier_low_ratio: float = 0.1
+    # 高值口径：孤立值高于最高常见档位 × high_ratio。
+    feed_outlier_high_ratio: float = 3.0
+    # 程序包含多个不同 S 值时是否报 warning（多主轴转速切换）。
+    multiple_spindle_warn: bool = True
     # 处理前是否询问备份（GUI 基本设置可开关，持久化）。
     ask_backup: bool = True
 
@@ -382,6 +397,17 @@ def _safe_name(name: str, pattern: str = Config().allowed_name_pattern) -> bool:
 def code_part(line: str) -> str:
     """Return the NC code before any parenthesised comment."""
     return line.split("(", 1)[0]
+
+
+def _quantile(sorted_values: Sequence[float], q: float) -> float:
+    """Linear-interpolated quantile (numpy-style, Type 7) for a sorted sample."""
+    if not sorted_values:
+        return 0.0
+    position = (len(sorted_values) - 1) * q
+    lower = int(position)
+    upper = min(lower + 1, len(sorted_values) - 1)
+    fraction = position - lower
+    return sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * fraction
 
 
 def extract_program_name(path: Path, text: Optional[str] = None, pattern: str = Config().allowed_name_pattern) -> Optional[str]:
@@ -1018,7 +1044,6 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         header_match = re.match(r"^T(\d+)$", key)
         if header_match:
             header_tool_numbers.add(int(header_match.group(1)))
-    feed_values: List[Tuple[int, str, float, str]] = []
     spindle_values: List[Tuple[int, str, float, str]] = []
     first_cut: Optional[int] = None
     m03_pos: Optional[int] = None
@@ -1068,7 +1093,6 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             if key not in "FS":
                 continue
             if key == "F":
-                feed_values.append((i, raw_value, value, raw_line))
                 if value == 0:
                     issues.append(Issue(filename, i, raw_line, "feed-zero", "error", "发现 F0：进给为零，属于严重异常，请立即修正"))
                 if config.feed_min is not None and value < config.feed_min:
@@ -1104,8 +1128,6 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         if "T" in upper_code:
             for tm in TOOL_CALL_RE.finditer(code):
                 tool_numbers.add(int(tm.group(1)))
-        if ("F" in upper_code or "S" in upper_code) and not CUT_RE.search(code) and not MOTION_RE.search(code) and "M" not in upper_code and "T" not in upper_code:
-            issues.append(Issue(filename, i, raw_line, "isolated-parameter", "warning", "该行只有 F/S 参数而没有运动或辅助指令，请确认是否有遗漏的指令"))
         if "G" in upper_code:
             motion_codes = {int(match.group(1)) for match in MOTION_RE.finditer(code)}
             if len(motion_codes) > 1:
@@ -1141,30 +1163,88 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             issues.append(Issue(filename, m08_pos, lines[m08_pos - 1], "aux-order", "warning", "M08 出现在首次切削之后，首刀无冷却"))
         if "m09-before-end" in aux and m09_pos is not None and end_pos is not None and end_pos < m09_pos:
             issues.append(Issue(filename, m09_pos, lines[m09_pos - 1], "aux-order", "warning", "M09 出现在程序结束指令之后，冷却液未及时关闭"))
-    # A feed value of one or two digits is suspicious when the program is
-    # otherwise dominated by feeds in the thousands.  Keep this as a warning
-    # because some machines legitimately use a slower local feed.
-    positive_feeds = [item for item in feed_values if item[2] > 0]
-    high_feeds = [item for item in positive_feeds if item[2] >= 1000]
-    if len(positive_feeds) >= 3 and len(high_feeds) >= 2 and len(high_feeds) / len(positive_feeds) >= 0.6:
-        for line_no, raw_value, value, raw_line in positive_feeds:
-            if value < 100:
-                issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 为个位/两位数，明显低于本程序主要 F 值范围，请确认"))
-    # F 上离群：主体 F 在千位范围，突然出现上万且远高于主体的值。
-    if positive_feeds:
-        sorted_feeds = sorted(item[2] for item in positive_feeds)
-        median_feed = sorted_feeds[len(sorted_feeds) // 2]
-        if 1000 <= median_feed <= 10000:
-            for line_no, raw_value, value, raw_line in positive_feeds:
-                if value >= 10000 and value >= median_feed * 3:
-                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 远高于本程序主要 F 值范围（约 {median_feed:g}），请确认"))
+    # F 离群：按工艺阶段（移动/进刀/切削）分组检测。NC 程序的 F 档位与阶段强相关
+    # （切削 900、抬刀 5000、进刀 300 等），把全部 F 混在一起统计会互相污染。
+    # 组内出现 ≥2 次的值构成“常见档位”，只检查组内出现 1 次的孤立值是否低于
+    # 最低常见档位 × low_ratio 或高于最高常见档位 × high_ratio；
+    # 组内无常见档位（F 值连续变化）时回退 IQR 极端值标准（k=3）。
+    stage_feeds: Dict[str, List[Tuple[int, str, float, str]]] = {"move": [], "plunge": [], "cut": []}
+    current_z: Optional[float] = None
+    for i, raw_line in enumerate(lines[start:], start=start + 1):
+        code = code_part(raw_line)
+        z_value = None
+        has_xy = False
+        for m in ADDR_RE.finditer(code):
+            key = m.group(1).upper()
+            if key == "Z":
+                try:
+                    z_value = float(m.group(2))
+                except ValueError:
+                    pass
+            elif key in "XY":
+                has_xy = True
+        if z_value is not None:
+            current_z = z_value
+        if G00_RE.search(code) or (current_z is not None and current_z >= RETRACT_Z_THRESHOLD):
+            stage = "move"
+        elif z_value is not None and not has_xy:
+            stage = "plunge"
+        else:
+            stage = "cut"
+        for m in ADDR_RE.finditer(code):
+            if m.group(1).upper() != "F":
+                continue
+            try:
+                value = float(m.group(2))
+            except ValueError:
+                continue
+            if value > 0:
+                stage_feeds[stage].append((i, m.group(2), value, raw_line))
+
+    stage_labels = {"move": "移动/退刀", "plunge": "进刀", "cut": "切削"}
+    for stage, items in stage_feeds.items():
+        if len(items) < 3:
+            continue
+        counts = Counter(item[2] for item in items)
+        frequent = sorted(value for value, count in counts.items() if count >= 2)
+        if frequent:
+            median_feed = frequent[len(frequent) // 2]
+            low_bound = frequent[0] * config.feed_outlier_low_ratio
+            high_bound = frequent[-1] * config.feed_outlier_high_ratio
+            for line_no, raw_value, value, raw_line in items:
+                if counts[value] > 1:
+                    continue
+                if value < low_bound:
+                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 明显低于本程序{stage_labels[stage]}进给档位范围（约 {median_feed:g}），请确认"))
+                elif value > high_bound:
+                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 远高于本程序{stage_labels[stage]}进给档位范围（约 {median_feed:g}），请确认"))
+        else:
+            sorted_feeds = sorted(item[2] for item in items)
+            median_feed = sorted_feeds[len(sorted_feeds) // 2]
+            if median_feed <= 0:
+                continue
+            q1 = _quantile(sorted_feeds, 0.25)
+            q3 = _quantile(sorted_feeds, 0.75)
+            iqr = q3 - q1
+            if iqr > 0:
+                low_bound = max(q1 - config.feed_outlier_iqr_factor * iqr, q1 * config.feed_outlier_low_ratio)
+                high_bound = q3 + config.feed_outlier_iqr_factor * iqr
+            else:
+                low_bound = median_feed * config.feed_outlier_low_ratio
+                high_bound = median_feed * config.feed_outlier_high_ratio
+            for line_no, raw_value, value, raw_line in items:
+                if value < low_bound:
+                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 明显低于本程序{stage_labels[stage]}进给范围（约 {median_feed:g}），请确认"))
+                elif value > high_bound:
+                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 远高于本程序{stage_labels[stage]}进给范围（约 {median_feed:g}），请确认"))
     distinct_spindle: Dict[float, Tuple[int, str, str]] = {}
-    for line_no, raw_value, value, raw_line in spindle_values:
-        distinct_spindle.setdefault(value, (line_no, raw_value, raw_line))
-    if len(distinct_spindle) > 1:
-        values = ", ".join(raw for _line, raw, _text in distinct_spindle.values())
-        first = next(iter(distinct_spindle.values()))
-        issues.append(Issue(filename, first[0], first[2], "multiple-spindle-speeds", "warning", f"程序包含多个不同 S 值（{values}），请确认转速切换是否符合工艺要求"))
+    if config.multiple_spindle_warn:
+        for line_no, raw_value, value, raw_line in spindle_values:
+            distinct_spindle.setdefault(value, (line_no, raw_value, raw_line))
+        if len(distinct_spindle) > 1:
+            values = ", ".join(raw for _line, raw, _text in distinct_spindle.values())
+            first = next(iter(distinct_spindle.values()))
+            issues.append(Issue(filename, first[0], first[2], "multiple-spindle-speeds", "warning", f"程序包含多个不同 S 值（{values}），请确认转速切换是否符合工艺要求"))
     return issues
 
 

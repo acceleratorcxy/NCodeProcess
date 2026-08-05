@@ -63,6 +63,19 @@ def parse_output_extension(raw: str) -> str:
         raise ValueError(f"输出扩展名格式无效：{value or '空'}（应为 .MPF 形式）")
     return value
 
+
+def parse_positive_default(raw: str, default: float) -> float:
+    """解析启发式阈值输入：留空、非法或非正数时回退默认值。"""
+    value = (raw or "").strip()
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
 # 鼠标悬停在单元格上多久后弹出内容提示（毫秒）。
 CELL_TOOLTIP_DELAY_MS = 1500
 
@@ -671,6 +684,12 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var = tk.BooleanVar(value=True)
         self.aux_m08_before_cut_var = tk.BooleanVar(value=True)
         self.aux_m09_before_end_var = tk.BooleanVar(value=True)
+        # 启发式校验阈值（WP-10，仅本次运行生效）：F 离群按工艺阶段分组
+        # （移动/进刀/切削）检测常见档位，无常见档位时回退 IQR 极端值标准。
+        self.feed_outlier_iqr_var = tk.StringVar(value="3")
+        self.feed_outlier_low_ratio_var = tk.StringVar(value="0.1")
+        self.feed_outlier_high_ratio_var = tk.StringVar(value="3")
+        self.multiple_spindle_var = tk.BooleanVar(value=True)
 
         options = ttk.Frame(info)
         options.grid(row=1, column=0, sticky="ew", padx=4)
@@ -1111,6 +1130,10 @@ class App(ttk.Frame):
             "aux_m05_before_end": self.aux_m05_before_end_var.get(),
             "aux_m08_before_cut": self.aux_m08_before_cut_var.get(),
             "aux_m09_before_end": self.aux_m09_before_end_var.get(),
+            "feed_outlier_iqr": self.feed_outlier_iqr_var.get(),
+            "feed_outlier_low_ratio": self.feed_outlier_low_ratio_var.get(),
+            "feed_outlier_high_ratio": self.feed_outlier_high_ratio_var.get(),
+            "multiple_spindle": self.multiple_spindle_var.get(),
         }
         win = tk.Toplevel(self.master)
         win.title("程序设置")
@@ -1156,19 +1179,21 @@ class App(ttk.Frame):
         ttk.Label(basic, text="如 .MPF 或 .nc").grid(row=6, column=2, sticky="w", padx=(6, 0))
         ttk.Checkbutton(basic, text="处理前询问备份（关闭则不询问也不备份）", variable=self.ask_backup_var).grid(row=7, column=1, sticky="w", pady=3)
 
-        # ── 校验规则：G00 / 必填字段 / M03 / S/F / 换行 / 辅助顺序 ──
-        ttk.Checkbutton(rules, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 0))
-        ttk.Checkbutton(rules, text="要求刀具调用包含 M06", variable=self.require_m06_var).grid(row=1, column=0, columnspan=4, sticky="w")
-        ttk.Checkbutton(rules, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 4))
+        # ── 校验规则：结束标记 / G00 / 必填字段 / M03 / S·F / 换行 / 启发式阈值 / 辅助顺序 ──
+        check_frame = ttk.Frame(rules)
+        check_frame.grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Checkbutton(check_frame, text="要求程序结束标记（%/M30/M02）", variable=self.require_end_marker_var).pack(side="left")
+        ttk.Checkbutton(check_frame, text="要求刀具调用包含 M06", variable=self.require_m06_var).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(check_frame, text="要求切削前有 S 转速", variable=self.require_spindle_speed_var).pack(side="left", padx=(16, 0))
 
         g00_combo = ttk.Combobox(rules, textvariable=self.g00_level, state="readonly", width=10,
                                  values=("error", "warning", "allow"))
-        labeled(rules, 3, "G00 级别", g00_combo)
-        ttk.Label(rules, text="error 报错 / warning 提示 / allow 放行").grid(row=3, column=2, sticky="w", padx=(6, 0))
+        labeled(rules, 1, "G00 级别", g00_combo)
+        ttk.Label(rules, text="error 报错 / warning 提示 / allow 放行").grid(row=1, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Label(rules, text="必填 MSG 字段").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=(4, 3))
+        ttk.Label(rules, text="必填 MSG 字段").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(4, 3))
         required_frame = ttk.Frame(rules)
-        required_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=(4, 3))
+        required_frame.grid(row=2, column=1, columnspan=3, sticky="w", pady=(4, 3))
         for text, var in (
             ("编制", self.required_bianzhi_var),
             ("审核", self.required_shenhe_var),
@@ -1176,33 +1201,45 @@ class App(ttk.Frame):
             ("版次", self.required_part_var),
         ):
             ttk.Checkbutton(required_frame, text=text, variable=var).pack(side="left", padx=8)
-        ttk.Label(rules, text="程序/机床/控制系统固定必填").grid(row=5, column=1, columnspan=3, sticky="w", pady=(0, 3))
 
         m03_combo = ttk.Combobox(rules, textvariable=self.m03_position_var, state="readonly", width=14,
                                  values=("after-s", "standalone"))
-        labeled(rules, 6, "M03 补写位置", m03_combo)
-        ttk.Label(rules, text="紧贴 S 数值后 / 独立行").grid(row=6, column=2, sticky="w", padx=(6, 0))
+        labeled(rules, 3, "M03 补写位置", m03_combo)
+        ttk.Label(rules, text="紧贴 S 数值后 / 独立行").grid(row=3, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Label(rules, text="F 上下限").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Label(rules, text="F 上下限").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
         feed_frame = ttk.Frame(rules)
-        feed_frame.grid(row=7, column=1, columnspan=3, sticky="w", pady=(6, 3))
+        feed_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=(6, 3))
         ttk.Entry(feed_frame, textvariable=self.feed_min_var, width=8).pack(side="left")
         ttk.Label(feed_frame, text="~").pack(side="left", padx=4)
         ttk.Entry(feed_frame, textvariable=self.feed_max_var, width=8).pack(side="left")
-        ttk.Label(rules, text="S 上下限").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Label(rules, text="S 上下限").grid(row=5, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
         spindle_frame = ttk.Frame(rules)
-        spindle_frame.grid(row=8, column=1, columnspan=3, sticky="w", pady=(6, 3))
+        spindle_frame.grid(row=5, column=1, columnspan=3, sticky="w", pady=(6, 3))
         ttk.Entry(spindle_frame, textvariable=self.spindle_min_var, width=8).pack(side="left")
         ttk.Label(spindle_frame, text="~").pack(side="left", padx=4)
         ttk.Entry(spindle_frame, textvariable=self.spindle_max_var, width=8).pack(side="left")
-        ttk.Label(rules, text="留空 = 不检查").grid(row=9, column=1, columnspan=3, sticky="w", pady=(0, 3))
+        ttk.Label(rules, text="留空 = 不检查").grid(row=6, column=1, columnspan=3, sticky="w", pady=(0, 3))
 
         newline_combo = ttk.Combobox(rules, textvariable=self.newline_var, state="readonly", width=14,
                                      values=("auto", "crlf", "lf"))
-        labeled(rules, 10, "换行策略", newline_combo)
-        ttk.Label(rules, text="auto 跟随源文件；crlf/lf 强制").grid(row=10, column=2, sticky="w", padx=(6, 0))
+        labeled(rules, 7, "换行策略", newline_combo)
+        ttk.Label(rules, text="auto 跟随源文件；crlf/lf 强制").grid(row=7, column=2, sticky="w", padx=(6, 0))
 
-        ttk.Label(rules, text="辅助指令顺序").grid(row=11, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
+        ttk.Label(rules, text="F 离群校验").grid(row=8, column=0, sticky="w", padx=(0, 6), pady=(4, 2))
+        feed_outlier_frame = ttk.Frame(rules)
+        feed_outlier_frame.grid(row=8, column=1, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Label(feed_outlier_frame, text="IQR×").pack(side="left")
+        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_iqr_var, width=5).pack(side="left", padx=2)
+        ttk.Label(feed_outlier_frame, text="低值×").pack(side="left", padx=(10, 0))
+        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_low_ratio_var, width=5).pack(side="left", padx=2)
+        ttk.Label(feed_outlier_frame, text="高值×").pack(side="left", padx=(10, 0))
+        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_high_ratio_var, width=5).pack(side="left", padx=2)
+
+        ttk.Checkbutton(rules, text="多 S 值警告（程序包含多个不同 S 值时提示）", variable=self.multiple_spindle_var).grid(
+            row=9, column=0, columnspan=4, sticky="w", pady=(4, 2))
+
+        ttk.Label(rules, text="辅助指令顺序").grid(row=10, column=0, sticky="w", padx=(0, 6), pady=(6, 3))
         aux_rows = (
             (("M03 先于切削", self.aux_m03_before_motion_var), ("M05 先于结束", self.aux_m05_before_end_var)),
             (("M08 先于切削", self.aux_m08_before_cut_var), ("M09 先于结束", self.aux_m09_before_end_var)),
@@ -1210,7 +1247,7 @@ class App(ttk.Frame):
         for row_offset, row_items in enumerate(aux_rows):
             for col, (text, var) in enumerate(row_items):
                 ttk.Checkbutton(rules, text=text, variable=var).grid(
-                    row=12 + row_offset, column=1 + col, sticky="w", pady=(6 if row_offset == 0 else 0, 3))
+                    row=11 + row_offset, column=1 + col, sticky="w", pady=(6 if row_offset == 0 else 0, 3))
 
         actions = ttk.Frame(win, padding=(10, 0, 10, 10))
         actions.pack(fill="x")
@@ -1301,6 +1338,10 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var.set(True)
         self.aux_m08_before_cut_var.set(True)
         self.aux_m09_before_end_var.set(True)
+        self.feed_outlier_iqr_var.set("3")
+        self.feed_outlier_low_ratio_var.set("0.1")
+        self.feed_outlier_high_ratio_var.set("3")
+        self.multiple_spindle_var.set(True)
         # 统一恢复/清除：编制与审核（主窗口表单）一并回到默认（空）
         self.info_vars["bianzhi"].set("")
         self.info_vars["shenhe"].set("")
@@ -1361,6 +1402,10 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var.set(snapshot.get("aux_m05_before_end", self.aux_m05_before_end_var.get()))
         self.aux_m08_before_cut_var.set(snapshot.get("aux_m08_before_cut", self.aux_m08_before_cut_var.get()))
         self.aux_m09_before_end_var.set(snapshot.get("aux_m09_before_end", self.aux_m09_before_end_var.get()))
+        self.feed_outlier_iqr_var.set(snapshot.get("feed_outlier_iqr", self.feed_outlier_iqr_var.get()))
+        self.feed_outlier_low_ratio_var.set(snapshot.get("feed_outlier_low_ratio", self.feed_outlier_low_ratio_var.get()))
+        self.feed_outlier_high_ratio_var.set(snapshot.get("feed_outlier_high_ratio", self.feed_outlier_high_ratio_var.get()))
+        self.multiple_spindle_var.set(snapshot.get("multiple_spindle", self.multiple_spindle_var.get()))
         self.settings_window.destroy()
         self.settings_window = None
 
@@ -1495,6 +1540,10 @@ class App(ttk.Frame):
             spindle_max=spindle_max,
             newline=self.newline_var.get(),
             aux_checks={name for name, enabled in aux_flags.items() if enabled},
+            feed_outlier_iqr_factor=parse_positive_default(self.feed_outlier_iqr_var.get(), 3.0),
+            feed_outlier_low_ratio=parse_positive_default(self.feed_outlier_low_ratio_var.get(), 0.1),
+            feed_outlier_high_ratio=parse_positive_default(self.feed_outlier_high_ratio_var.get(), 3.0),
+            multiple_spindle_warn=self.multiple_spindle_var.get(),
             ask_backup=self.ask_backup_var.get(),
         )
 
