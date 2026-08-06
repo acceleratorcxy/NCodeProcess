@@ -130,6 +130,14 @@
 | `feed-outlier` | warning | F 离群（按工艺阶段分组检测） |
 | `multiple-spindle-speeds` | warning | 程序含多个不同 S 值 |
 | `mutually-exclusive-m` | error | 同块互斥 M 指令（M03+M05、M03+M04、M08+M09；WP-A1 已接入 M03+M04） |
+| `apt-spindle-direction` | error | APT 规划主轴方向与正文不一致（CLW 应 M03 / CCLW 应 M04；双方向时给保留/删除建议，WP-A4） |
+| `apt-spindle-mismatch` | warning | MPF 的 S 转速均不在 APT 规划转速集合 ±1% 内（加工参数不符，WP-A4） |
+| `apt-feed-mismatch` | warning | MPF 存在 F 值不在 APT 规划进给集合 ±10% 内（加工参数不符，WP-A4） |
+| `apt-coolant-missing` | info | APT 规划 COOLNT/ON 无 M08，或 OFF 有 M08 无 M09（提示，WP-A4） |
+| `apt-tool-load-mismatch` | info | APT 规划装夹刀具未全部在正文调用（提示，仅告知、不阻止输出，WP-A4） |
+| `apt-tool-param-mismatch` | warning | MPF 头部 Tn 几何（直径 ±2%、圆角 ±5%）与 APT TOOLNO/CUTTER 不一致（WP-A4） |
+| `apt-program-name-conflict` | warning | MPF 的 PROGRAM 字段与 APT `$$` 程序名不一致（WP-A4） |
+| `apt-date-stale` | info | MPF 头部 DATE 早于 APT 生成时间（提示，WP-A4） |
 
 ## 7. 参数统计对象字段清单（`stats`）
 

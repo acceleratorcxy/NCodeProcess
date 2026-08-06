@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _decode, _extract_apt_meta_cached, _extract_apt_toolpath_cached, add_initial_tool_change, add_m03, align_lines, apply_header, build_plan, calculate_stats, code_part, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _decode, _extract_apt_meta_cached, _extract_apt_toolpath_cached, add_initial_tool_change, add_m03, align_lines, apply_header, build_plan, calculate_stats, code_part, crosscheck_apt, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
@@ -825,6 +825,87 @@ class CoreTests(unittest.TestCase):
         item = report.files[0]
         self.assertEqual(item["apt_meta"]["machine"], "3-axis Machine.1")
         self.assertEqual(item["toolpath_stats"]["goto_count"], 2)
+
+    def test_crosscheck_spindle_direction_error(self):
+        # WP-A4：APT CLW 规划 + 正文 M04 → 主轴方向 error。
+        meta = AptMeta(spindles=[("5000.0000", "RPM", "CLW")])
+        issues = crosscheck_apt('MSG("PROGRAM:P")\nN1S5000M04\nN2M30\n', meta, "P.MPF", self._cfg(auto_m03=False))
+        direction = [i for i in issues if i.kind == "apt-spindle-direction" and i.severity == "error"]
+        self.assertTrue(direction)
+        self.assertIn("M04", direction[0].text)
+
+    def test_crosscheck_dual_direction_suggests_keep(self):
+        # WP-A4：正文同时含 M03/M04 时按 APT 方向给出保留/删除建议。
+        meta = AptMeta(spindles=[("5000.0000", "RPM", "CLW")])
+        issues = crosscheck_apt('MSG("PROGRAM:P")\nN1S5000M03M04\nN2M30\n', meta, "P.MPF", self._cfg(auto_m03=False))
+        direction = [i for i in issues if i.kind == "apt-spindle-direction"]
+        self.assertTrue(direction)
+        self.assertIn("保留 M03", direction[0].suggestion)
+
+    def test_crosscheck_tolerances_and_missing(self):
+        # WP-A4：全部匹配不报 apt-*；S/F 越界、冷却缺失、装夹缺失报 warning。
+        meta = AptMeta(spindles=[("5000.0000", "RPM", "CLW")], feeds=[("3000.0000", "MMPM")],
+                       coolant=["ON"], tool_loads=[1, 2])
+        issues = crosscheck_apt(
+            'MSG("PROGRAM:P")\nN1T1M06\nN2T2M06\nN3S5000M03M08\nN4G1X10F3000\nN5M30\n',
+            meta, "P.MPF", self._cfg(auto_m03=False))
+        self.assertFalse(any(i.kind.startswith("apt-") for i in issues))
+        issues = crosscheck_apt('MSG("PROGRAM:P")\nN1S9000M03\nN2G1X10F9999\nN3M30\n',
+                                meta, "P.MPF", self._cfg(auto_m03=False))
+        kinds = {i.kind for i in issues}
+        self.assertTrue({"apt-spindle-mismatch", "apt-feed-mismatch", "apt-coolant-missing", "apt-tool-load-mismatch"} <= kinds)
+        feed = next(i for i in issues if i.kind == "apt-feed-mismatch")
+        self.assertIn("F9999", feed.text)
+        # 加工参数（S/F）不符为 warning，冷却/装夹等符合性不符为提示（info）。
+        self.assertEqual(next(i for i in issues if i.kind == "apt-spindle-mismatch").severity, "warning")
+        self.assertEqual(next(i for i in issues if i.kind == "apt-feed-mismatch").severity, "warning")
+        self.assertEqual(next(i for i in issues if i.kind == "apt-coolant-missing").severity, "info")
+        self.assertEqual(next(i for i in issues if i.kind == "apt-tool-load-mismatch").severity, "info")
+
+    def test_crosscheck_tool_param_program_name_and_date(self):
+        # WP-A4：刀具几何参数、程序名冲突、DATE 过期均报 warning。
+        meta = AptMeta(program_name="P", generated_at="2026年7月31日 9:30:05")
+        issues = crosscheck_apt(
+            'MSG("PROGRAM:Q")\nMSG("DATE:Jul 30 09:00:00 2026")\nMSG("T1:DIA=10.000,TOOL_CONER=1.000")\nN1T1M06\nN2M30\n',
+            meta, "P.MPF", self._cfg(auto_m03=False),
+            apt_tools=[ToolInfo(1, "12.000", "1.000")],
+        )
+        kinds = {i.kind for i in issues}
+        self.assertTrue({"apt-program-name-conflict", "apt-date-stale", "apt-tool-param-mismatch"} <= kinds)
+        program = next(i for i in issues if i.kind == "apt-program-name-conflict")
+        self.assertIn("PROGRAM", program.text)
+        date = next(i for i in issues if i.kind == "apt-date-stale")
+        self.assertIn("DATE", date.text)
+        tool = next(i for i in issues if i.kind == "apt-tool-param-mismatch")
+        self.assertIn("T1", tool.text)
+        self.assertEqual(tool.severity, "warning")
+        self.assertEqual(program.severity, "warning")
+        self.assertEqual(date.severity, "info")
+
+    def test_crosscheck_missing_side_shows_apt_records(self):
+        # WP-A4：APT 有而 MPF 没有时，原始文本显示 APT 规划记录，建议列写 APT 做法。
+        meta = AptMeta(spindles=[("5000.0000", "RPM", "CLW")], feeds=[("3000.0000", "MMPM")],
+                       coolant=["ON"], tool_loads=[1])
+        issues = crosscheck_apt('MSG("PROGRAM:P")\nN1G1X10\nN2M30\n', meta, "P.MPF", self._cfg(auto_m03=False))
+        by_kind = {i.kind: i for i in issues}
+        self.assertIn("SPINDL", by_kind["apt-spindle-mismatch"].text)
+        self.assertIn("APT 规划", by_kind["apt-spindle-mismatch"].suggestion)
+        self.assertIn("FEDRAT", by_kind["apt-feed-mismatch"].text)
+        self.assertIn("COOLNT", by_kind["apt-coolant-missing"].text)
+        self.assertIn("LOADTL", by_kind["apt-tool-load-mismatch"].text)
+
+    def test_date_prefers_apt_generated_time(self):
+        # WP-A4：有 APT 时头部 DATE 采用 APT 生成时间（即使程序发生变更也保持）。
+        root = self.make_dir()
+        (root / "P.MPF").write_text('%\nN1S5000M03\nN2M30\n%\n', encoding="utf-8")
+        (root / "x_P_I.aptsource").write_text(
+            "$$     Generated on 2026年7月31日 9:30:05\nSPINDL/ 5000.0000,RPM,CLW\nGOTO / 0,0,10\n",
+            encoding="utf-8",
+        )
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        mpf = self._mpf(plan)
+        self.assertIn('MSG("DATE:Jul 31 09:30:05 2026")', mpf.output_text or "")
 
     def test_apt_meta_cached_by_mtime(self):
         # WP-A1：元数据按 (mtime, size, encoding) 缓存，文件变化后重新解析。

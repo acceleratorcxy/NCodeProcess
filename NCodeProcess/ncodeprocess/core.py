@@ -1853,6 +1853,14 @@ def reprocess_file(f: FilePlan, info: ProgramInfo, config: Config, *, tools: Seq
     if f.kind != "mpf" or not f.program or f.original_text is None:
         return
     effective = program_defaults(f.original_text, info)
+    # WP-A4：有 APT 时 DATE 优先采用 APT 生成时间。
+    apt_date = ""
+    if f.apt_meta and f.apt_meta.generated_at:
+        apt_time = parse_apt_generated(f.apt_meta.generated_at)
+        if apt_time is not None:
+            apt_date = format_nc_date(apt_time)
+    if apt_date:
+        effective.date = apt_date
     if tools:
         effective.tools = list(tools)
     elif f.parsed_tools:
@@ -1868,13 +1876,16 @@ def reprocess_file(f: FilePlan, info: ProgramInfo, config: Config, *, tools: Seq
     f.output_text, m03_changed, m03_note = add_m03(f.output_text, config)
     if m03_changed:
         f.changes.append(m03_note)
-    # WP-B2：程序发生实际变更时 DATE 自动更新为变更发生时间。
+    # WP-B2/A4：程序发生实际变更时 DATE 更新——有 APT 用 APT 生成时间，无 APT 用变更发生时间。
     if f.changes:
-        f.output_text, date_changed = update_header_date(f.output_text, format_nc_date())
+        f.output_text, date_changed = update_header_date(f.output_text, apt_date or format_nc_date())
         if date_changed:
             f.changes.append("更新 DATE")
     f.stats, validation_issues = analyze_program(f.output_text, f.source, f.program, effective, config)
     f.issues = header_issues + validation_issues
+    # WP-A4：APT 规划 ↔ MPF 执行交叉校验。
+    if f.apt_meta is not None:
+        f.issues.extend(crosscheck_apt(f.output_text, f.apt_meta, f.source, config, apt_tools=effective.tools))
 
 
 def _parallel_apply(items, function, workers: int):
@@ -1948,6 +1959,21 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
         if f.kind == "mpf" and f.program and f.original_text is not None:
             try:
                 effective_info = program_defaults(f.original_text, info)
+                # WP-A2/A4：复制最新 APT 的元数据/轨迹/源路径到 MPF 计划（线程内只读引用）；
+                # 有 APT 时 DATE 优先采用 APT 生成时间（无 APT 才按变更时刻自动维护）。
+                apt_plan = latest_apt.get(f.program)
+                if apt_plan:
+                    f.apt_meta = apt_plan[1].apt_meta
+                    f.apt_toolpath = apt_plan[1].apt_toolpath
+                    f.apt_source_path = str(directory / apt_plan[1].source)
+                    f.apt_encoding = apt_plan[1].encoding or ""
+                apt_date = ""
+                if f.apt_meta and f.apt_meta.generated_at:
+                    apt_time = parse_apt_generated(f.apt_meta.generated_at)
+                    if apt_time is not None:
+                        apt_date = format_nc_date(apt_time)
+                if apt_date:
+                    effective_info.date = apt_date
                 replace_tools = f.program in tool_overrides
                 if f.program in auto_tools and auto_tools[f.program][1]:
                     # APT describes the actual generated cutter geometry and
@@ -1969,9 +1995,9 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                 new, m03_changed, m03_note = add_m03(new, config)
                 if m03_changed:
                     changes.append(m03_note)
-                # WP-B2：程序发生实际变更时 DATE 自动更新为变更发生时间。
+                # WP-B2/A4：程序发生实际变更时 DATE 更新——有 APT 用 APT 生成时间，无 APT 用变更发生时间。
                 if changes:
-                    new, date_changed = update_header_date(new, format_nc_date())
+                    new, date_changed = update_header_date(new, apt_date or format_nc_date())
                     if date_changed:
                         changes.append("更新 DATE")
                 f.output_text, f.changes = new, changes
@@ -1979,15 +2005,14 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                 f.target = str(directory / (f.program + config.program_output_extension))
                 # 缓存本次生效的刀具信息，供 reprocess_file/应用所选回退，避免刷掉刀具。
                 f.parsed_tools = list(effective_info.tools)
-                # WP-A2：复制最新 APT 的元数据/轨迹/源路径到 MPF 计划（线程内只读引用）。
-                apt_plan = latest_apt.get(f.program)
-                if apt_plan:
-                    f.apt_meta = apt_plan[1].apt_meta
-                    f.apt_toolpath = apt_plan[1].apt_toolpath
-                    f.apt_source_path = str(directory / apt_plan[1].source)
-                    f.apt_encoding = apt_plan[1].encoding or ""
                 f.issues.extend(header_issues)
                 f.issues.extend(validation_issues)
+                # WP-A4：APT 规划 ↔ MPF 执行交叉校验。
+                if f.apt_meta is not None:
+                    f.issues.extend(crosscheck_apt(
+                        new, f.apt_meta, f.source, config,
+                        apt_tools=auto_tools[f.program][1] if f.program in auto_tools else (),
+                    ))
                 if Path(f.source).name != Path(f.target).name:
                     f.changes.append(f"重命名为 {Path(f.target).name}")
                 # 识别过程数据入运行日志：刀具识别结果。
@@ -2161,6 +2186,194 @@ def _plan_process_summary(f: FilePlan) -> str:
     if f.stats is not None:
         parts.append(f"统计 F={f.stats.counts.get('F', 0)} 次、S={f.stats.counts.get('S', 0)} 次")
     return "；".join(parts)
+
+
+_MONTHS_EN = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def parse_nc_date(text: str) -> Optional[datetime]:
+    """解析 NC 头部 DATE（英文月份格式 MMM dd HH:mm:ss yyyy）为 datetime；失败返回 None。"""
+    match = re.match(r"^([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})\s+(\d{4})$", text.strip())
+    if not match:
+        return None
+    month = match.group(1).capitalize()
+    if month not in _MONTHS_EN:
+        return None
+    try:
+        return datetime(int(match.group(6)), _MONTHS_EN.index(month) + 1, int(match.group(2)),
+                        int(match.group(3)), int(match.group(4)), int(match.group(5)))
+    except ValueError:
+        return None
+
+
+def parse_apt_generated(text: str) -> Optional[datetime]:
+    """解析 APT $$ Generated on 中文日期（2026年7月31日 9:30:05）为 datetime；失败返回 None。"""
+    match = re.match(r"^(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2}):(\d{2})", text.strip())
+    if not match:
+        return None
+    try:
+        return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)),
+                        int(match.group(4)), int(match.group(5)), int(match.group(6)))
+    except ValueError:
+        return None
+
+
+def crosscheck_apt(mpf_text: str, meta: AptMeta, filename: str, config: Config,
+                   apt_tools: Sequence[ToolInfo] = ()) -> List[Issue]:
+    """APT 规划信息与 MPF 执行指令交叉校验。
+
+    主轴方向不一致为 error（CLW→M03、CCLW→M04，含 M03+M04 双方向取舍建议）；
+    S/F 数值容差、冷却液、刀具装夹/几何参数、程序名冲突为 warning。
+    APT 为规划值，后处理可能取整/倍率，故一律容差。
+    """
+    issues: List[Issue] = []
+    lines = mpf_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    start = _header_end(lines)
+    s_values = []
+    f_values = []
+    has_m03 = has_m04 = has_m08 = has_m09 = False
+    t_calls = set()
+    s_lines = {}
+    f_lines = {}
+    m03_line = m04_line = m08_line = m09_line = ""
+    t_lines = []
+    first_code_line = ""
+    for i, raw_line in enumerate(lines[start:], start=start + 1):
+        code = code_part(raw_line)
+        if code.strip() and not first_code_line:
+            first_code_line = raw_line
+        if M03_RE.search(code):
+            has_m03 = True
+            if not m03_line:
+                m03_line = raw_line
+        if M04_RE.search(code):
+            has_m04 = True
+            if not m04_line:
+                m04_line = raw_line
+        if M08_RE.search(code):
+            has_m08 = True
+            if not m08_line:
+                m08_line = raw_line
+        if M09_RE.search(code):
+            has_m09 = True
+            if not m09_line:
+                m09_line = raw_line
+        for match in TOOL_CALL_RE.finditer(code):
+            number = int(match.group(1))
+            t_calls.add(number)
+            t_lines.append((number, raw_line))
+        for parameter in ADDR_RE.finditer(code):
+            key = parameter.group(1).upper()
+            if key == "S":
+                value = float(parameter.group(2))
+                s_values.append(value)
+                s_lines.setdefault(value, raw_line)
+            elif key == "F":
+                value = float(parameter.group(2))
+                f_values.append(value)
+                f_lines.setdefault(value, raw_line)
+
+    def first_t_call_line():
+        return t_lines[0][1] if t_lines else first_code_line
+
+    def tolerance(reference, ratio=0.01, minimum=1.0):
+        return max(reference * ratio, minimum)
+
+    spindle_records = ["SPINDL/ %s,%s,%s" % (speed, units, direction) for speed, units, direction in meta.spindles]
+    feed_records = ["FEDRAT/ %s,%s" % (value, units) for value, units in meta.feeds]
+    coolant_values = [value.upper() for value in meta.coolant]
+    load_records = ["LOADTL/%s" % number for number in meta.tool_loads]
+
+    if meta.spindles:
+        directions = {direction.upper() for _speed, _units, direction in meta.spindles}
+        # 主轴方向：原始文本显示 MPF 侧指令行，建议列写 APT 规划方向。
+        if "CLW" in directions and has_m04 and not has_m03:
+            issues.append(Issue(filename, start + 1, m04_line, "apt-spindle-direction", "error",
+                                "APT 规划主轴正转（CLW）应配 M03，正文使用 M04 反转，请核对旋转方向"))
+        if "CCLW" in directions and has_m03 and not has_m04:
+            issues.append(Issue(filename, start + 1, m03_line, "apt-spindle-direction", "error",
+                                "APT 规划主轴反转（CCLW）应配 M04，正文使用 M03 正转，请核对旋转方向"))
+        if has_m03 and has_m04 and directions:
+            direction = next(iter(directions))
+            keep, drop = ("M03", "M04") if direction == "CLW" else ("M04", "M03")
+            issues.append(Issue(filename, start + 1, m03_line or m04_line, "apt-spindle-direction", "error",
+                                "正文同时含 M03 与 M04；APT 规划方向为 %s，建议保留 %s 并删除 %s" % (direction, keep, drop)))
+        # 转速：MPF 有 S 且与 APT 不符 → 显示 MPF 行；APT 有转速而 MPF 无 S → 显示 APT 记录。
+        # 符合性提示（info）：除加工参数不符外，其余均不升级为 warning。
+        apt_speeds = [float(speed) for speed, _units, _direction in meta.spindles]
+        if s_values:
+            mismatch_s = next((value for value in s_values if not any(abs(value - speed) <= tolerance(speed) for speed in apt_speeds)), None)
+            if mismatch_s is not None:
+                issues.append(Issue(filename, start + 1, s_lines.get(mismatch_s, ""), "apt-spindle-mismatch", "warning",
+                                    "APT 规划转速：%s；正文 S 值不在规划集合 ±1%% 内，请核对" % "、".join(spindle_records)))
+        else:
+            issues.append(Issue(filename, start + 1, "、".join(spindle_records), "apt-spindle-mismatch", "warning",
+                                "APT 规划转速，但程序正文未找到 S 指令，请核对"))
+
+    if meta.feeds:
+        apt_feeds = [float(feed) for feed, _units in meta.feeds]
+        if f_values:
+            mismatch_f = next((value for value in f_values if not any(abs(value - feed) <= tolerance(feed, 0.10, 1.0) for feed in apt_feeds)), None)
+            if mismatch_f is not None:
+                issues.append(Issue(filename, start + 1, f_lines.get(mismatch_f, ""), "apt-feed-mismatch", "warning",
+                                    "APT 规划进给：%s；正文 F 值不在规划集合 ±10%% 内，请核对" % "、".join(feed_records)))
+        else:
+            issues.append(Issue(filename, start + 1, "、".join(feed_records), "apt-feed-mismatch", "warning",
+                                "APT 规划进给，但程序正文未找到 F 指令，请核对"))
+
+    # 冷却：APT 有 ON 而正文无 M08 → 显示 APT 记录；APT 有 OFF 且正文有 M08 无 M09 → 显示 MPF 行。
+    if "ON" in coolant_values and not has_m08:
+        issues.append(Issue(filename, start + 1, "COOLNT/ON", "apt-coolant-missing", "info",
+                            "APT 规划冷却液开启（COOLNT/ON）应配 M08，但程序正文未找到 M08，请核对"))
+    if "OFF" in coolant_values and has_m08 and not has_m09:
+        issues.append(Issue(filename, start + 1, m08_line, "apt-coolant-missing", "info",
+                            "APT 规划冷却液关闭（COOLNT/OFF）应配 M09，正文未找到 M09，请核对"))
+
+    # 装夹：APT 有 LOADTL 而正文未调用 → 显示 APT 记录；正文有调用但缺部分 → 显示 MPF 首条调用行。
+    if meta.tool_loads and not set(meta.tool_loads).issubset(t_calls):
+        missing = sorted(set(meta.tool_loads) - t_calls)
+        text = "、".join(load_records) if not t_calls else first_t_call_line()
+        issues.append(Issue(filename, start + 1, text, "apt-tool-load-mismatch", "info",
+                            "APT 规划装夹刀具 T%s 未在正文调用（提示，请确认换刀序列是否符合实际加工）" % "、".join(str(n) for n in missing)))
+
+    if apt_tools:
+        header_text = "\n".join(lines[:start])
+        mpf_tools = {tool.number: tool for tool in extract_tools(header_text)}
+        for apt_tool in apt_tools:
+            mpf_tool = mpf_tools.get(apt_tool.number)
+            if mpf_tool is None:
+                continue
+            for attr, ratio in (("dia", 0.02), ("tool_coner", 0.05)):
+                apt_value = getattr(apt_tool, attr).strip()
+                mpf_value = getattr(mpf_tool, attr).strip()
+                if not apt_value or not mpf_value:
+                    continue
+                try:
+                    if abs(float(mpf_value) - float(apt_value)) > max(float(apt_value) * ratio, 0.01):
+                        tool_line = next((line for line in lines[:start] if 'T%d:' % apt_tool.number in line.upper()), "")
+                        issues.append(Issue(filename, start + 1, tool_line, "apt-tool-param-mismatch", "warning",
+                                            "T%d 的 %s MPF=%.3f 与 APT 规划 %.3f 不一致，请核对" % (
+                                                apt_tool.number, attr, float(mpf_value), float(apt_value))))
+                        break
+                except ValueError:
+                    continue
+
+    if meta.program_name:
+        header_program = extract_header_fields(mpf_text).get("PROGRAM", "").strip()
+        if header_program and header_program != meta.program_name:
+            program_line = next((line for line in lines[:start] if 'MSG("PROGRAM' in line.upper()), "")
+            issues.append(Issue(filename, start + 1, program_line, "apt-program-name-conflict", "warning",
+                                "MPF 的 PROGRAM 字段为 %s，与 APT 程序名 %s 不一致，请核对" % (header_program, meta.program_name)))
+
+    if meta.generated_at:
+        apt_time = parse_apt_generated(meta.generated_at)
+        header_date = extract_header_fields(mpf_text).get("DATE", "").strip()
+        mpf_date = parse_nc_date(header_date) if header_date else None
+        if apt_time and mpf_date and mpf_date < apt_time:
+            date_line = next((line for line in lines[:start] if 'MSG("DATE' in line.upper()), "")
+            issues.append(Issue(filename, start + 1, date_line, "apt-date-stale", "info",
+                                "APT 生成时间为 %s，MPF 头部 DATE 早于该时间，文件可能在后处理之后被修改" % apt_time.strftime("%Y-%m-%d %H:%M:%S")))
+    return issues
 
 
 def _exec_duplicate(f, item, report, src_dir, dst_dir, config, scan, same_tree, successful_targets, confirm_cleanup):
