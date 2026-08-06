@@ -99,9 +99,9 @@ APT 是 CATIA 的规划数据源：它同时包含「后处理前」的加工意
 |---|---|---|---|---|---|
 | WP-A1 | `extract_apt_meta`：APT 头部与加工参数解析 | 高 | 无 | `core.py`、`tests/test_core.py` | 解析机床/后处理表/操作列表/变换矩阵/SPINDL/FEDRAT/COOLNT/LOADTL/`$$` 程序名；操作级进给/主轴分组；缓存生效 —— ✅ 已处理（2026-08-06） |
 | WP-A2 | `extract_apt_toolpath`：轨迹统计 | 中 | D-A2 | `core.py`、`tests/test_core.py`、`gui.py` | GOTO 点数/XYZ 行程/圆弧数/抬刀次数（自适应平面）；抬刀高度自定义 + 参数统计页展示 + 全部程序窗口轨迹列 —— ✅ 已处理（2026-08-06） |
-| WP-A3 | `build_plan` 挂载 + 报告字段 | 高 | D-A3 | `core.py`、`tests/test_core.py` | 最新 APT 的 meta/stats 进 `FilePlan` 与报告 `files[]`；`apt_summary` 全局摘要 |
+| WP-A3 | `build_plan` 挂载 + 报告字段 | 高 | D-A3 | `core.py`、`tests/test_core.py` | 最新 APT 的 meta/stats 进 `FilePlan` 与报告 `files[]`；`apt_summary` 全局摘要 —— ✅ 已处理（2026-08-06，含操作清单/刀具使用） |
 | WP-A4 | APT↔MPF 交叉校验 | 高 | D-A1 | `core.py`、`tests/test_core.py` | 方向不一致 error；S/F 容差、COOLNT、LOADTL、刀具参数、程序名冲突、DATE 过期 warning；`apt-*` kind 入报告 |
-| WP-A5 | 查看器「APT 信息」页签 | 中 | D-A3 | `viewer.py`、`tests/test_report_viewer.py` | 新页签展示 meta/toolpath；缺失回退；查看器 18 → 20+ 项 |
+| WP-A5 | 查看器「APT 信息」页签 | 中 | D-A3 | `viewer.py`、`tests/test_report_viewer.py` | 新页签展示 meta/toolpath；缺失回退；查看器 18 → 20+ 项 —— ✅ 已处理（2026-08-06，查看器 21 项全绿） |
 | WP-A9 | 校验意图化：操作级 F 档位 / 互斥 M 方向建议 / S·F 建议上下限 | 高 | D-A7 | `core.py`、`tests/test_core.py` | 操作级进给/主轴进报告；M03+M04 冲突给出 APT 方向建议；`apt_summary` 输出建议限值 |
 | WP-A10 | APT 生成时间参与头部 DATE 与重复裁决 | 中 | D-A8/D-A9 | `core.py`、`tests/test_core.py` | DATE 过期 warning；重复目标时提示 APT 生成时间与 mtime 排序不一致；不改变裁决 |
 | WP-A11 | 对比与总览增强：APT 规划差异面板 + 总览规划列 | 低 | D-A3 | `gui.py`、`viewer.py`、`tests/` | 程序对比窗口显示 APT 规划差异；全部程序信息增加操作数/Z 行程列 |

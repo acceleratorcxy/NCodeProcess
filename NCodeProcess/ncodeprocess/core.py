@@ -290,6 +290,8 @@ class ProcessReport:
     archive_stamp: str = ""
     elapsed_seconds: float = 0.0
     generator: str = ""
+    # WP-A3：报告级 APT 全局摘要（机床/转速/刀具/操作/刀具使用次数）。
+    apt_summary: dict = field(default_factory=dict)
 
     def to_dict(self):
         return asdict(self)
@@ -537,6 +539,7 @@ class AptMeta:
     program_name: str = ""                                              # $$ 头部程序名行（字母开头候选）
     operation_feeds: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)      # 操作名 → 进给档位
     operation_spindles: Dict[str, List[Tuple[str, str, str]]] = field(default_factory=dict)  # 操作名 → 主轴
+    tools: List[dict] = field(default_factory=list)                     # CUTTER/TOOLNO 刀具规格（number/dia/tool_coner/tool_type/tool_angle）
 
     def to_dict(self):
         return asdict(self)
@@ -568,8 +571,15 @@ def extract_apt_meta(path: Path, encoding: str = "auto") -> AptMeta:
     seen_loads = set()
     transform = []
     current_operation = ""
+    tool_lines = []
+    take_tool_continuation = False
     with path.open("rb") as stream:
         for raw_line in stream:
+            upper_line = raw_line.upper()
+            is_toolno = b"TOOLNO" in upper_line and b"/" in upper_line
+            if take_tool_continuation or (b"CUTTER" in upper_line and b"/" in upper_line) or is_toolno:
+                tool_lines.append(raw_line)
+            take_tool_continuation = is_toolno
             if len(raw_line) > 400:
                 raw_line = raw_line[:400]
             try:
@@ -649,6 +659,16 @@ def extract_apt_meta(path: Path, encoding: str = "auto") -> AptMeta:
                     meta.tool_loads.append(number)
     if transform:
         meta.transform = transform
+    if tool_lines:
+        try:
+            tool_text = _decode(b"".join(tool_lines), encoding)[0]
+        except (UnicodeDecodeError, ValueError):
+            tool_text = b"".join(tool_lines).decode("utf-8", errors="ignore")
+        meta.tools = [
+            {"number": tool.number, "dia": tool.dia, "tool_coner": tool.tool_coner,
+             "tool_type": tool.tool_type, "tool_angle": tool.tool_angle}
+            for tool in extract_tools(tool_text)
+        ]
     return meta
 
 
@@ -2325,6 +2345,22 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
             item.setdefault("runtime_error", str(e))
             emit_event("error", "error", f"处理文件失败：{f.source}", detail=f"{_plan_process_summary(f)}\n{traceback.format_exc()}")
         report.files.append(item)
+    # WP-A3：报告级 APT 全局摘要（按程序名去重——MPF 与其配对 APT 共享同一程序；
+    # 只存去重/计数聚合值）。
+    apt_programs = {}
+    for plan_file in scan.files:
+        if plan_file.apt_meta and plan_file.program:
+            apt_programs.setdefault(plan_file.program, plan_file.apt_meta)
+    report.apt_summary = {
+        "machines": sorted({meta.machine for meta in apt_programs.values() if meta.machine}),
+        "spindle_speeds": sorted({float(speed) for meta in apt_programs.values() for speed, _units, _direction in meta.spindles}),
+        "tool_loads": sorted({number for meta in apt_programs.values() for number in meta.tool_loads}),
+        "operations": sorted({name for meta in apt_programs.values() for name in meta.operations}),
+        "tool_usage": {
+            number: sum(1 for meta in apt_programs.values() if number in meta.tool_loads)
+            for number in sorted({n for meta in apt_programs.values() for n in meta.tool_loads})
+        },
+    }
     report.finished_at = datetime.now().isoformat(timespec="seconds")
     report.elapsed_seconds = _iso_seconds_delta(report.started_at, report.finished_at)
     emit_event("info", "process_finish",

@@ -687,6 +687,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(meta.spindles, [("5000.0000", "RPM", "CLW")])
         self.assertEqual(meta.feeds, [("3000.0000", "MMPM"), ("6000.0000", "MMPM")])
         self.assertEqual(meta.tool_loads, [1])
+        self.assertTrue(any(tool["number"] == 1 for tool in meta.tools))
+        self.assertTrue(any("20.000" in (tool.get("dia") or "") for tool in meta.tools))
 
     def test_apt_meta_parses_transform_matrix(self):
         # WP-A1：$$ 位姿矩阵行解析为浮点序列。
@@ -801,6 +803,28 @@ class CoreTests(unittest.TestCase):
         self.assertIsNotNone(mpf.apt_meta)
         self.assertEqual(mpf.apt_meta.machine, "3-axis Machine.1")
         self.assertTrue((mpf.apt_source_path or "").endswith("x_P_I.aptsource"))
+
+    def test_report_apt_summary_aggregation(self):
+        # WP-A3：报告顶层 apt_summary 聚合机床/转速/刀具/操作/使用次数，files[] 含 APT 字段。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S1000M03\nN2M30\n', encoding="utf-8")
+        (root / "x_P_I.aptsource").write_text(
+            "$$ MACHIN 3-axis Machine.1\n$$ OPERATION NAME : Roughing.3\n"
+            "SPINDL/ 1000.0000,RPM,CLW\nFEDRAT/ 500.0000,MMPM\nLOADTL/1\n"
+            "GOTO / 0.0, 0.0, 10.0\nGOTO / 10.0, 0.0, -1.0\n",
+            encoding="utf-8",
+        )
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg)
+        self.assertEqual(report.apt_summary["machines"], ["3-axis Machine.1"])
+        self.assertEqual(report.apt_summary["spindle_speeds"], [1000.0])
+        self.assertEqual(report.apt_summary["tool_loads"], [1])
+        self.assertIn("Roughing.3", report.apt_summary["operations"])
+        self.assertEqual(report.apt_summary["tool_usage"][1], 1)
+        item = report.files[0]
+        self.assertEqual(item["apt_meta"]["machine"], "3-axis Machine.1")
+        self.assertEqual(item["toolpath_stats"]["goto_count"], 2)
 
     def test_apt_meta_cached_by_mtime(self):
         # WP-A1：元数据按 (mtime, size, encoding) 缓存，文件变化后重新解析。

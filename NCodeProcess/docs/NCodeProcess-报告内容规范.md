@@ -54,6 +54,7 @@
 | `backup_dir` | 备份目录 | string | 否 | 启用备份时 `backup/YYYYMMDD_HHMMSS` 绝对路径；未备份为空 | `D:\NC\backup\20260805_093000` | 可恢复性审计 |
 | `runtime_log` | 运行日志 | array[object] | ✅ 已实现（WP-C6） | 本次运行事件序列，结构见第 9 节 | `[...]` | 运行过程审计 |
 | `log_path` | 完整日志路径 | string | ✅ 恒为空（WP-R4） | 不再生成磁盘日志文件，日志完整内嵌 `runtime_log`，本字段保留为空（兼容旧字段） | `""` | 兼容保留 |
+| `apt_summary` | APT 全局摘要 | object | 否（✅ 已实现，WP-A3） | 全部程序最新 APT 的聚合值：`machines`（去重机床）、`spindle_speeds`（去重转速）、`tool_loads`（去重装夹刀具）、`operations`（去重操作名）、`tool_usage`（刀具号 → 使用程序数）；无 APT 时为空对象 | `{"machines": ["3-axis Machine.1"], "tool_usage": {"1": 1}}` | 备刀清单/工艺核对 |
 | `files` | 文件明细 | array | 是 | 每文件一项，结构见第 5 节 | `[]` | 明细审计 |
 
 ## 4. 汇总计数字段口径说明
@@ -80,7 +81,7 @@
 | `runtime_error` | 运行错误 | string | 否 | 失败原因文本（如目标已存在、权限拒绝） | `目标已存在: AG6D311A0101.MPF` |
 | `target` | 目标路径 | string | 否（✅ 已实现，第 12 节） | 重命名/移动/归档后的目标路径（绝对路径；无目标时为空） | `D:\NC\AG6D311A0101.MPF` |
 | `program_name_source` | 程序名来源 | string | 否（✅ 已实现，第 12 节） | `MSG` / `PPRINT` / `文件名` / `手动确认` | `MSG` |
-| `apt_meta` | APT 元数据 | object | 否（✅ 已实现，WP-A1） | 最新 APTSOURCE 解析的规划元数据：machine/pp_table/catia_version/generated_at/operate/operations/transform/spindles/feeds/coolant/tool_loads/program_name/operation_feeds/operation_spindles；无 APT 时为空 | `{"machine": "3-axis Machine.1", ...}` |
+| `apt_meta` | APT 元数据 | object | 否（✅ 已实现，WP-A1） | 最新 APTSOURCE 解析的规划元数据：machine/pp_table/catia_version/generated_at/operate/operations/transform/spindles/feeds/coolant/tool_loads/program_name/operation_feeds/operation_spindles/tools（CUTTER/TOOLNO 刀具规格：number/dia/tool_coner/tool_type/tool_angle）；无 APT 时为空 | `{"machine": "3-axis Machine.1", "tools": [{"number": 1, "dia": "20.000", ...}]}` |
 | `toolpath_stats` | APT 轨迹统计 | object | 否（✅ 已实现，WP-A2） | 最新 APTSOURCE 的 GOTO 点数/XYZ 行程极值/圆弧数/抬刀次数/抬刀平面（抬刀次数可为手动修订值） | `{"goto_count": 24156, "min_x": -334.45, ...}` |
 
 ## 6. 问题条目字段清单（`issues[]`）
