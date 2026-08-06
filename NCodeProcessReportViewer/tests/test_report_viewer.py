@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from ncodeprocessreportviewer.viewer import (
+    chart_number,
     discover_reports,
     file_issue_counts,
     iter_stats_rows,
@@ -110,6 +111,13 @@ class ReportViewerTests(unittest.TestCase):
         self.assertIn("处理文件失败：A.MPF", combined)
         self.assertIn("动作=keep", combined)
         self.assertIn("Traceback (most recent call last)", combined)
+
+    def test_chart_number_fallback(self):
+        # WP-F3：柱状图数值容错——非数值/缺失回退 0，防止异常报告数据导致崩溃。
+        self.assertEqual(chart_number(5), 5.0)
+        self.assertEqual(chart_number("3"), 3.0)
+        self.assertEqual(chart_number("abc"), 0)
+        self.assertEqual(chart_number(None), 0)
 
 
 class LayoutMetricTests(unittest.TestCase):
@@ -279,6 +287,20 @@ class ReportViewerLayoutTests(unittest.TestCase):
             rows = app.file_table.get_children()
             self.assertEqual(len(rows), 1)
             self.assertIn("a.LOG", app.file_table.item(rows[0], "values")[0])
+        finally:
+            root.destroy()
+
+    def test_non_numeric_summary_values_do_not_crash_charts(self):
+        # WP-F3：汇总字段为非数值（异常/篡改报告）时，柱状图不崩溃。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            app.report_data = {
+                "success": "abc", "failed": "x", "skipped": None,
+                "moved": 1, "deleted": 2, "warnings": "?", "errors": "boom",
+                "files": [],
+            }
+            app.file_items = []
+            app._update_views()   # 不应抛异常
         finally:
             root.destroy()
 

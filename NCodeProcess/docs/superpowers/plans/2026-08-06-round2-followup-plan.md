@@ -23,8 +23,8 @@
 |---|---|---|---|---|---|
 | WP-F1 | 「全部应用」后台重处理，消除 UI 冻结 | 高 | 无 | `gui.py`、`tests/test_gui.py` | 25 MPF 应用不再阻塞界面；测试同步化后全绿 —— ✅ 已处理（2026-08-06，打包实测通过） |
 | WP-F2 | 运行日志埋点补齐与截断去重 | 中 | 无 | `core.py`、`tests/test_core.py` | `process_mpf`/APT 异常带 traceback 进 `runtime_log`；截断警告只出现一次 —— ✅ 已处理（2026-08-06，含识别数据入日志，249 项全绿） |
-| WP-F3 | 查看器图表数值容错（WP-13 部分） | 中 | 无 | `viewer.py`、`tests/test_report_viewer.py` | 非数值字段不崩溃，回退 0；10 项测试全绿 |
-| WP-F4 | `code_part` 分号语义文档化 + 锁定测试 | 低 | 无 | 需求文档、用户手册、`tests/test_core.py` | 需求/手册明确「分号后视为注释」；测试锁定 |
+| WP-F3 | 查看器图表数值容错（WP-13 部分） | 中 | 无 | `viewer.py`、`tests/test_report_viewer.py` | 非数值字段不崩溃，回退 0；10 项测试全绿 —— ✅ 已处理（2026-08-06，查看器 15 项全绿） |
+| WP-F4 | `code_part` 分号语义文档化 + 锁定测试 | 低 | 无 | 需求文档、用户手册、`tests/test_core.py` | 需求/手册明确「分号后视为注释」；测试锁定 —— ✅ 已处理（2026-08-06，含注释敏感点审计修复，主 253 项全绿） |
 | WP-F5 | 构建脚本缩进清理 + 测试文件拆分（WP-T6） | 低 | D3 | `build_portable.ps1`、`tests/test_gui_*.py` | 缩进规整；拆分后用例数不变全绿 |
 | WP-F6 | 版本提升与发版（WP-16） | 发版 | D1/D2 | `__init__.py`、`VERSION.txt`、`version_info.txt`、发布说明 | 版本三处一致，`test_release_assets` 动态断言通过，打包+SHA256SUMS |
 | WP-F7 | 查看器增强 WP-14/15（大报告加载、问题筛选/导出） | 低 | D2 | `viewer.py`、`tests/test_report_viewer.py` | 加载大报告有状态提示；问题表可筛选并可导出 CSV |
@@ -265,7 +265,7 @@ Expected: 全绿（含既有 RuntimeLog 用例）。
 
 **Files:** `ncodeprocessreportviewer/viewer.py`、`tests/test_report_viewer.py`
 
-- [ ] **Step 1: 新增失败测试**
+- [x] **Step 1: 新增失败测试**
 
 ```python
     def test_chart_number_fallback(self):
@@ -276,7 +276,7 @@ Expected: 全绿（含既有 RuntimeLog 用例）。
         self.assertEqual(chart_number(None), 0)
 ```
 
-- [ ] **Step 2: 新增 `chart_number` 并在 `_draw_bar_chart` 使用**
+- [x] **Step 2: 新增 `chart_number` 并在 `_draw_bar_chart` 使用**
 
 ```python
 def chart_number(value, default=0):
@@ -295,12 +295,12 @@ def chart_number(value, default=0):
             bar_height = chart_height * chart_number(value) / maximum
 ```
 
-- [ ] **Step 3: 冒烟测试（构建查看器 + 非数值报告不崩溃）**
+- [x] **Step 3: 冒烟测试（构建查看器 + 非数值报告不崩溃）**
 
 `test_report_viewer.py` 的 `ReportViewerLayoutTests` 新增：构造 `report_data={"success": "abc", "errors": "x", ...}` 后调用 `app._update_views()` 不抛异常（沿用 `_build_viewer` harness，选 `"all"`）。
 
-- [ ] **Step 4: 回归**：查看器用例数 10 → 12 项全绿（chart_number 单测 + 非数值报告冒烟；以 discover 输出为准）。
-- [ ] **Step 5: 提交门**：`fix(viewer): 柱状图对非数值字段容错`。
+- [x] **Step 4: 回归**：查看器用例数 10 → 12 项全绿（chart_number 单测 + 非数值报告冒烟；以 discover 输出为准）。
+- [x] **Step 5: 提交门**：`fix(viewer): 柱状图对非数值字段容错`。
 
 ---
 
@@ -308,7 +308,7 @@ def chart_number(value, default=0):
 
 **Files:** 需求文档、用户手册、`tests/test_core.py`
 
-- [ ] **Step 1: 新增锁定测试**
+- [x] **Step 1: 新增锁定测试**
 
 ```python
     def test_semicolon_after_code_is_trailing_comment(self):
@@ -323,11 +323,11 @@ def chart_number(value, default=0):
         self.assertIn("S5000M03;说明", out)
 ```
 
-- [ ] **Step 2: 文档同步**
+- [x] **Step 2: 文档同步**
 
 需求文档：术语/FR-06 统计口径新增一条——「正文中分号视为程序块终止符，分号之后的内容视为行内注释，不参与统计、校验与指令检测（HASS 后处理格式）」。用户手册「处理规则」章节同步。
 
-- [ ] **Step 3: 提交门**：`docs: 明确分号后内容按行内注释处理`（与测试同提交）。
+- [x] **Step 3: 提交门**：`docs: 明确分号后内容按行内注释处理`（与测试同提交）。
 
 ---
 

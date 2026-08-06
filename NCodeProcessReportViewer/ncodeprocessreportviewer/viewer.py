@@ -137,6 +137,14 @@ def format_number(value) -> str:
     return f"{number:.3f}".rstrip("0").rstrip(".")
 
 
+def chart_number(value, default=0):
+    """柱状图数值容错：非数值/缺失回退 0，防止异常报告数据导致崩溃。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def runtime_log_events(data: dict, event_filter: str = "") -> List[dict]:
     """返回安全可展示的运行日志条目（非对象项过滤，缺字段回退空串）。"""
     entries = []
@@ -741,14 +749,14 @@ class ReportViewer(ttk.Frame):
         if not values:
             canvas.create_text(width // 2, height // 2, text="暂无数据", fill="#6e7781")
             return
-        maximum = max([value for _label, value in values] + [1])
+        maximum = max([chart_number(value) for _label, value in values] + [1])
         base_y = height - 42
         chart_height = max(height - 88, 80)
         slot = max((width - 50) / len(values), 45)
         bar_width = min(54, slot * 0.58)
         for index, ((label, value), color) in enumerate(zip(values, colors)):
             center = 28 + slot * index + slot / 2
-            bar_height = chart_height * float(value) / maximum
+            bar_height = chart_height * chart_number(value) / maximum
             canvas.create_rectangle(center - bar_width / 2, base_y - bar_height, center + bar_width / 2, base_y, fill=color, outline="")
             canvas.create_text(center, base_y + 16, text=label, anchor="n", fill="#24292f")
             canvas.create_text(center, base_y - bar_height - 8, text=str(value), anchor="s", fill="#24292f")
