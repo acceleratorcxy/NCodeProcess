@@ -343,13 +343,15 @@ class RuntimeLog:
     """内存环形缓冲的统一事件源（CLI/GUI 共用）。
 
     - 内存缓冲保留最近 max_events 条（默认 500），超限丢弃最旧事件并累计丢弃数；
-    - snapshot() 供报告内嵌；发生丢弃时追加一条截断说明（含 log_path）；
+    - snapshot() 供报告内嵌；发生丢弃时追加一条截断说明（仅当丢弃数变化时追加一次，
+      多次导出不会重复出现）；
     - 不生成任何磁盘日志文件（WP-R4）：最终报告即单个 JSON，运行日志完整内嵌其中。
     """
 
     def __init__(self, max_events: int = MAX_LOG_EVENTS):
         self._events: "deque[RuntimeEvent]" = deque(maxlen=max_events)
         self._dropped = 0
+        self._reported_dropped = 0
         self._lock = threading.Lock()
 
     def emit(self, level: str, event: str, message: str, detail: str = "") -> None:
@@ -362,7 +364,7 @@ class RuntimeLog:
     def snapshot(self) -> List[dict]:
         with self._lock:
             entries = [entry.to_dict() for entry in self._events]
-            if self._dropped:
+            if self._dropped > self._reported_dropped:
                 entries.append({
                     "time": datetime.now().isoformat(timespec="seconds"),
                     "level": "warning",
@@ -370,12 +372,14 @@ class RuntimeLog:
                     "message": f"运行日志已截断：报告内嵌日志仅保留最近 {self._events.maxlen} 条事件",
                     "detail": "",
                 })
+                self._reported_dropped = self._dropped
             return entries
 
     def clear(self) -> None:
         with self._lock:
             self._events.clear()
             self._dropped = 0
+            self._reported_dropped = 0
 
 
 # 模块级共享事件源：core 内部埋点直接调用 emit_event；GUI/CLI 启动时 attach 磁盘日志。
@@ -705,7 +709,7 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
                         drawing_seen.add((source_label, value))
                         drawing_candidates.append((source_label, value))
             except Exception:
-                pass
+                emit_event("warning", "scan_warning", f"APTSOURCE 头部解析失败：{rel}", detail=traceback.format_exc())
             # Full APT parsing is deferred to build_plan, which selects only
             # the newest source for each program.  This keeps repeated scans
             # fast when the archive contains many historical APT files.
@@ -721,7 +725,10 @@ def scan_directory(input_dir: str, config: Optional[Config] = None) -> ScanResul
     for warning in warnings:
         emit_event("warning", "scan_warning", warning)
     result = ScanResult(str(directory), files, warnings, datetime.now().strftime("%Y%m%d_%H%M%S"), drawing_candidates)
-    emit_event("info", "scan_finish", f"扫描完成：{len(files)} 个文件，MPF {sum(f.kind == 'mpf' for f in files)} 个")
+    emit_event("info", "scan_finish",
+               f"扫描完成：{len(files)} 个文件，MPF {sum(f.kind == 'mpf' for f in files)} 个，"
+               f"APTSOURCE {sum(f.kind == 'aptsource' for f in files)} 个，"
+               f"待删除 {sum(f.kind == 'intermediate' for f in files)} 个，图号候选 {len(drawing_candidates)} 项")
     return result
 
 
@@ -1414,6 +1421,13 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     # 组内无常见档位（F 值连续变化）时回退 IQR 极端值标准（k=3）。
     # 阶段收集已在主遍历完成（WP-P1），此处仅做离群判定。
     stage_labels = {"move": "移动/退刀", "plunge": "进刀", "cut": "切削"}
+
+    def report_feed_outlier(line_no, raw_value, raw_line, suggestion):
+        issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", suggestion))
+        emit_event("warning", "feed_outlier",
+                   f"F 离群识别：{filename} 第 {line_no} 行 F{raw_value}",
+                   detail=f"{raw_line.strip()}\n{suggestion}")
+
     for stage, items in stage_feeds.items():
         if len(items) < 3:
             continue
@@ -1427,9 +1441,11 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                 if counts[value] > 1:
                     continue
                 if value < low_bound:
-                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 明显低于本程序{stage_labels[stage]}进给档位范围（约 {median_feed:g}），请确认"))
+                    report_feed_outlier(line_no, raw_value, raw_line,
+                                        f"F{raw_value} 明显低于本程序{stage_labels[stage]}进给档位范围（约 {median_feed:g}），请确认")
                 elif value > high_bound:
-                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 远高于本程序{stage_labels[stage]}进给档位范围（约 {median_feed:g}），请确认"))
+                    report_feed_outlier(line_no, raw_value, raw_line,
+                                        f"F{raw_value} 远高于本程序{stage_labels[stage]}进给档位范围（约 {median_feed:g}），请确认")
         else:
             sorted_feeds = sorted(item[2] for item in items)
             median_feed = sorted_feeds[len(sorted_feeds) // 2]
@@ -1446,9 +1462,11 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                 high_bound = median_feed * config.feed_outlier_high_ratio
             for line_no, raw_value, value, raw_line in items:
                 if value < low_bound:
-                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 明显低于本程序{stage_labels[stage]}进给范围（约 {median_feed:g}），请确认"))
+                    report_feed_outlier(line_no, raw_value, raw_line,
+                                        f"F{raw_value} 明显低于本程序{stage_labels[stage]}进给范围（约 {median_feed:g}），请确认")
                 elif value > high_bound:
-                    issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", f"F{raw_value} 远高于本程序{stage_labels[stage]}进给范围（约 {median_feed:g}），请确认"))
+                    report_feed_outlier(line_no, raw_value, raw_line,
+                                        f"F{raw_value} 远高于本程序{stage_labels[stage]}进给范围（约 {median_feed:g}），请确认")
     distinct_spindle: Dict[float, Tuple[int, str, str]] = {}
     if config.multiple_spindle_warn:
         for line_no, raw_value, value, raw_line in spindle_values:
@@ -1591,7 +1609,9 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
             auto_tools[program] = (mtime, tools)
         except Exception:
             auto_tools[program] = (mtime, [])
-    emit_event("info", "plan_built", f"生成处理计划：{len(scan.files)} 个文件，MPF {sum(f.kind == 'mpf' for f in scan.files)} 个")
+    emit_event("info", "plan_built",
+               f"生成处理计划：{len(scan.files)} 个文件，MPF {sum(f.kind == 'mpf' for f in scan.files)} 个，"
+               f"APTSOURCE {sum(f.kind == 'aptsource' for f in scan.files)} 个")
     def process_mpf(f: FilePlan):
         if f.kind == "mpf" and f.program and f.original_text is not None:
             try:
@@ -1631,7 +1651,33 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                 f.issues.extend(validation_issues)
                 if Path(f.source).name != Path(f.target).name:
                     f.changes.append(f"重命名为 {Path(f.target).name}")
+                # 识别过程数据入运行日志：刀具识别结果。
+                if effective_info.tools:
+                    tool_parts = []
+                    for tool in effective_info.tools:
+                        fields = [f"T{tool.number}"]
+                        if tool.dia.strip():
+                            fields.append(f"DIA={tool.dia.strip()}")
+                        if tool.tool_coner.strip():
+                            fields.append(f"圆角={tool.tool_coner.strip()}")
+                        if tool.tool_angle.strip():
+                            fields.append(f"单边角={tool.tool_angle.strip()}")
+                        if tool.tool_type.strip():
+                            fields.append(f"类型={tool.tool_type.strip()}")
+                        tool_parts.append("(" + "，".join(fields) + ")")
+                    emit_event("info", "tool_recognized",
+                               f"刀具识别：{f.source}（{len(effective_info.tools)} 把）",
+                               detail="；".join(tool_parts))
+                # 识别过程数据入运行日志：异常与错误识别汇总。
+                error_issues = [i for i in f.issues if i.severity == "error"]
+                warning_issues = [i for i in f.issues if i.severity == "warning"]
+                if error_issues or warning_issues:
+                    kind_list = sorted({i.kind for i in f.issues})
+                    emit_event("warning" if error_issues else "info", "issues_found",
+                               f"识别异常与错误：{f.source}（错误 {len(error_issues)} 条、警告 {len(warning_issues)} 条）",
+                               detail="、".join(kind_list))
             except Exception as e:
+                emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
                 f.issues.append(Issue(f.source, 1, "", "processing", "error", str(e)))
 
     mpf_items = [f for f in scan.files if f.kind == "mpf" and f.program and f.original_text is not None]
@@ -1763,6 +1809,21 @@ def _config_snapshot(config: Config) -> dict:
     }
 
 
+def _plan_process_summary(f: FilePlan) -> str:
+    """运行日志 detail：单文件处理的关键过程数据（不含完整程序正文，便于快速定位）。"""
+    parts = [f"动作={f.action}", f"程序名={f.program or '（未识别）'}"]
+    if f.target:
+        parts.append(f"目标={f.target}")
+    if f.changes:
+        parts.append(f"变更 {len(f.changes)} 项")
+    issue_counts = Counter(x.severity for x in f.issues)
+    if issue_counts:
+        parts.append("问题 " + "、".join(f"{severity} {count}" for severity, count in sorted(issue_counts.items())))
+    if f.stats is not None:
+        parts.append(f"统计 F={f.stats.counts.get('F', 0)} 次、S={f.stats.counts.get('S', 0)} 次")
+    return "；".join(parts)
+
+
 def _exec_duplicate(f, item, report, src_dir, dst_dir, config, scan, same_tree, successful_targets, confirm_cleanup):
     """处理重复目标文件：最新文件已成功写入后，按确认口径清理较旧源文件。"""
     source = src_dir / f.source
@@ -1890,15 +1951,16 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(source), str(destination))
         report.backup_dir = backup_root
-        emit_event("info", "backup_created", f"处理前备份已创建：{backup_root}")
+        emit_event("info", "backup_created", f"处理前备份已创建：{backup_root}（{len(scan.files)} 个文件）")
     successful_targets = set()
     ordered_files = sorted(scan.files, key=lambda item: item.action == "duplicate")
     total = len(ordered_files)
-    emit_event("info", "process_start", f"开始处理：{total} 个文件")
+    emit_event("info", "process_start",
+               f"开始处理：{total} 个文件（备份：{backup_root if backup else '未启用'}）")
     for index, f in enumerate(ordered_files, start=1):
         if progress_callback is not None:
             progress_callback(index, total, f.source)
-        emit_event("info", "process_file", f"处理文件：{f.source}（{index}/{total}）")
+        emit_event("info", "process_file", f"处理文件：{f.source}（{index}/{total}）", detail=_plan_process_summary(f))
         if f.stats is None and f.output_text is not None:
             f.stats = calculate_stats(f.output_text)
         diff = []
@@ -1924,25 +1986,25 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
             item["status"] = "failed"
             item["error_kind"] = "encoding"
             item.setdefault("runtime_error", str(e))
-            emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
+            emit_event("error", "error", f"处理文件失败：{f.source}", detail=f"{_plan_process_summary(f)}\n{traceback.format_exc()}")
         except PermissionError as e:
             report.failed += 1
             item["status"] = "failed"
             item["error_kind"] = "permission"
             item.setdefault("runtime_error", str(e))
-            emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
+            emit_event("error", "error", f"处理文件失败：{f.source}", detail=f"{_plan_process_summary(f)}\n{traceback.format_exc()}")
         except OSError as e:
             report.failed += 1
             item["status"] = "failed"
             item["error_kind"] = "io"
             item.setdefault("runtime_error", str(e))
-            emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
+            emit_event("error", "error", f"处理文件失败：{f.source}", detail=f"{_plan_process_summary(f)}\n{traceback.format_exc()}")
         except Exception as e:
             report.failed += 1
             item["status"] = "failed"
             item["error_kind"] = "other"
             item.setdefault("runtime_error", str(e))
-            emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
+            emit_event("error", "error", f"处理文件失败：{f.source}", detail=f"{_plan_process_summary(f)}\n{traceback.format_exc()}")
         report.files.append(item)
     report.finished_at = datetime.now().isoformat(timespec="seconds")
     report.elapsed_seconds = _iso_seconds_delta(report.started_at, report.finished_at)

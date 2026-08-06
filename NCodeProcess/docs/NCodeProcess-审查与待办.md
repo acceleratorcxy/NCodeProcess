@@ -145,5 +145,6 @@
 | 低 | 测试套件整改 WP-T7（测试计划）—— **已处理（2026-08-06）**：测试指南基线改为「以 discover 输出为准」；新增 `run_tests.ps1` 一键跑主/查看器两套测试；登记 WP-T6 待办 | 测试计划 |
 | 低 | 测试套件整改 WP-T6（测试计划）—— **待办（D-D=B 本轮跳过）**：按主题拆分大测试文件（test_gui_*/test_core_*），用例数不变全绿 | 测试计划 |
 | 高 | 第三轮收尾 WP-F1（2026-08-06）—— **已处理**：`apply_info` 后台线程重处理（`reprocess_plans` 纯函数 + `_finish_apply_info` 主线程刷新 + 代际防护），25 MPF 点「全部应用」不再冻结界面；`apply_selected` 保持同步；主工具 245 项全绿，打包版用户实测通过 | 第三轮收尾计划 |
+| 中 | 第三轮收尾 WP-F2（2026-08-06）—— **已处理**：处理/APT 异常 traceback 进运行日志；`RuntimeLog` 截断说明去重（`_reported_dropped`）；`process_file`/`scan_finish`/`plan_built`/`process_start`/`backup_created` 带关键运行数据；新增 `tool_recognized`/`feed_outlier`/`issues_found` 识别事件；主工具 249 项全绿，打包版用户实测通过 | 第三轮收尾计划 |
 | 低 | M03 紧贴 S 值的确切口径确认（需求审查问题 2） | 需求审查 |
 | 待用户决定 | 机床行程 X/Y/Z 检查 | 需求 7.3（用户已决定暂不实施） |

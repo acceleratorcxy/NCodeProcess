@@ -22,7 +22,7 @@
 | WP | 主题 | 优先级 | 依赖决策 | 涉及文件 | 验收标准 |
 |---|---|---|---|---|---|
 | WP-F1 | 「全部应用」后台重处理，消除 UI 冻结 | 高 | 无 | `gui.py`、`tests/test_gui.py` | 25 MPF 应用不再阻塞界面；测试同步化后全绿 —— ✅ 已处理（2026-08-06，打包实测通过） |
-| WP-F2 | 运行日志埋点补齐与截断去重 | 中 | 无 | `core.py`、`tests/test_core.py` | `process_mpf`/APT 异常带 traceback 进 `runtime_log`；截断警告只出现一次 |
+| WP-F2 | 运行日志埋点补齐与截断去重 | 中 | 无 | `core.py`、`tests/test_core.py` | `process_mpf`/APT 异常带 traceback 进 `runtime_log`；截断警告只出现一次 —— ✅ 已处理（2026-08-06，含识别数据入日志，249 项全绿） |
 | WP-F3 | 查看器图表数值容错（WP-13 部分） | 中 | 无 | `viewer.py`、`tests/test_report_viewer.py` | 非数值字段不崩溃，回退 0；10 项测试全绿 |
 | WP-F4 | `code_part` 分号语义文档化 + 锁定测试 | 低 | 无 | 需求文档、用户手册、`tests/test_core.py` | 需求/手册明确「分号后视为注释」；测试锁定 |
 | WP-F5 | 构建脚本缩进清理 + 测试文件拆分（WP-T6） | 低 | D3 | `build_portable.ps1`、`tests/test_gui_*.py` | 缩进规整；拆分后用例数不变全绿 |
@@ -184,7 +184,7 @@ Expected: 全绿（预计 GUI 用例数不变）。
 
 **Files:** `ncodeprocess/core.py`、`tests/test_core.py`
 
-- [ ] **Step 1: 新增失败测试**
+- [x] **Step 1: 新增失败测试**
 
 ```python
     def test_process_mpf_error_emits_runtime_event(self):
@@ -211,7 +211,7 @@ Expected: 全绿（预计 GUI 用例数不变）。
 
 > 说明：`test_core.py` 顶部补 `runtime_log`/`reset_runtime_log` 导入；`CoreTests.setUp` 增加 `reset_runtime_log()`，避免跨用例的事件累积污染断言。
 
-- [ ] **Step 2: 实现埋点与去重**
+- [x] **Step 2: 实现埋点与去重**
 
 2a. `build_plan.process_mpf` 的 `except Exception as e:` 分支改为：
 
@@ -252,12 +252,12 @@ Expected: 全绿（预计 GUI 用例数不变）。
             return entries
 ```
 
-- [ ] **Step 3: 回归**
+- [x] **Step 3: 回归**
 
 Run: `D:\anaconda3\envs\python38\python.exe -m unittest tests.test_core -v`
 Expected: 全绿（含既有 RuntimeLog 用例）。
 
-- [ ] **Step 4: 提交门**：`fix(core): 处理/APT 异常 traceback 进运行日志，截断警告去重`。
+- [x] **Step 4: 提交门**：`fix(core): 处理/APT 异常 traceback 进运行日志，截断警告去重`。
 
 ---
 

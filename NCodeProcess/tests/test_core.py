@@ -12,6 +12,10 @@ DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
 
 
 class CoreTests(unittest.TestCase):
+    def setUp(self):
+        # 隔离运行日志：避免跨用例的事件累积污染断言（WP-F2）。
+        reset_runtime_log()
+
     def make_dir(self):
         return Path(tempfile.mkdtemp(prefix="ncodeprocess-"))
 
@@ -337,6 +341,31 @@ class CoreTests(unittest.TestCase):
         body_index = next(i for i, line in enumerate(lines) if line.startswith("N1"))
         self.assertEqual(tool_index, body_index - 1)
         self.assertNotIn("\n\nN", out)
+
+    def test_process_mpf_error_emits_runtime_event(self):
+        # WP-F2：build_plan 内 MPF 处理异常必须进入运行日志并携带 traceback。
+        root = self.make_dir()
+        (root / "A.MPF").write_text('MSG("PROGRAM:A")\nN1S1000M03\nN2M30\n', encoding="utf-8")
+        cfg = self._cfg()
+        scan = scan_directory(str(root), cfg)
+        with patch("ncodeprocess.core.apply_header", side_effect=RuntimeError("boom")):
+            build_plan(scan, DEFAULT_INFO, cfg)
+        events = runtime_log().snapshot()
+        self.assertTrue(any(e["event"] == "error" and "A.MPF" in e["message"] and "Traceback" in e["detail"] for e in events))
+
+    def test_recognition_events_emitted_for_tools_and_issues(self):
+        # WP-F2 扩展：刀具识别 / F 离群识别 / 异常与错误识别结果进入运行日志。
+        root = self.make_dir()
+        (root / "P.MPF").write_text(
+            'MSG("PROGRAM:P")\nMSG("T1:DIA=10.,TOOL_TYPE=平底立铣刀")\n'
+            "N1G1X1F500\nN2G1X2F500\nN3G1X3F600\nN4G1X4F99999\nN5M30\n",
+            encoding="utf-8")
+        cfg = self._cfg()
+        build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        events = runtime_log().snapshot()
+        self.assertTrue(any(e["event"] == "tool_recognized" and "P.MPF" in e["message"] and "T1" in e["detail"] for e in events))
+        self.assertTrue(any(e["event"] == "feed_outlier" and "F99999" in e["message"] and "P.MPF" in e["message"] for e in events))
+        self.assertTrue(any(e["event"] == "issues_found" and "P.MPF" in e["message"] and "feed-outlier" in e["detail"] for e in events))
 
     def test_apply_header_marks_existing_tool_as_update_not_insert(self):
         # 已有 T1 刀具被替换时记录为「更新刀具 T1」而非「插入刀具 T1」，
@@ -1260,6 +1289,33 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertEqual(notice["level"], "warning")
         self.assertEqual(notice["event"], "warning")
         self.assertIn("已截断", notice["message"])
+
+    def test_snapshot_truncation_warning_appears_once(self):
+        # WP-F2：截断说明仅在丢弃数变化时追加一次，多次 snapshot/导出不重复。
+        log = RuntimeLog(max_events=2)
+        for index in range(5):
+            log.emit("info", "event", f"事件 {index}")
+        first = log.snapshot()
+        second = log.snapshot()
+        count = lambda entries: sum(1 for e in entries if "已截断" in e["message"])
+        self.assertEqual(count(first), 1)      # 首次 snapshot 上报截断
+        self.assertEqual(count(second), 0)     # 已上报，第二次不再重复追加
+        self.assertEqual(count(first) + count(second), 1)  # 全程仅出现一次
+
+    def test_process_file_event_includes_key_data(self):
+        # WP-F2：process_file 事件 detail 携带关键运行过程数据（动作/程序名/目标/统计）。
+        reset_runtime_log()
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes('MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow")
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        process_plan(plan, str(root), cfg)
+        entries = [e for e in runtime_log().snapshot() if e["event"] == "process_file"]
+        self.assertTrue(entries)
+        detail = entries[0]["detail"]
+        self.assertIn("动作=keep", detail)
+        self.assertIn("程序名=P", detail)
+        self.assertIn("目标=", detail)
 
     def test_pipeline_emits_expected_events(self):
         reset_runtime_log()

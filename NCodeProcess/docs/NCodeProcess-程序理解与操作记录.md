@@ -1157,6 +1157,23 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 ---
 
+### 2.86 第三轮收尾 WP-F2：运行日志埋点补齐、截断去重与识别数据入日志（2026-08-06）
+
+按「第三轮收尾实施计划」WP-F2 并叠加用户要求（日志带上重要运行过程数据原文）：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 异常埋点补齐 | `build_plan.process_mpf` 的 `except` 与 `scan_directory` 的 APT 头部解析失败均补 `emit_event`，`detail` 携带 `traceback.format_exc()` |
+| 2 | 截断去重 | `RuntimeLog` 新增 `_reported_dropped`，`snapshot()` 仅在丢弃数变化时追加一次「运行日志已截断」说明，多次导出不重复 |
+| 3 | 关键过程数据 | `process_file` 事件 detail 增加动作/程序名/目标/变更项/问题数/统计；`scan_finish` 增加 APT/待删除/图号候选数；`plan_built` 增加 APT 数；`process_start` 标注备份启用；`backup_created` 标注文件数；错误事件 detail 前置关键数据 + traceback |
+| 4 | 识别事件 | 新增 `tool_recognized`（刀具识别清单：T 号/DIA/圆角/单边角/类型）、`feed_outlier`（F 离群：文件/行号/F 值/原始行/建议）、`issues_found`（异常与错误汇总：错误/警告条数 + 问题类型清单） |
+
+**验证**：主工具全量 **249 项**、查看器 12 项全绿（配套查看器兼容见查看器操作记录）；打包版 EXE 已同步 `测试\`，用户实测通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、打包实测确认后提交。
+
+---
+
 ## 三、后续建议（可选）
 
 1. **Batch 2 配置持久化**：必填字段/M03 策略/S/F 上下限/辅助顺序/换行目前仅本次运行生效；如需与 Batch 1 一致持久化，需扩展 `REGISTRY_DEFAULTS` 并同步调整 preferences 测试。
