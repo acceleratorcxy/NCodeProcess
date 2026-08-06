@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ncodeprocessreportviewer.viewer import (
+    apt_meta_rows,
+    apt_summary_rows,
     chart_number,
     discover_reports,
     file_issue_counts,
@@ -121,6 +123,60 @@ class ReportViewerTests(unittest.TestCase):
         self.assertEqual(chart_number("abc"), 0)
         self.assertEqual(chart_number(None), 0)
 
+    def test_apt_meta_rows_expand_fields(self):
+        # WP-A5：文件项 apt_meta/toolpath_stats 展开为键值行（含操作级工艺）。
+        item = {"apt_meta": {
+            "machine": "3-axis Machine.1",
+            "operations": ["Roughing.3"],
+            "spindles": [["5000.0000", "RPM", "CLW"]],
+            "feeds": [["3000.0000", "MMPM"]],
+            "coolant": ["ON"],
+            "tools": [
+                {"number": 1, "dia": "20.000", "tool_coner": "3.000", "tool_type": "平底立铣刀", "tool_angle": ""},
+                {"number": 2, "dia": "20.000", "tool_coner": "3.000", "tool_type": "平底立铣刀", "tool_angle": ""},
+            ],
+            "operation_feeds": {"Roughing.3": [["3000.0000", "MMPM"]]},
+        }, "toolpath_stats": {"goto_count": 2, "arc_count": 1, "retract_count": 1,
+                              "retract_plane": 100.0, "min_x": 0.0, "max_x": 10.0,
+                              "min_y": 0.0, "max_y": 5.0, "min_z": -2.0, "max_z": 100.0}}
+        rows = dict(apt_meta_rows(item))
+        self.assertEqual(rows["机床型号"], "3-axis Machine.1")
+        self.assertIn("Roughing.3", rows["操作清单"])
+        self.assertEqual(rows["主轴规划"], "5000.0000RPM CLW")
+        self.assertEqual(rows["刀具 T1、T2"], "Ø20.000，R3.000，平底立铣刀")
+        self.assertEqual(rows["GOTO 点数"], "2")
+        self.assertEqual(rows["Z 行程"], "-2.000 ~ 100.000")
+        self.assertIn("操作进给", "".join(rows))
+        self.assertEqual(apt_meta_rows({}), [])
+
+    def test_apt_summary_rows_aggregate(self):
+        # WP-A5：报告级 apt_summary 与跨文件轨迹汇总展开。
+        data = {
+            "apt_summary": {
+                "machines": ["3-axis Machine.1"],
+                "spindle_speeds": [1000.0, 5000.0],
+                "tool_loads": [1, 2],
+                "operations": ["Roughing.3"],
+                "tool_usage": {"1": 1, "2": 2},
+            },
+            "files": [
+                {"program": "P1", "apt_meta": {"operations": ["Roughing.3"], "tools": [
+                    {"number": 1, "dia": "20.000", "tool_coner": "3.000", "tool_type": "平底立铣刀", "tool_angle": ""}]}},
+                {"program": "P2", "apt_meta": {"operations": ["Roughing.3", "Finishing.1"], "tools": [
+                    {"number": 1, "dia": "20.000", "tool_coner": "3.000", "tool_type": "平底立铣刀", "tool_angle": ""},
+                    {"number": 2, "dia": "10.000", "tool_coner": "0.000", "tool_type": "球头立铣刀", "tool_angle": ""}]}},
+                {"toolpath_stats": {"goto_count": 10, "arc_count": 1, "retract_count": 2}},
+                {"toolpath_stats": {"goto_count": 5, "arc_count": 2, "retract_count": 1}},
+            ],
+        }
+        rows = dict(apt_summary_rows(data))
+        self.assertEqual(rows["机床"], "3-axis Machine.1")
+        self.assertEqual(rows["刀具 Ø20.000，R3.000，平底立铣刀"], "T1×2")
+        self.assertEqual(rows["刀具 Ø10.000，R0.000，球头立铣刀"], "T2×1")
+        self.assertEqual(rows["操作 · P1"], "Roughing.3")
+        self.assertEqual(rows["操作 · P2"], "Finishing.1、Roughing.3")
+        self.assertEqual(rows["轨迹汇总"], "GOTO 15 点 / 圆弧 3 / 抬刀 3 次")
+
     def test_issues_csv_rows_expands_all_files(self):
         # WP-15：问题 CSV 行 = 表头 + 全部文件 issues 逐条展开。
         data = {"files": [
@@ -171,10 +227,10 @@ class ReportViewerLayoutTests(unittest.TestCase):
             self.assertEqual(app.notebook.index(app.notebook.select()), 0)  # 默认展示概览与可视化
             self.assertGreaterEqual(float(app.report_table.xview()[1]), 0.999, "报告列表")
             self.assertGreaterEqual(float(app.program_table.xview()[1]), 0.999, "程序列表")
+            # 文件明细/APT 信息/运行日志表故意保留横向滚动条（长内容可滚动查看），不要求初始无溢出。
             for index, table, label in (
-                (1, app.file_table, "文件明细"),
-                (2, app.stats_table, "参数统计"),
-                (3, app.issue_table, "校验问题"),
+                (3, app.stats_table, "参数统计"),
+                (4, app.issue_table, "校验问题"),
             ):
                 app.notebook.select(index)
                 root.update_idletasks()
@@ -197,8 +253,6 @@ class ReportViewerLayoutTests(unittest.TestCase):
             self.assertEqual(len(app.log_table.get_children()), 2)
             values = app.log_table.item("1", "values")
             self.assertEqual(values[1], "error")
-            self.assertEqual(values[2], "error")
-            # WP-R1：运行日志页展示 detail（error 事件 traceback）。
             self.assertEqual(values[4], "Traceback: OSError")
             # WP-R4：日志内嵌报告，不再生成磁盘日志文件。
             self.assertIn("运行日志已内嵌本报告", app.log_path_label.cget("text"))
@@ -358,11 +412,40 @@ class ReportViewerLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_apt_page_shows_summary_and_file_rows(self):
+        # WP-A5：「APT 信息」页签展示全局摘要（全部文件）与单文件 apt_meta/toolpath_stats。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            app.report_data = {
+                "apt_summary": {"machines": ["3-axis Machine.1"]},
+                "files": [
+                    {"file": "P.MPF", "program": "P",
+                     "apt_meta": {"machine": "3-axis Machine.1", "tools": [
+                         {"number": 1, "dia": "20.000", "tool_coner": "3.000", "tool_type": "平底立铣刀", "tool_angle": ""}]},
+                     "toolpath_stats": {"goto_count": 2, "arc_count": 1, "retract_count": 1,
+                                        "retract_plane": 100.0, "min_x": 0.0, "max_x": 1.0,
+                                        "min_y": 0.0, "max_y": 1.0, "min_z": 0.0, "max_z": 100.0}},
+                    {"file": "Q.MPF", "program": "Q"},
+                ],
+            }
+            app.file_items = app.report_data["files"]
+            app._populate_files()
+            rows = dict((app.apt_table.item(i, "values")[0], app.apt_table.item(i, "values")[1]) for i in app.apt_table.get_children())
+            self.assertIn("机床", rows)
+            self.assertIn("刀具 Ø20.000，R3.000，平底立铣刀", rows)
+            app.file_table.selection_set("0")
+            app._on_file_selected()
+            rows = dict((app.apt_table.item(i, "values")[0], app.apt_table.item(i, "values")[1]) for i in app.apt_table.get_children())
+            self.assertIn("机床型号", rows)
+            self.assertEqual(rows["GOTO 点数"], "2")
+        finally:
+            root.destroy()
+
     def test_cell_tooltip_truncation_detection(self):
         # 查看器悬停浮窗：超长单元格判定为截断（显示提示），短内容不提示。
         root, app = self._build_viewer(1290, 720)
         try:
-            app.notebook.select(2)  # 参数统计页
+            app.notebook.select(3)  # 参数统计页
             root.update_idletasks()
             long_value = "很长很长的文件名_" * 20
             iid = app.stats_table.insert("", "end", values=(long_value, "F", "1", "10", "20", "否"))

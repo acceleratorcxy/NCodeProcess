@@ -185,6 +185,154 @@ def issues_csv_rows(data: dict) -> List[tuple]:
     return rows
 
 
+def apt_meta_rows(item: dict) -> List[Tuple[str, str]]:
+    """把文件项的 apt_meta/toolpath_stats 展开为 (键, 值) 展示行（缺数据返回空）。"""
+    meta = item.get("apt_meta") or {}
+    stats = item.get("toolpath_stats") or {}
+    if not meta and not stats:
+        return []
+    rows = []
+    rows.append(("机床型号", str(meta.get("machine") or "")))
+    rows.append(("后处理表", str(meta.get("pp_table") or "")))
+    rows.append(("CATIA APT 版本", str(meta.get("catia_version") or "")))
+    rows.append(("生成时间", str(meta.get("generated_at") or "")))
+    rows.append(("程序名", str(meta.get("program_name") or "")))
+    rows.append(("操作清单", "、".join(str(v) for v in (meta.get("operations") or []))))
+    spindles = ["%s%s %s" % (speed, units, direction) for speed, units, direction in (meta.get("spindles") or [])]
+    rows.append(("主轴规划", "、".join(spindles)))
+    feeds = ["%s%s" % (value, units) for value, units in (meta.get("feeds") or [])]
+    rows.append(("进给规划", "、".join(feeds)))
+    rows.append(("冷却液", "、".join(str(v) for v in (meta.get("coolant") or []))))
+    rows.extend(_tool_spec_rows(meta))
+    op_feeds = meta.get("operation_feeds") or {}
+    for op_name in sorted(op_feeds):
+        rows.append(("操作进给 · %s" % op_name,
+                     "、".join("%s%s" % (value, units) for value, units in op_feeds[op_name])))
+    op_spindles = meta.get("operation_spindles") or {}
+    for op_name in sorted(op_spindles):
+        rows.append(("操作主轴 · %s" % op_name,
+                     "、".join("%s%s %s" % (speed, units, direction) for speed, units, direction in op_spindles[op_name])))
+    if stats:
+        rows.append(("GOTO 点数", str(stats.get("goto_count", 0))))
+        rows.append(("圆弧数", str(stats.get("arc_count", 0))))
+        rows.append(("抬刀次数", str(stats.get("retract_count", 0))))
+        rows.append(("抬刀平面", str(stats.get("retract_plane") or "")))
+        rows.append(("X 行程", "%.3f ~ %.3f" % (stats.get("min_x", 0), stats.get("max_x", 0))))
+        rows.append(("Y 行程", "%.3f ~ %.3f" % (stats.get("min_y", 0), stats.get("max_y", 0))))
+        rows.append(("Z 行程", "%.3f ~ %.3f" % (stats.get("min_z", 0), stats.get("max_z", 0))))
+    return rows
+
+
+def _tool_spec_rows(meta: dict) -> List[Tuple[str, str]]:
+    """按规格+种类合并刀具并给出具体规格；无规格数据时回退装夹刀具号列表。"""
+    tools = meta.get("tools") or []
+    if tools:
+        groups = {}
+        for tool in tools:
+            spec = (str(tool.get("dia") or ""), str(tool.get("tool_coner") or ""),
+                    str(tool.get("tool_angle") or ""), str(tool.get("tool_type") or ""))
+            groups.setdefault(spec, []).append(int(tool.get("number")))
+        rows = []
+        for spec, numbers in sorted(groups.items(), key=lambda pair: min(pair[1])):
+            dia, coner, angle, tool_type = spec
+            parts = []
+            if dia:
+                parts.append("Ø" + dia)
+            if coner:
+                parts.append("R" + coner)
+            if angle:
+                parts.append("单边角 " + angle)
+            if tool_type:
+                parts.append(tool_type)
+            spec_text = "，".join(parts) if parts else "未标注规格"
+            rows.append(("刀具 " + "、".join("T%d" % n for n in numbers), spec_text))
+        return rows
+    tool_loads = meta.get("tool_loads") or []
+    if tool_loads:
+        return [("装夹刀具", "、".join("T%d" % n for n in tool_loads))]
+    return []
+
+
+def apt_summary_rows(data: dict) -> List[Tuple[str, str]]:
+    """报告级 apt_summary + 跨文件轨迹汇总 → (键, 值) 展示行。"""
+    summary = data.get("apt_summary") or {}
+    rows = []
+    machines = summary.get("machines") or []
+    if machines:
+        rows.append(("机床", "、".join(str(m) for m in machines)))
+    spindles = summary.get("spindle_speeds") or []
+    if spindles:
+        rows.append(("主轴转速", "、".join("%.0f" % float(s) for s in spindles)))
+    rows.extend(_tool_spec_summary_rows(data, summary))
+    rows.extend(_operation_rows_by_program(data))
+    goto_total = arc_total = retract_total = 0
+    for item in data.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        stats = item.get("toolpath_stats") or {}
+        goto_total += int(stats.get("goto_count") or 0)
+        arc_total += int(stats.get("arc_count") or 0)
+        retract_total += int(stats.get("retract_count") or 0)
+    if goto_total or arc_total or retract_total:
+        rows.append(("轨迹汇总", "GOTO %d 点 / 圆弧 %d / 抬刀 %d 次" % (goto_total, arc_total, retract_total)))
+    return rows
+
+
+def _tool_spec_summary_rows(data: dict, summary: dict) -> List[Tuple[str, str]]:
+    """全局刀具按规格+种类合并，给出具体规格与各刀使用程序数；无规格时回退 apt_summary 装夹刀具。"""
+    spec_groups = {}
+    for item in data.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("apt_meta") or {}
+        program = str(item.get("program") or "")
+        for tool in meta.get("tools") or []:
+            spec = (str(tool.get("dia") or ""), str(tool.get("tool_coner") or ""),
+                    str(tool.get("tool_angle") or ""), str(tool.get("tool_type") or ""))
+            group = spec_groups.setdefault(spec, {})
+            number = int(tool.get("number"))
+            group.setdefault(number, set()).add(program)
+    rows = []
+    if spec_groups:
+        for spec, numbers in sorted(spec_groups.items(), key=lambda pair: min(pair[1])):
+            dia, coner, angle, tool_type = spec
+            parts = []
+            if dia:
+                parts.append("Ø" + dia)
+            if coner:
+                parts.append("R" + coner)
+            if angle:
+                parts.append("单边角 " + angle)
+            if tool_type:
+                parts.append(tool_type)
+            spec_text = "，".join(parts) if parts else "未标注规格"
+            usage = "、".join("T%d×%d" % (n, len(numbers[n])) for n in sorted(numbers))
+            rows.append(("刀具 " + spec_text, usage))
+        return rows
+    tools = summary.get("tool_loads") or []
+    if tools:
+        return [("装夹刀具", "、".join("T%d" % int(t) for t in tools))]
+    return []
+
+
+def _operation_rows_by_program(data: dict) -> List[Tuple[str, str]]:
+    """操作清单按程序分别列出。"""
+    per_program = {}
+    for item in data.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("apt_meta") or {}
+        operations = meta.get("operations") or []
+        if not operations:
+            continue
+        program = str(item.get("program") or str(item.get("file") or ""))
+        per_program.setdefault(program, set()).update(str(op) for op in operations)
+    rows = []
+    for program in sorted(per_program):
+        rows.append(("操作 · " + program, "、".join(sorted(per_program[program]))))
+    return rows
+
+
 def log_event_detail(entry: dict) -> str:
     """拼接运行日志事件的完整展示文本（消息 + 详情，含多行 traceback 与关键数据）。"""
     message = str(entry.get("message") or "")
@@ -260,6 +408,14 @@ class ReportViewer(ttk.Frame):
         right = ttk.Frame(split, padding=(7, 0, 0, 0))
         split.add(left, weight=3)
         split.add(right, weight=7)
+        # 左侧窗格固定最小宽度：右侧长内容表列宽总和超出可视区以激活横向滚动条时，
+        # 分隔条保持在 440px，不挤压报告列表与程序列表（ttk.Panedwindow 无 minsize，用 Configure 重设）。
+        def _keep_left_pane(_event=None):
+            try:
+                split.sashpos(0, 440)
+            except tk.TclError:
+                pass
+        self.master.bind("<Configure>", _keep_left_pane, add="+")
         left.rowconfigure(0, weight=1)
         left.rowconfigure(1, weight=2)
         left.columnconfigure(0, weight=1)
@@ -276,15 +432,18 @@ class ReportViewer(ttk.Frame):
         program_box.grid(row=1, column=0, sticky="nsew")
         program_box.rowconfigure(0, weight=1)
         program_box.columnconfigure(0, weight=1)
-        self.program_table = self._table(program_box, ("program", "issue"), ("程序", "校验"), (170, 130))
+        # 程序名列按最长 12 位字母数字实测宽度；校验列拉伸占满，初始无横向溢出。
+        program_name_width = self._treeview_font.measure("W" * 12) + 24
+        self.program_table = self._table(program_box, ("program", "issue"), ("程序", "校验"), (program_name_width, 130))
         self.program_table._container.grid(row=0, column=0, sticky="nsew")
-        self.program_table.column("program", width=170, minwidth=100, stretch=False)
+        self.program_table.column("program", width=program_name_width, minwidth=program_name_width, stretch=False)
         self.program_table.bind("<<TreeviewSelect>>", self._on_program_selected)
 
         self.notebook = ttk.Notebook(right)
         self.notebook.pack(fill="both", expand=True)
         self.overview_page = ttk.Frame(self.notebook, padding=8)
         self.files_page = ttk.Frame(self.notebook)
+        self.apt_page = ttk.Frame(self.notebook)
         self.stats_page = ttk.Frame(self.notebook)
         self.issues_page = ttk.Frame(self.notebook)
         self.changes_page = ttk.Frame(self.notebook)
@@ -292,6 +451,7 @@ class ReportViewer(ttk.Frame):
         self.raw_page = ttk.Frame(self.notebook)
         self.notebook.add(self.overview_page, text="概览与可视化")
         self.notebook.add(self.files_page, text="文件明细")
+        self.notebook.add(self.apt_page, text="APT 信息")
         self.notebook.add(self.stats_page, text="参数统计")
         self.notebook.add(self.issues_page, text="校验问题")
         self.notebook.add(self.changes_page, text="修改与差异")
@@ -299,12 +459,13 @@ class ReportViewer(ttk.Frame):
         self.notebook.add(self.raw_page, text="原始 JSON")
         self._build_files()
         self._build_overview()
+        self._build_apt()
         self._build_stats()
         self._build_issues()
         self._build_changes()
         self._build_log()
         self._build_raw()
-        for tree in (self.report_table, self.program_table, self.file_table, self.stats_table, self.issue_table, self.log_table):
+        for tree in (self.report_table, self.program_table, self.file_table, self.apt_table, self.stats_table, self.issue_table, self.log_table):
             self._bind_cell_tooltip(tree)
 
     def _bind_cell_tooltip(self, tree):
@@ -380,9 +541,30 @@ class ReportViewer(ttk.Frame):
     def _build_files(self):
         self.files_page.rowconfigure(0, weight=1)
         self.files_page.columnconfigure(0, weight=1)
-        self.file_table = self._table(self.files_page, ("program", "action", "issue", "target"), ("程序/文件", "动作", "校验", "目标"), (180, 70, 70, 220))
+        # 动作列按最长动作词实测宽度、校验列按「999 错 / 999 警」实测宽度，且固定不随窗口拉伸。
+        action_width = max(self._treeview_font.measure(text) for text in ("keep", "move", "delete", "duplicate", "review")) + 20
+        issue_width = self._treeview_font.measure("999 错 / 999 警") + 20
+        # 程序/文件列按真实数据中最长单元格（未配对中间文件完整源文件名，约 43 字符）实测宽度。
+        program_width = self._treeview_font.measure("D0354F31311-201_AG6D311A0101_I.MOAPTIndexes") + 24
+        self.file_table = self._table(self.files_page, ("program", "action", "issue", "target"), ("程序/文件", "动作", "校验", "目标"), (program_width, action_width, issue_width, 700))
+        self.file_table.column("program", width=program_width, minwidth=140, stretch=False)
+        self.file_table.column("action", width=action_width, minwidth=action_width, stretch=False)
+        self.file_table.column("issue", width=issue_width, minwidth=issue_width, stretch=False)
+        # 目标列固定且总和超过可视区：横向滚动条初始即激活，可直接滚动查看长路径。
+        self.file_table.column("target", width=700, minwidth=200, stretch=False)
         self.file_table._container.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
         self.file_table.bind("<<TreeviewSelect>>", self._on_file_selected)
+
+    def _build_apt(self):
+        self.apt_page.rowconfigure(1, weight=1)
+        self.apt_page.columnconfigure(0, weight=1)
+        self.apt_hint_var = tk.StringVar(value="APT 规划信息")
+        ttk.Label(self.apt_page, textvariable=self.apt_hint_var, foreground="#57606a").grid(row=0, column=0, sticky="w", padx=6, pady=(6, 2))
+        self.apt_table = self._table(self.apt_page, ("key", "value"), ("项目", "APT 规划值"), (150, 560))
+        # 值列固定且总和超过可视区：横向滚动条初始即激活，可直接滚动查看长内容。
+        self.apt_table.column("key", width=150, minwidth=150, stretch=False)
+        self.apt_table.column("value", width=920, minwidth=300, stretch=False)
+        self.apt_table._container.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
 
     def _build_overview(self):
         self.overview_page.columnconfigure(0, weight=1)
@@ -452,7 +634,17 @@ class ReportViewer(ttk.Frame):
         self.log_filter_combo = ttk.Combobox(filter_bar, textvariable=self.log_filter_var, state="readonly", width=22)
         self.log_filter_combo.pack(side="left", padx=(4, 0))
         self.log_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._fill_log(self._selected_item()))
-        self.log_table = self._table(self.log_page, ("time", "level", "event", "message", "detail"), ("时间", "级别", "事件", "消息", "详情"), (140, 55, 120, 220, 240))
+        # 时间/级别/事件按内容实测宽度固定；消息与详情各占一半剩余宽度并支持拉伸。
+        time_width = self._treeview_font.measure("2026-08-05T09:30:01") + 20
+        level_width = self._treeview_font.measure("warning") + 20
+        event_width = max(self._treeview_font.measure(text) for text in ("process_file", "tool_recognized", "issues_found", "scan_finish", "backup_created")) + 20
+        # 时间/级别/事件按内容实测宽度固定；消息与详情各占一半剩余宽度，总和超过可视区，
+        # 横向滚动条初始即激活（可直接滚动查看长内容，仍可拖宽调整）。
+        self.log_table = self._table(self.log_page, ("time", "level", "event", "message", "detail"), ("时间", "级别", "事件", "消息", "详情"), (time_width, level_width, event_width, 400, 400))
+        for column, width in (("time", time_width), ("level", level_width), ("event", event_width)):
+            self.log_table.column(column, width=width, minwidth=45, stretch=False)
+        self.log_table.column("message", width=400, minwidth=100, stretch=False)
+        self.log_table.column("detail", width=400, minwidth=100, stretch=False)
         self.log_table._container.grid(row=1, column=0, sticky="nsew", padx=6)
         self.log_table.bind("<<TreeviewSelect>>", lambda _event: self._on_log_row_selected())
         self.log_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
@@ -671,6 +863,7 @@ class ReportViewer(ttk.Frame):
             meta_parts.append("扫描警告：" + "；".join(warnings))
         self.meta_text.set("\n".join(meta_parts))
         self._draw_charts()
+        self._fill_apt(selected)
         self._fill_stats(selected)
         self._fill_issues(selected)
         self._fill_changes(selected)
@@ -701,6 +894,19 @@ class ReportViewer(ttk.Frame):
                 if filter_value != "全部" and severity != filter_value:
                     continue
                 self.issue_table.insert("", "end", values=(file_item.get("file", ""), issue.get("line", ""), severity, issue.get("kind", ""), issue.get("text", ""), issue.get("suggestion", "")), tags=(severity,) if severity in ("error", "warning") else ())
+
+    def _fill_apt(self, selected):
+        """APT 信息页签：选中文件显示其 apt_meta/toolpath_stats；全部文件显示报告 apt_summary。"""
+        for item in self.apt_table.get_children():
+            self.apt_table.delete(item)
+        if selected is None:
+            rows = apt_summary_rows(self.report_data or {})
+            self.apt_hint_var.set("APT 全局摘要（全部文件）" if rows else "当前报告无 APT 规划数据")
+        else:
+            rows = apt_meta_rows(selected)
+            self.apt_hint_var.set("APT 规划信息：" + str(selected.get("file") or "") if rows else "该文件无 APT 规划数据")
+        for key, value in rows:
+            self.apt_table.insert("", "end", values=(key, value))
 
     def export_issues_csv(self):
         """导出当前报告的全部校验问题为 UTF-8 BOM CSV。"""
@@ -776,8 +982,8 @@ class ReportViewer(ttk.Frame):
         if not events and not log_path:
             self.log_path_label.config(text="当前报告不包含运行日志（runtime_log）")
         else:
-            # WP-R4：运行日志完整内嵌报告，不再生成磁盘日志文件；选择事件可查看完整详情。
-            self.log_path_label.config(text="运行日志已内嵌本报告（runtime_log），不再生成磁盘日志文件；选择事件可查看完整消息与详情（含 traceback）")
+            # WP-R4：运行日志完整内嵌报告，不再生成磁盘日志文件；表格可横向滚动查看长内容。
+            self.log_path_label.config(text="运行日志已内嵌本报告（runtime_log），不再生成磁盘日志文件；长内容可通过横向滚动与悬停查看完整值")
 
     def _on_log_row_selected(self, _event=None):
         """在下方详情区展示选中运行日志事件的完整消息与 detail（支持多行 traceback）。"""
