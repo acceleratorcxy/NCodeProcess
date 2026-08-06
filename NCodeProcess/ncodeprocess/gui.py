@@ -398,6 +398,19 @@ def application_directory() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def reprocess_plans(plans, info, config, program_tools):
+    """内存重处理一组 FilePlan（后台线程调用，不触碰任何 Tk 对象）。
+
+    返回实际完成重处理的计划列表；仅处理 MPF、有程序名且可读取原始文本的计划。
+    """
+    applied = []
+    for plan in plans:
+        if plan.kind == "mpf" and plan.program and plan.original_text is not None:
+            reprocess_file(plan, info, config, tools=program_tools.get(plan.program, []))
+            applied.append(plan)
+    return applied
+
+
 class App(ttk.Frame):
     def __init__(self, master, settings_registry_key=None):
         super().__init__(master, padding=8)
@@ -1605,21 +1618,34 @@ class App(ttk.Frame):
             return
         self.applied_info = ProgramInfo(v["bianzhi"].get().strip(), v["shenhe"].get().strip(), v["drawing"].get().strip(), v["version"].get().strip(), "", "SIE840D", v["date"].get().strip())
         self.info_defaults.update({key: v[key].get().strip() for key in self.info_defaults})
+        # 主线程捕获配置、程序信息与计划快照，后台线程只做纯逻辑重处理，
+        # 避免工作线程读取 Tk 变量；完成后经 _safe_after 回主线程刷新预览。
         preview_config = self.config()
-        applied_plans = []
-        if self.scan_result is not None:
-            for plan_file in self.scan_result.files:
-                if plan_file.kind == "mpf" and plan_file.program and plan_file.original_text is not None:
-                    # WP-P3：内存局部重处理，立即生成预览，不再依赖整目录重扫。
-                    reprocess_file(plan_file, self.info(), preview_config, tools=self.program_tools.get(plan_file.program, []))
-                    self.program_header_values[plan_file.program] = {
-                        "bianzhi": v["bianzhi"].get().strip(),
-                        "shenhe": v["shenhe"].get().strip(),
-                        "drawing": v["drawing"].get().strip(),
-                        "version": v["version"].get().strip(),
-                        "date": v["date"].get().strip(),
-                    }
-                    applied_plans.append(plan_file)
+        info = self.info()
+        plans = [p for p in (self.scan_result.files if self.scan_result else [])
+                 if p.kind == "mpf" and p.program and p.original_text is not None]
+        generation = self._scan_generation
+        self.status.set("正在应用程序信息并生成预览……")
+
+        def work():
+            applied = reprocess_plans(plans, info, preview_config, self.program_tools)
+            self._safe_after(0, lambda: self._finish_apply_info(applied, generation))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_apply_info(self, applied_plans, generation):
+        """后台重处理完成后回到主线程刷新预览（代际防护：旧结果不覆盖新状态）。"""
+        if generation != self._scan_generation:
+            return
+        v = self.info_vars
+        for plan_file in applied_plans:
+            self.program_header_values[plan_file.program] = {
+                "bianzhi": v["bianzhi"].get().strip(),
+                "shenhe": v["shenhe"].get().strip(),
+                "drawing": v["drawing"].get().strip(),
+                "version": v["version"].get().strip(),
+                "date": v["date"].get().strip(),
+            }
         mode = "覆盖修改" if self.overwrite_fields.get() else "按默认逻辑（保留已有值）"
         self.status.set(f"已生成 {len(applied_plans)} 个程序的预览（{mode}）。确认无误后点击“确认并执行处理”写入文件。")
         # 立即用内存预览刷新表格与右侧信息（含新的头部/刀具）。
@@ -1640,7 +1666,7 @@ class App(ttk.Frame):
                 except (IndexError, TypeError, ValueError):
                     continue
         self.show_selected()
-        # WP-P3：末尾保留一次轻量扫描，刷新图号候选等目录级全局数据。
+        # WP-P3：末尾保留一次轻量扫描，刷新图号候选等目录级全局数据（扫描本身在后台线程执行）。
         self.scan()
 
     def _show_overwrite_help(self):

@@ -1139,6 +1139,24 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 ---
 
+### 2.85 第三轮收尾 WP-F1：全部应用后台重处理（2026-08-06）
+
+按「第三轮收尾实施计划」WP-F1 消除「全部应用」UI 冻结：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `reprocess_plans` 模块级纯函数 | `gui.py` 新增无 Tk 依赖的纯函数（循环 `reprocess_file`），供后台线程调用 |
+| 2 | `apply_info` 后台化 | 主线程先捕获配置/程序信息/计划快照 → 后台线程 `reprocess_plans` → `_safe_after` 回主线程 `_finish_apply_info` 刷新预览；带扫描代际防护，旧结果不覆盖新状态；状态栏先显示「正在应用程序信息并生成预览……」 |
+| 3 | `_finish_apply_info` 主线程刷新 | 更新 `program_header_values`、恢复选中程序、刷新表格/右侧预览，末尾保留轻量 `scan()`（扫描本身后台执行） |
+| 4 | `apply_selected` 保持同步 | 仅重处理选中文件（通常 1 个），无冻结问题，维持原逻辑 |
+| 5 | 测试同步桩 | `tests/test_gui.py` 新增 `_sync_thread` 将 `threading.Thread` 替换为同步执行；两个 `apply_info` 用例加桩并 pump 事件后断言不变 |
+
+**验证**：`test_gui` 104 项、主工具全量 **245 项**全绿；打包版 EXE 6.31MB，SHA256 `37324a83…`，已同步 `测试\`，用户实测通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、打包实测确认后提交。
+
+---
+
 ## 三、后续建议（可选）
 
 1. **Batch 2 配置持久化**：必填字段/M03 策略/S/F 上下限/辅助顺序/换行目前仅本次运行生效；如需与 Batch 1 一致持久化，需扩展 `REGISTRY_DEFAULTS` 并同步调整 preferences 测试。

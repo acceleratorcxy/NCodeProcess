@@ -25,6 +25,14 @@ from ncodeprocess.preferences import clear_all, load_all, save_all
 TEST_SETTINGS_KEY = r"Software\NCodeProcess_UnitTests_Gui"
 
 
+def _sync_thread(thread_class):
+    """把 threading.Thread 替换为同步执行 target 的桩（GUI 线程测试专用）。"""
+    class SynchronousThread(thread_class):
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+    return SynchronousThread
+
+
 class LayoutWidgetMixin:
     """布局/交互/生命周期测试共用的窗口构造、遍历与等待 helper（不含 test_ 用例）。"""
 
@@ -1583,8 +1591,10 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
             app.info_vars["drawing"].set("NEW_D")
             app.info_vars["version"].set("V1")
             app.overwrite_fields.set(True)
-            with patch.object(App, "scan") as scan_mock:
+            with patch("ncodeprocess.gui.threading.Thread", _sync_thread(threading.Thread)), \
+                 patch.object(App, "scan") as scan_mock:
                 app.apply_info()
+                root.update()   # 同步桩下 after(0) 回调在此刷新预览
             # 内存重处理立即生效（预览刷新），不依赖整目录重扫。
             self.assertIn('MSG("DRAWING NUMBER:NEW_D")', plan.output_text or "")
             self.assertLessEqual(scan_mock.call_count, 1)
@@ -1787,8 +1797,10 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
             app.scan_result = ScanResult("tmp", [plan])
             app.info_vars["drawing"].set("NEWDRAW")
             app.info_vars["version"].set("V9")
-            with patch.object(app, "scan"):
+            with patch("ncodeprocess.gui.threading.Thread", _sync_thread(threading.Thread)), \
+                 patch.object(app, "scan"):
                 app.apply_info()
+                root.update()   # 同步桩下 after(0) 回调在此刷新预览
             self.assertEqual(app.program_header_values.get("A", {}).get("drawing"), "NEWDRAW")
         finally:
             root.destroy()

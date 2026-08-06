@@ -147,6 +147,14 @@
 - **安全**：Windows Defender 复测未检出威胁；360/火绒与 Windows 7 真机冒烟登记留待车间实测。
 - **跳过（可选待办）**：WP-P2（管线重构）、WP-S4（tcl/tk 裁剪）、WP-S5（ZIP 再压缩），详见审查与待办。
 
+## 附：第三轮收尾摘要（2026-08-06，未独立发版）
+
+按「NCodeProcess 第三轮收尾实施计划」（`docs/superpowers/plans/2026-08-06-round2-followup-plan.md`）执行，决策点确认：D1=C（版本保持 1.0.0，尚未正式发布）、D2=A（仅收尾 WP-F1~F5）、D3=B、D4=B。
+
+- **WP-F1**（已处理，提交后）：「全部应用」改为后台线程重处理（`reprocess_plans` 纯函数 + `_finish_apply_info` 主线程刷新 + 代际防护），25 MPF 点「全部应用」不再冻结界面；`apply_selected` 保持同步；主工具 245 项全绿，打包版用户实测通过。
+
+后续 WP-F2（运行日志埋点与截断去重）、F3（查看器图表容错）、F4（分号语义文档化）、F5（构建脚本缩进清理）随本轮推进同步追加。
+
 ## 八、相关文档
 
 - 实施计划（已归档，仅本地保留、git 不跟踪）：`docs/archive/superpowers/plans/2026-08-04-gui-config-settings-batch2-plan.md`
