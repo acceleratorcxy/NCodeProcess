@@ -245,6 +245,11 @@ class FilePlan:
     program_name_source: str = ""
     # WP-A2：多刀程序跳过自动添加换刀指令的原因（空 = 未跳过）。
     auto_tool_change_skipped: str = ""
+    # WP-A2：最新 APT 的元数据与轨迹统计（挂载到 MPF 计划，供展示/报告/校验）。
+    apt_meta: Optional[AptMeta] = None
+    apt_toolpath: Optional[ToolpathStats] = None
+    apt_source_path: Optional[str] = None
+    apt_encoding: str = ""
 
 
 @dataclass
@@ -513,6 +518,301 @@ def _extract_apt_tools_from_path(path: Path, encoding: str = "auto") -> List[Too
         _APT_TOOL_CACHE.clear()
     _APT_TOOL_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, list(tools))
     return tools
+
+
+@dataclass
+class AptMeta:
+    """APT 源文件的机械加工元数据（规划值，供报告与交叉校验）。"""
+    machine: str = ""
+    pp_table: str = ""
+    catia_version: str = ""
+    generated_at: str = ""
+    operate: str = ""
+    operations: List[str] = field(default_factory=list)
+    transform: Optional[List[float]] = None          # $$ 位姿矩阵数值（样例为 3×4，缺失为 None）
+    spindles: List[Tuple[str, str, str]] = field(default_factory=list)  # (转速, 单位, 方向)
+    feeds: List[Tuple[str, str]] = field(default_factory=list)          # (进给, 单位) 去重保序
+    coolant: List[str] = field(default_factory=list)                    # ON/OFF/MIST/FLOOD
+    tool_loads: List[int] = field(default_factory=list)                 # LOADTL 首参数（刀具号）
+    program_name: str = ""                                              # $$ 头部程序名行（字母开头候选）
+    operation_feeds: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)      # 操作名 → 进给档位
+    operation_spindles: Dict[str, List[Tuple[str, str, str]]] = field(default_factory=dict)  # 操作名 → 主轴
+
+    def to_dict(self):
+        return asdict(self)
+
+
+APT_MACHIN_RE = re.compile(r"^\$\$\s*MACHIN\s+(.+)$", re.I)
+APT_PPTABLE_RE = re.compile(r"^\$\$\s*PP-TABLE\s*:\s*(.+)$", re.I)
+APT_VERSION_RE = re.compile(r"^\$\$\s*CATIA\s+APT\s+VERSION\s+(.+)$", re.I)
+APT_GENERATED_RE = re.compile(r"^\$\$\s*Generated\s+on\s+(.+)$", re.I)
+APT_OPERATE_RE = re.compile(r"^\$\$\s*OPERATE\s+(.+)$", re.I)
+APT_OPERATION_RE = re.compile(r"^\$\$\s*OPERATION\s+NAME\s*:\s*(.+)$", re.I)
+APT_TRANSFORM_RE = re.compile(
+    r"^\$\$\s+([+-]?\d+\.\d+)\s+([+-]?\d+\.\d+)\s+([+-]?\d+\.\d+)\s+([+-]?\d+\.\d+)\s*$")
+APT_SPINDL_RE = re.compile(r"SPINDL\s*/\s*([0-9.]+)\s*,\s*([A-Z]+)\s*,\s*(CLW|CCLW)", re.I)
+APT_FEDRAT_RE = re.compile(r"FEDRAT\s*/\s*([0-9.]+)\s*,\s*([A-Z]+)", re.I)
+APT_COOLNT_RE = re.compile(r"COOLNT\s*/\s*(ON|OFF|MIST|FLOOD)", re.I)
+APT_LOADTL_RE = re.compile(r"LOADTL\s*/\s*(\d+)(?:\s*,\s*(\d+))?", re.I)
+# $$ 头部程序名行（字母开头，排除矩阵/纯数字行），如 "$$ AG6D311A0101"。
+APT_PROGNAME_DOLLAR_RE = re.compile(r"^\$\$\s+([A-Za-z][A-Za-z0-9_-]*)\s*$")
+
+
+def extract_apt_meta(path: Path, encoding: str = "auto") -> AptMeta:
+    """流式解析 APT 文件，返回头部元数据与加工参数（仅保留去重值）。"""
+    meta = AptMeta()
+    seen_ops = set()
+    seen_spindles = set()
+    seen_feeds = set()
+    seen_coolant = set()
+    seen_loads = set()
+    transform = []
+    current_operation = ""
+    with path.open("rb") as stream:
+        for raw_line in stream:
+            if len(raw_line) > 400:
+                raw_line = raw_line[:400]
+            try:
+                line = _decode(raw_line, encoding)[0].strip()
+            except (UnicodeDecodeError, ValueError):
+                continue
+            m = APT_MACHIN_RE.match(line)
+            if m and not meta.machine:
+                meta.machine = m.group(1).strip()
+                continue
+            m = APT_PPTABLE_RE.match(line)
+            if m and not meta.pp_table:
+                meta.pp_table = m.group(1).strip()
+                continue
+            m = APT_VERSION_RE.match(line)
+            if m and not meta.catia_version:
+                meta.catia_version = m.group(1).strip()
+                continue
+            m = APT_GENERATED_RE.match(line)
+            if m and not meta.generated_at:
+                meta.generated_at = m.group(1).strip()
+                continue
+            m = APT_OPERATE_RE.match(line)
+            if m and not meta.operate:
+                meta.operate = m.group(1).strip()
+                continue
+            m = APT_OPERATION_RE.match(line)
+            if m:
+                name = m.group(1).strip()
+                if name not in seen_ops:
+                    seen_ops.add(name)
+                    meta.operations.append(name)
+                current_operation = name
+                continue
+            m = APT_PROGNAME_DOLLAR_RE.match(line)
+            if m and not meta.program_name:
+                meta.program_name = m.group(1)
+                continue
+            m = APT_TRANSFORM_RE.match(line)
+            if m:
+                transform.extend(float(part) for part in m.groups())
+                continue
+            m = APT_SPINDL_RE.search(line)
+            if m:
+                key = (m.group(1), m.group(2).upper(), m.group(3).upper())
+                if key not in seen_spindles:
+                    seen_spindles.add(key)
+                    meta.spindles.append(key)
+                if current_operation:
+                    op_list = meta.operation_spindles.setdefault(current_operation, [])
+                    if key not in op_list:
+                        op_list.append(key)
+                continue
+            m = APT_FEDRAT_RE.search(line)
+            if m:
+                key = (m.group(1), m.group(2).upper())
+                if key not in seen_feeds:
+                    seen_feeds.add(key)
+                    meta.feeds.append(key)
+                if current_operation:
+                    op_list = meta.operation_feeds.setdefault(current_operation, [])
+                    if key not in op_list:
+                        op_list.append(key)
+                continue
+            m = APT_COOLNT_RE.search(line)
+            if m:
+                value = m.group(1).upper()
+                if value not in seen_coolant:
+                    seen_coolant.add(value)
+                    meta.coolant.append(value)
+                continue
+            m = APT_LOADTL_RE.search(line)
+            if m:
+                number = int(m.group(1))
+                if number not in seen_loads:
+                    seen_loads.add(number)
+                    meta.tool_loads.append(number)
+    if transform:
+        meta.transform = transform
+    return meta
+
+
+_APT_META_CACHE: Dict[str, Tuple[int, int, str, AptMeta]] = {}
+
+
+def _extract_apt_meta_cached(path: Path, encoding: str = "auto") -> AptMeta:
+    stat = path.stat()
+    key = str(path.resolve())
+    cached = _APT_META_CACHE.get(key)
+    if cached and cached[:3] == (stat.st_mtime_ns, stat.st_size, encoding):
+        return cached[3]
+    meta = extract_apt_meta(path, encoding)
+    if len(_APT_META_CACHE) > 1000:
+        _APT_META_CACHE.clear()
+    _APT_META_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, meta)
+    return meta
+
+
+@dataclass
+class ToolpathStats:
+    """APT 轨迹统计（规划轨迹，供报告与查看器展示）。"""
+    goto_count: int = 0
+    min_x: float = 0.0
+    max_x: float = 0.0
+    min_y: float = 0.0
+    max_y: float = 0.0
+    min_z: float = 0.0
+    max_z: float = 0.0
+    arc_count: int = 0
+    retract_count: int = 0
+    retract_plane: Optional[float] = None          # 自适应抬刀平面（出现最多的最高面）
+
+    def to_dict(self):
+        return asdict(self)
+
+
+_APT_TOOLPATH_CACHE: Dict[str, Tuple[int, int, str, ToolpathStats]] = {}
+_APT_TRACE_CACHE: Dict[str, Tuple[int, int, str, List[float]]] = {}
+
+
+def _retract_runs(z_values: Sequence[float], plane: float, tolerance: float) -> int:
+    """统计 Z ≥ 平面-容差 的连续上升段数量（连续高 Z 点合并为一次抬刀）。"""
+    count = 0
+    in_run = False
+    threshold = plane - tolerance
+    for z in z_values:
+        high = z >= threshold
+        if high and not in_run:
+            count += 1
+        in_run = high
+    return count
+
+
+def _adaptive_retract_plane(z_values: Sequence[float]) -> Optional[float]:
+    """出现最多的最高面：在最高重复 Z 面的邻带内，取出现次数最多的 Z 值。
+
+    孤立高点（频次 < 2）不参与；邻带宽度 = max(5, 最高面×5%)；
+    无法确定时回退文件最高 Z。
+    """
+    if not z_values:
+        return None
+    counts = Counter(round(value, 3) for value in z_values)
+    repeated = sorted((value for value, count in counts.items() if count >= 2), reverse=True)
+    if not repeated:
+        return max(z_values)
+    highest = repeated[0]
+    band_low = highest - max(5.0, highest * 0.05)
+    candidates = [(counts[value], value) for value in repeated if value >= band_low]
+    if not candidates:
+        return highest
+    _count, plane = max(candidates)
+    return plane
+
+
+def _stream_z_values(path: Path, encoding: str = "auto") -> List[float]:
+    """流式读取 GOTO 轨迹的 Z 序列（供抬刀高度重算使用）。"""
+    nums = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?")
+    z_values: List[float] = []
+    with path.open("rb") as stream:
+        for raw_line in stream:
+            if not raw_line.startswith(b"GOTO"):
+                continue
+            values = [float(value) for value in nums.findall(raw_line.decode("ascii", errors="ignore"))]
+            if len(values) >= 3:
+                z_values.append(values[2])
+    return z_values
+
+
+def extract_apt_toolpath(path: Path, encoding: str = "auto") -> ToolpathStats:
+    """流式统计 APT 轨迹：GOTO 点数、XYZ 行程、圆弧数、抬刀次数（自适应平面）。"""
+    stats = ToolpathStats()
+    nums = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?")
+    z_values: List[float] = []
+    initialized = False
+    native_retract = 0
+    with path.open("rb") as stream:
+        for raw_line in stream:
+            if raw_line.lstrip().startswith(b"RAPID") or b"GOHOME" in raw_line:
+                native_retract += 1
+            elif raw_line.startswith(b"GOTO"):
+                values = [float(value) for value in nums.findall(raw_line.decode("ascii", errors="ignore"))]
+                if len(values) < 3:
+                    continue
+                x, y, z = values[0], values[1], values[2]
+                if not initialized:
+                    stats.min_x = stats.max_x = x
+                    stats.min_y = stats.max_y = y
+                    stats.min_z = stats.max_z = z
+                    initialized = True
+                else:
+                    stats.min_x = min(stats.min_x, x)
+                    stats.max_x = max(stats.max_x, x)
+                    stats.min_y = min(stats.min_y, y)
+                    stats.max_y = max(stats.max_y, y)
+                    stats.min_z = min(stats.min_z, z)
+                    stats.max_z = max(stats.max_z, z)
+                stats.goto_count += 1
+                z_values.append(z)
+            elif b"CIRCLE" in raw_line:
+                stats.arc_count += 1
+    if native_retract:
+        # APT 原生快速移动标记优先（未来后处理可能输出 RAPID/GOHOME）。
+        stats.retract_count = native_retract
+    else:
+        plane = _adaptive_retract_plane(z_values)
+        if plane is not None:
+            stats.retract_plane = plane
+            stats.retract_count = _retract_runs(z_values, plane, max(5.0, plane * 0.05))
+    try:
+        stat = path.stat()
+        key = str(path.resolve())
+        _APT_TRACE_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, z_values)
+        if len(_APT_TRACE_CACHE) > 1000:
+            _APT_TRACE_CACHE.clear()
+    except OSError:
+        pass
+    return stats
+
+
+def _extract_apt_toolpath_cached(path: Path, encoding: str = "auto") -> ToolpathStats:
+    stat = path.stat()
+    key = str(path.resolve())
+    cached = _APT_TOOLPATH_CACHE.get(key)
+    if cached and cached[:3] == (stat.st_mtime_ns, stat.st_size, encoding):
+        return cached[3]
+    stats = extract_apt_toolpath(path, encoding)
+    if len(_APT_TOOLPATH_CACHE) > 1000:
+        _APT_TOOLPATH_CACHE.clear()
+    _APT_TOOLPATH_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, stats)
+    return stats
+
+
+def recount_retracts(path: Path, height: float, encoding: str = "auto") -> int:
+    """按指定抬刀高度重算抬刀次数（优先使用轨迹缓存；无缓存时重新流式读取）。"""
+    stat = path.stat()
+    key = str(path.resolve())
+    cached = _APT_TRACE_CACHE.get(key)
+    if not cached or cached[:3] != (stat.st_mtime_ns, stat.st_size, encoding):
+        z_values = _stream_z_values(path, encoding)
+        _APT_TRACE_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, z_values)
+    else:
+        z_values = cached[3]
+    return _retract_runs(z_values, height, max(5.0, height * 0.05))
 
 
 def _first_lines(text: str, limit: int) -> List[str]:
@@ -1613,8 +1913,13 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                 else:
                     tools = _extract_apt_tools_from_path(directory / apt_plan.source, config.encoding)
                 apt_plan.parsed_tools = list(tools)
+            # WP-A2：元数据与轨迹统计挂到最新 APT 计划，供 MPF 复制引用。
+            apt_plan.apt_meta = _extract_apt_meta_cached(directory / apt_plan.source, config.encoding)
+            apt_plan.apt_toolpath = _extract_apt_toolpath_cached(directory / apt_plan.source, config.encoding)
             auto_tools[program] = (mtime, tools)
         except Exception:
+            apt_plan.apt_meta = None
+            apt_plan.apt_toolpath = None
             auto_tools[program] = (mtime, [])
     emit_event("info", "plan_built",
                f"生成处理计划：{len(scan.files)} 个文件，MPF {sum(f.kind == 'mpf' for f in scan.files)} 个，"
@@ -1654,6 +1959,13 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                 f.target = str(directory / (f.program + config.program_output_extension))
                 # 缓存本次生效的刀具信息，供 reprocess_file/应用所选回退，避免刷掉刀具。
                 f.parsed_tools = list(effective_info.tools)
+                # WP-A2：复制最新 APT 的元数据/轨迹/源路径到 MPF 计划（线程内只读引用）。
+                apt_plan = latest_apt.get(f.program)
+                if apt_plan:
+                    f.apt_meta = apt_plan[1].apt_meta
+                    f.apt_toolpath = apt_plan[1].apt_toolpath
+                    f.apt_source_path = str(directory / apt_plan[1].source)
+                    f.apt_encoding = apt_plan[1].encoding or ""
                 f.issues.extend(header_issues)
                 f.issues.extend(validation_issues)
                 if Path(f.source).name != Path(f.target).name:
@@ -1973,7 +2285,7 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
         diff = []
         if f.original_text is not None and f.output_text is not None and f.original_text != f.output_text:
             diff = list(difflib.unified_diff(f.original_text.splitlines(), f.output_text.splitlines(), fromfile=f.source + " (before)", tofile=(Path(f.target).name if f.target else f.source) + " (after)", lineterm=""))
-        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "target": f.target or "", "program_name_source": f.program_name_source or "", "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None}
+        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "target": f.target or "", "program_name_source": f.program_name_source or "", "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None, "apt_meta": f.apt_meta.to_dict() if f.apt_meta else None, "toolpath_stats": f.apt_toolpath.to_dict() if f.apt_toolpath else None}
         errors = [x for x in f.issues if x.severity == "error"]
         report.warnings += sum(x.severity == "warning" for x in f.issues)
         report.errors += len(errors)

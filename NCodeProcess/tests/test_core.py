@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _decode, add_initial_tool_change, add_m03, align_lines, apply_header, build_plan, calculate_stats, code_part, emit_event, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _decode, _extract_apt_meta_cached, _extract_apt_toolpath_cached, add_initial_tool_change, add_m03, align_lines, apply_header, build_plan, calculate_stats, code_part, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
@@ -654,6 +654,165 @@ class CoreTests(unittest.TestCase):
             "$$ PRODUCTNAME    NCSetup_M-D0354F31311-201_11.47.18\n"
         )
         self.assertEqual(extract_drawing_candidates(text), [("APT FILENAME", "D0354F31311-201")])
+
+    def test_apt_meta_extracts_header_and_process_records(self):
+        # WP-A1：APT 头部元数据（机床/后处理表/版本/操作）与加工参数（冷却/主轴/进给/装夹）。
+        root = self.make_dir()
+        apt = root / "x.aptsource"
+        apt.write_text(
+            "$$     Generated on 2026年7月31日 9:30:05\n"
+            "$$     CATIA APT VERSION 1.0\n"
+            "$$ PP-TABLE : HPM1150U.PPTable\n"
+            "$$ FILENAME  D0354F31311-201.CATProcess\n"
+            "$$ OPERATE   Part Operation.1\n"
+            "$$ MACHIN    3-axis Machine.1\n"
+            "PPRINT PROGNAME AG6D311A0101\n"
+            "COOLNT/ON\n"
+            "$$ OPERATION NAME : Tool Change.1\n"
+            "$$ OPERATION NAME : Roughing.3\n"
+            "CUTTER/ 20.000000, 3.000000\n"
+            "TOOLNO/1, 20.000000, 3.000000,, 120.000000,$\n"
+            "LOADTL/1,1\n"
+            "SPINDL/ 5000.0000,RPM,CLW\n"
+            "FEDRAT/ 3000.0000,MMPM\n"
+            "FEDRAT/ 6000.0000,MMPM\n",
+            encoding="utf-8",
+        )
+        meta = extract_apt_meta(apt)
+        self.assertEqual(meta.machine, "3-axis Machine.1")
+        self.assertEqual(meta.pp_table, "HPM1150U.PPTable")
+        self.assertEqual(meta.catia_version, "1.0")
+        self.assertEqual(meta.operations, ["Tool Change.1", "Roughing.3"])
+        self.assertEqual(meta.coolant, ["ON"])
+        self.assertEqual(meta.spindles, [("5000.0000", "RPM", "CLW")])
+        self.assertEqual(meta.feeds, [("3000.0000", "MMPM"), ("6000.0000", "MMPM")])
+        self.assertEqual(meta.tool_loads, [1])
+
+    def test_apt_meta_parses_transform_matrix(self):
+        # WP-A1：$$ 位姿矩阵行解析为浮点序列。
+        text = "$$    -0.99863    -0.05232     0.00137 18984.32985\n"
+        apt = self.make_dir() / "m.aptsource"
+        apt.write_text(text, encoding="utf-8")
+        meta = extract_apt_meta(apt)
+        self.assertEqual(len(meta.transform or []), 4)
+        self.assertAlmostEqual(meta.transform[3], 18984.32985)
+
+    def test_apt_meta_operation_grouping_and_program_name(self):
+        # WP-A1 扩展：$$ 程序名行提取；SPINDL/FEDRAT 按 OPERATION NAME 上下文分组。
+        apt = self.make_dir() / "g.aptsource"
+        apt.write_text(
+            "$$ AG6D311A0101\n"
+            "$$ OPERATION NAME : Roughing.3\n"
+            "SPINDL/ 5000.0000,RPM,CLW\n"
+            "FEDRAT/ 3000.0000,MMPM\n"
+            "FEDRAT/ 6000.0000,MMPM\n"
+            "$$ OPERATION NAME : Finishing.1\n"
+            "SPINDL/ 8000.0000,RPM,CLW\n",
+            encoding="utf-8",
+        )
+        meta = extract_apt_meta(apt)
+        self.assertEqual(meta.program_name, "AG6D311A0101")
+        self.assertEqual(meta.operation_feeds["Roughing.3"], [("3000.0000", "MMPM"), ("6000.0000", "MMPM")])
+        self.assertEqual(meta.operation_spindles["Finishing.1"], [("8000.0000", "RPM", "CLW")])
+
+    def test_toolpath_stats_streaming(self):
+        # WP-A2：GOTO 点数/XYZ 行程/圆弧数/抬刀次数（自适应平面）。
+        apt = self.make_dir() / "t.aptsource"
+        apt.write_text(
+            "GOTO / 0.0, 0.0, 100.0\n"
+            "GOTO / 1.0, 1.0, -1.0\n"
+            "GOTO / 2.0, 1.0, -2.0\n"
+            "GOTO / 3.0, 2.0, 100.0\n"
+            "GOTO / 4.0, 2.0, -1.0\n"
+            "TLON,GOFWD/ (CIRCLE/ 1.0, 2.0, 3.0,$\n",
+            encoding="utf-8",
+        )
+        stats = extract_apt_toolpath(apt)
+        self.assertEqual(stats.goto_count, 5)
+        self.assertAlmostEqual(stats.min_x, 0.0)
+        self.assertAlmostEqual(stats.max_x, 4.0)
+        self.assertAlmostEqual(stats.min_z, -2.0)
+        self.assertAlmostEqual(stats.max_z, 100.0)
+        self.assertEqual(stats.arc_count, 1)
+        self.assertAlmostEqual(stats.retract_plane, 100.0)
+        self.assertEqual(stats.retract_count, 2)  # 两段连续高 Z
+
+    def test_retract_plane_uses_most_frequent_high_plane(self):
+        # WP-A2：抬刀平面 = 最高重复面邻带内出现最多的 Z 值（孤立高点不参与）。
+        apt = self.make_dir() / "p.aptsource"
+        apt.write_text(
+            "GOTO / 0,0,110\n" +
+            "GOTO / 0,0,100\n" * 3 +
+            "GOTO / 0,0,0\n" * 4,
+            encoding="utf-8",
+        )
+        stats = extract_apt_toolpath(apt)
+        self.assertAlmostEqual(stats.retract_plane, 100.0)
+
+    def test_toolpath_native_rapid_priority(self):
+        # WP-A2：含 RAPID/GOHOME 原生标记时按标记计数。
+        apt = self.make_dir() / "r.aptsource"
+        apt.write_text(
+            "RAPID\nGOTO / 0,0,100\nGOTO / 0,0,0\n"
+            "RAPID\nGOTO / 1,1,100\nGOHOME\n",
+            encoding="utf-8",
+        )
+        stats = extract_apt_toolpath(apt)
+        self.assertEqual(stats.retract_count, 3)
+
+    def test_recount_retracts_custom_height(self):
+        # WP-A2：按自定义抬刀高度重算次数（供手动修订）。
+        apt = self.make_dir() / "h.aptsource"
+        apt.write_text(
+            "GOTO / 0,0,100\nGOTO / 0,0,100\nGOTO / 0,0,20\n"
+            "GOTO / 0,0,-1\nGOTO / 0,0,100\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(recount_retracts(apt, 100.0), 2)
+        self.assertEqual(recount_retracts(apt, 50.0), 2)
+        self.assertEqual(recount_retracts(apt, 150.0), 0)
+
+    def test_apt_toolpath_cached_by_mtime(self):
+        # WP-A2：轨迹统计按 (mtime, size, encoding) 缓存，文件变化后重新解析。
+        apt = self.make_dir() / "c.aptsource"
+        apt.write_text("GOTO / 0,0,10\nGOTO / 0,0,20\n", encoding="utf-8")
+        first = _extract_apt_toolpath_cached(apt)
+        second = _extract_apt_toolpath_cached(apt)
+        self.assertIs(first, second)
+        apt.write_text("GOTO / 0,0,10\n", encoding="utf-8")
+        third = _extract_apt_toolpath_cached(apt)
+        self.assertEqual(third.goto_count, 1)
+
+    def test_build_plan_attaches_apt_toolpath(self):
+        # WP-A2：build_plan 把最新 APT 的元数据/轨迹/源路径挂到对应 MPF 计划。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S1000M03\nN2M30\n', encoding="utf-8")
+        (root / "x_P_I.aptsource").write_text(
+            "$$ MACHIN 3-axis Machine.1\n"
+            "GOTO / 0.0, 0.0, 10.0\n"
+            "GOTO / 10.0, 0.0, -1.0\n",
+            encoding="utf-8",
+        )
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        mpf = self._mpf(plan)
+        self.assertIsNotNone(mpf.apt_toolpath)
+        self.assertEqual(mpf.apt_toolpath.goto_count, 2)
+        self.assertIsNotNone(mpf.apt_meta)
+        self.assertEqual(mpf.apt_meta.machine, "3-axis Machine.1")
+        self.assertTrue((mpf.apt_source_path or "").endswith("x_P_I.aptsource"))
+
+    def test_apt_meta_cached_by_mtime(self):
+        # WP-A1：元数据按 (mtime, size, encoding) 缓存，文件变化后重新解析。
+        root = self.make_dir()
+        apt = root / "c.aptsource"
+        apt.write_text("$$ MACHIN  A\n", encoding="utf-8")
+        first = _extract_apt_meta_cached(apt)
+        second = _extract_apt_meta_cached(apt)
+        self.assertIs(first, second)
+        apt.write_text("$$ MACHIN  B\n", encoding="utf-8")
+        third = _extract_apt_meta_cached(apt)
+        self.assertEqual(third.machine, "B")
 
     def test_scan_exposes_apt_drawing_candidates_without_applying(self):
         root = self.make_dir()

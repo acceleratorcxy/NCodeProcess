@@ -28,6 +28,7 @@ from .core import (
     extract_tools,
     format_nc_date,
     process_plan,
+    recount_retracts,
     reprocess_file,
     save_timestamped_report,
     scan_directory,
@@ -437,6 +438,8 @@ class App(ttk.Frame):
         self.applied_info = ProgramInfo()
         self.program_header_values = {}
         self.program_tools = {}
+        # WP-A2：按程序名记忆的手动抬刀高度（本次运行内有效，重新扫描后保留）。
+        self.apt_retract_heights = {}
         self.current_program = None
         self.detail_notebook = None
         self.stats_page = None
@@ -873,7 +876,9 @@ class App(ttk.Frame):
         # program/parameter, with only the requested min/max and G00 check.
         # This makes the all-file overview readable without a horizontal
         # scrollbar at the default window size.
-        self.stats_table = self._table(stats_page, ("program", "param", "count", "min", "max", "g00"), ("程序", "参数", "出现次数", "最小值", "最大值", "G00 检查"), (175, 65, 75, 105, 105, 150))
+        stats_frame = ttk.Frame(stats_page)
+        stats_frame.pack(fill="both", expand=True)
+        self.stats_table = self._table(stats_frame, ("program", "param", "count", "min", "max", "g00"), ("程序", "参数", "出现次数", "最小值", "最大值", "G00 检查"), (175, 65, 75, 105, 105, 150))
         for column, width in (("key", 140), ("value", 410)):
             self.info_table.column(column, width=width, anchor="w")
         for column, width in (("line", 40), ("kind", 70), ("severity", 55), ("text", 160), ("suggestion", 220)):
@@ -883,6 +888,29 @@ class App(ttk.Frame):
         self.info_table.pack(fill="both", expand=True)
         self.issue_table.pack(fill="both", expand=True)
         self.stats_table.pack(fill="both", expand=True)
+        apt_frame = ttk.LabelFrame(stats_page, text="APT 轨迹（来源：最新 APTSOURCE）")
+        apt_frame.pack(fill="x", padx=6, pady=(2, 4))
+        self.apt_trace_frame = apt_frame
+        self.apt_retract_count_var = tk.StringVar(value="-")
+        self.apt_xyz_var = tk.StringVar(value="-")
+        xyz_row = ttk.Frame(apt_frame)
+        xyz_row.pack(fill="x", padx=6, pady=(2, 0))
+        ttk.Label(xyz_row, text="XYZ 行程：", foreground="#57606a").pack(side="left")
+        ttk.Label(xyz_row, textvariable=self.apt_xyz_var, anchor="w").pack(side="left")
+        height_row = ttk.Frame(apt_frame)
+        height_row.pack(fill="x", padx=6, pady=(0, 2))
+        ttk.Label(height_row, text="抬刀高度：").pack(side="left")
+        self.apt_retract_height_var = tk.StringVar(value="")
+        self.apt_retract_height_entry = ttk.Entry(height_row, textvariable=self.apt_retract_height_var, width=12)
+        self.apt_retract_height_entry.pack(side="left", padx=(0, 8))
+        self.apt_retract_height_entry.bind("<Return>", self._apply_apt_retract_height)
+        self.apt_retract_height_entry.bind("<FocusOut>", self._apply_apt_retract_height)
+        self.apt_retract_auto_var = tk.StringVar(value="自动识别：-")
+        ttk.Label(height_row, textvariable=self.apt_retract_auto_var, foreground="#57606a").pack(side="left", padx=(0, 10))
+        ttk.Label(height_row, text="抬刀次数：").pack(side="left")
+        ttk.Label(height_row, textvariable=self.apt_retract_count_var).pack(side="left")
+        self.apt_trace_hint_var = tk.StringVar(value="（回车生效并同步报告/全部程序信息）")
+        ttk.Label(height_row, textvariable=self.apt_trace_hint_var, foreground="#57606a").pack(side="left", padx=(10, 0))
         diff_frame = ttk.Frame(notebook)
         diff_frame.rowconfigure(0, weight=1)
         diff_frame.columnconfigure(0, weight=1, uniform="diff")
@@ -2062,6 +2090,7 @@ class App(ttk.Frame):
                 self.info_vars[key].set(existing_value or fallback)
         self.add_msg_rows(f.original_text, "已有/")
         self.add_msg_rows(f.output_text, "处理后/")
+        self._show_apt_trace(f)
         if f.kind != "mpf":
             self.current_program = None
             self.refresh_tool_table([])
@@ -2092,6 +2121,75 @@ class App(ttk.Frame):
                 values=(program, key, stats.counts.get(key, 0), self._stat_value(stats.minimum.get(key)), self._stat_value(stats.maximum.get(key)), "发现" + str(stats.g00_count) + " 处" if stats.g00_count else "未发现"),
             )
 
+    @staticmethod
+    def _trace_fmt(value):
+        return f"{value:.3f}"
+
+    def _effective_retract_count(self, f, height):
+        """按指定抬刀高度计算抬刀次数（有 APT 源路径时重算；否则回退已挂载值）。"""
+        if f.apt_source_path:
+            try:
+                return recount_retracts(Path(f.apt_source_path), height, f.apt_encoding or "auto")
+            except (OSError, ValueError):
+                pass
+        return f.apt_toolpath.retract_count if f.apt_toolpath else 0
+
+    def _show_apt_trace(self, f):
+        """刷新「APT 轨迹」区（含抬刀高度与次数，支持手动修订）。"""
+        toolpath = f.apt_toolpath if f.kind == "mpf" else None
+        if not toolpath:
+            self.apt_trace_frame.configure(text="APT 轨迹（无 APTSOURCE 数据）")
+            self.apt_xyz_var.set("-")
+            self.apt_retract_height_entry.configure(state="disabled")
+            self.apt_retract_height_var.set("")
+            self.apt_retract_auto_var.set("自动识别：-")
+            self.apt_retract_count_var.set("-")
+            self.apt_trace_hint_var.set("无 APTSOURCE 数据")
+            return
+        source_name = Path(f.apt_source_path).name if f.apt_source_path else f.source
+        self.apt_trace_frame.configure(text=f"APT 轨迹（来源：{source_name}）")
+        fmt = self._trace_fmt
+        self.apt_xyz_var.set(f"X {fmt(toolpath.min_x)} ~ {fmt(toolpath.max_x)}　"
+                             f"Y {fmt(toolpath.min_y)} ~ {fmt(toolpath.max_y)}　"
+                             f"Z {fmt(toolpath.min_z)} ~ {fmt(toolpath.max_z)}")
+        program = f.program or ""
+        override = self.apt_retract_heights.get(program)
+        auto_plane = toolpath.retract_plane
+        self.apt_retract_auto_var.set(f"自动识别：{fmt(auto_plane) if auto_plane is not None else '-'}")
+        self.apt_retract_height_entry.configure(state="normal")
+        if override is not None:
+            self.apt_retract_height_var.set(f"{override:.3f}")
+            count = self._effective_retract_count(f, override)
+        else:
+            self.apt_retract_height_var.set(f"{fmt(auto_plane) if auto_plane is not None else ''}")
+            count = toolpath.retract_count
+        self.apt_retract_count_var.set(str(count))
+        self.apt_trace_hint_var.set("")
+
+    def _apply_apt_retract_height(self, _event=None):
+        """提交抬刀高度修订：合法则按程序记忆并重算次数；非法回退自动值。"""
+        f = self.selected_plan()
+        if not f or not f.apt_toolpath:
+            return
+        program = f.program or ""
+        raw = self.apt_retract_height_var.get().strip()
+        try:
+            height = float(raw)
+            if height <= 0:
+                raise ValueError
+        except ValueError:
+            self.apt_retract_heights.pop(program, None)
+            self._show_apt_trace(f)
+            return
+        self.apt_retract_heights[program] = height
+        count = self._effective_retract_count(f, height)
+        self.apt_retract_count_var.set(str(count))
+        if self.all_stats_window is not None and self.all_stats_window.winfo_exists():
+            self.all_stats_window.destroy()
+            self.all_stats_window = None
+            self.show_all_program_stats()
+        self.status.set(f"已设置 {program} 抬刀高度 {height:.3f}，抬刀次数 {count}。")
+
     def show_all_program_stats(self):
         """Open an independent all-program overview window."""
         if not self.scan_result:
@@ -2106,9 +2204,9 @@ class App(ttk.Frame):
         window.transient(self.master)
         table = self._table(
             window,
-            ("program", "f_count", "f_min", "f_max", "s_count", "s_min", "s_max", "x_count", "x_min", "x_max", "y_count", "y_min", "y_max", "z_count", "z_min", "z_max", "g00"),
-            ("程序", "F 次数", "F 最小", "F 最大", "S 次数", "S 最小", "S 最大", "X 次数", "X 最小", "X 最大", "Y 次数", "Y 最小", "Y 最大", "Z 次数", "Z 最小", "Z 最大", "G00 检查"),
-            (170, 60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80, 120),
+            ("program", "f_count", "f_min", "f_max", "s_count", "s_min", "s_max", "x_count", "x_min", "x_max", "y_count", "y_min", "y_max", "z_count", "z_min", "z_max", "g00", "goto", "arc", "retract"),
+            ("程序", "F 次数", "F 最小", "F 最大", "S 次数", "S 最小", "S 最大", "X 次数", "X 最小", "X 最大", "Y 次数", "Y 最小", "Y 最大", "Z 次数", "Z 最小", "Z 最大", "G00 检查", "GOTO 点数", "圆弧数", "抬刀次数"),
+            (170, 60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80, 110, 85, 70, 80),
         )
         table.pack(fill="both", expand=True, padx=8, pady=8)
         self._bind_cell_tooltip(table)
@@ -2116,18 +2214,31 @@ class App(ttk.Frame):
         for f in rows:
             if f.stats is None and f.output_text is not None:
                 f.stats = calculate_stats(f.output_text)
+            merged = {}
             if f.stats:
                 s = f.stats
-                value = lambda key: self._stat_value(s.minimum.get(key))
-                maximum = lambda key: self._stat_value(s.maximum.get(key))
-                table.insert("", "end", values=(
-                    f.program or "", s.counts.get("F", 0), value("F"), maximum("F"),
-                    s.counts.get("S", 0), value("S"), maximum("S"),
-                    s.counts.get("X", 0), value("X"), maximum("X"),
-                    s.counts.get("Y", 0), value("Y"), maximum("Y"),
-                    s.counts.get("Z", 0), value("Z"), maximum("Z"),
-                    "发现 " + str(s.g00_count) + " 处" if s.g00_count else "未发现",
-                ))
+                for key in "FSXYZ":
+                    merged[key] = (s.counts.get(key, 0), self._stat_value(s.minimum.get(key)), self._stat_value(s.maximum.get(key)))
+            toolpath = f.apt_toolpath
+            if toolpath:
+                override = self.apt_retract_heights.get(f.program or "")
+                retract_count = self._effective_retract_count(f, override) if override is not None else toolpath.retract_count
+                goto_text, arc_text = str(toolpath.goto_count), str(toolpath.arc_count)
+            else:
+                goto_text = arc_text = "-"
+                retract_count = "-"
+            g00_text = "发现 " + str(f.stats.g00_count) + " 处" if f.stats and f.stats.g00_count else "未发现"
+            cells = []
+            for key in "FSXYZ":
+                count, minimum, maximum = merged.get(key, ("-", "-", "-"))
+                cells.extend((count, minimum, maximum))
+            table.insert("", "end", values=(
+                f.program or "",
+                cells[0], cells[1], cells[2], cells[3], cells[4], cells[5],
+                cells[6], cells[7], cells[8], cells[9], cells[10], cells[11],
+                cells[12], cells[13], cells[14],
+                g00_text, goto_text, arc_text, retract_count,
+            ))
 
         def close_window():
             if window.winfo_exists():
@@ -2136,9 +2247,9 @@ class App(ttk.Frame):
 
         screen_width = window.winfo_screenwidth()
         screen_height = window.winfo_screenheight()
-        width = min(1500, max(1050, screen_width - 80))
+        width = min(1700, max(1300, screen_width - 80))
         height = min(720, max(560, screen_height - 100))
-        self._show_centered(window, width, height, min_width=1050, min_height=420)
+        self._show_centered(window, width, height, min_width=1300, min_height=420)
         window.protocol("WM_DELETE_WINDOW", close_window)
 
     def render_diff(self, before, after):
@@ -2594,6 +2705,12 @@ class App(ttk.Frame):
         if self.overwrite_fields.get():
             confirmations.append("已确认：覆盖已有非空 MSG 字段")
         confirmations.append("已确认：执行目录处理（含清理、归档与重复文件处理）")
+        # WP-A2：手动抬刀高度在写入前应用到计划（报告 toolpath_stats 使用修订值）。
+        for plan_file in self.scan_result.files:
+            if plan_file.kind == "mpf" and plan_file.program in self.apt_retract_heights and plan_file.apt_toolpath:
+                height = self.apt_retract_heights[plan_file.program]
+                plan_file.apt_toolpath.retract_plane = height
+                plan_file.apt_toolpath.retract_count = self._effective_retract_count(plan_file, height)
         self.process_button.configure(state="disabled")
         self.status.set("正在处理当前目录……")
         self._processing = True

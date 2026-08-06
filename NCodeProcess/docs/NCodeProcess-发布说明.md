@@ -158,6 +158,15 @@
 
 第三轮收尾计划 WP-F1~F5 全部完成（查看器配套改动见查看器发布说明）。
 
+## 附：APT 信息提取与交叉校验摘要（2026-08-06，进行中）
+
+按「APT 信息提取与交叉校验」计划推进，已完成 WP-A1/A2：
+
+- **WP-A1**：`extract_apt_meta` 流式解析 APT 元数据（机床/后处理表/CATIA 版本/生成时间/操作列表/位姿矩阵/主轴/进给/冷却/装夹/`$$` 程序名，操作级进给与主轴分组），带缓存。
+- **WP-A2**：`extract_apt_toolpath` 轨迹统计（GOTO 点数、XYZ 行程、圆弧数、抬刀次数——抬刀平面为「出现最多的最高面」自适应识别，含 RAPID/GOHOME 原生标记优先）；参数统计页新增 APT 轨迹区（抬刀高度可编辑并同步报告）；全部程序信息窗口新增 GOTO/圆弧/抬刀列；报告 `files[]` 新增 `apt_meta`/`toolpath_stats`。
+
+主工具测试基线 **265 项**（以 discover 输出为准）。后续 WP-A3~A5/A9~A11/A8 随计划推进同步追加。
+
 ## 八、相关文档
 
 - 实施计划（已归档，仅本地保留、git 不跟踪）：`docs/archive/superpowers/plans/2026-08-04-gui-config-settings-batch2-plan.md`

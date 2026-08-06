@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import ncodeprocess.gui as gui
-from ncodeprocess.core import FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ScanResult, emit_event, reset_runtime_log, runtime_log
+from ncodeprocess.core import FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ScanResult, ToolpathStats, calculate_stats, emit_event, reset_runtime_log, runtime_log
 from ncodeprocess.gui import (
     App,
     centered_position,
@@ -1633,6 +1633,57 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
             y = int(geometry.split("+")[2])
             self.assertGreaterEqual(x, 0)
             self.assertGreaterEqual(y, 0)
+        finally:
+            root.destroy()
+
+    def test_all_stats_window_shows_ranges_and_trajectory(self):
+        # WP-A2：全部程序信息窗口保留 F/S/X/Y/Z 独立次数与极值列，并展示 GOTO/圆弧/抬刀列。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'
+            plan.stats = calculate_stats(plan.original_text)
+            plan.apt_toolpath = ToolpathStats(goto_count=5, min_x=0.0, max_x=10.0,
+                                              min_y=1.0, max_y=2.0, min_z=-2.0, max_z=100.0,
+                                              arc_count=1, retract_count=2, retract_plane=100.0)
+            app.scan_result = ScanResult("tmp", [plan])
+            app.show_all_program_stats()
+            table = app.all_stats_window.winfo_children()[0]
+            values = table.item(table.get_children()[0], "values")
+            self.assertEqual(values[1], "1")    # F 次数
+            self.assertEqual(values[2], "100.000")  # F 最小
+            self.assertEqual(values[3], "100.000")  # F 最大
+            self.assertEqual(values[17], "5")   # GOTO 点数
+            self.assertEqual(values[18], "1")   # 圆弧数
+            self.assertEqual(values[19], "2")   # 抬刀次数
+        finally:
+            root.destroy()
+
+    def test_apt_trace_section_shows_and_override(self):
+        # WP-A2：参数统计页 APT 轨迹区展示轨迹值；抬刀高度可手动修订并重算次数。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'
+            apt_path = Path(tempfile.mkdtemp(prefix="apt-trace-")) / "P.aptsource"
+            apt_path.write_text("GOTO / 0,0,100\nGOTO / 0,0,100\nGOTO / 0,0,0\n", encoding="utf-8")
+            plan.apt_toolpath = ToolpathStats(goto_count=3, min_x=0.0, max_x=0.0,
+                                              min_y=0.0, max_y=0.0, min_z=0.0, max_z=100.0,
+                                              arc_count=0, retract_count=1, retract_plane=100.0)
+            plan.apt_source_path = str(apt_path)
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            self.assertIn("P.aptsource", app.apt_trace_frame.cget("text"))
+            self.assertIn("X", app.apt_xyz_var.get())
+            self.assertIn("~", app.apt_xyz_var.get())
+            self.assertEqual(app.apt_retract_count_var.get(), "1")
+            self.assertIn("100", app.apt_retract_auto_var.get())
+            app.apt_retract_height_var.set("150")
+            app._apply_apt_retract_height()
+            self.assertEqual(app.apt_retract_heights.get("P"), 150.0)
+            self.assertEqual(app.apt_retract_count_var.get(), "0")
         finally:
             root.destroy()
 

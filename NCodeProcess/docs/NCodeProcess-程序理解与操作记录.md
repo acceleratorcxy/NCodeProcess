@@ -1212,6 +1212,24 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 ---
 
+### 2.89 APT 信息提取 WP-A1/A2：元数据解析与轨迹统计（2026-08-06）
+
+按「APT 信息提取与交叉校验」计划（含用户补充的「APT 数据利用全景」设计）完成 A1/A2：
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | `AptMeta` + `extract_apt_meta` | 流式单遍解析机床/后处理表/CATIA 版本/生成时间/操作列表/位姿矩阵/SPINDL/FEDRAT/COOLNT/LOADTL/`$$` 程序名；SPINDL/FEDRAT 按 `OPERATION NAME` 操作上下文分组（`operation_feeds`/`operation_spindles`）；按 (mtime,size,encoding) 缓存 |
+| 2 | `ToolpathStats` + `extract_apt_toolpath` | 流式统计 GOTO 点数、XYZ 行程极值、圆弧数、抬刀次数；**抬刀平面 = 最高重复 Z 面邻带内出现最多的 Z 值**（孤立高点剔除）；连续高 Z 段合并计一次抬刀；含 RAPID/GOHOME 时优先原生标记；`recount_retracts` 支持按自定义高度重算 |
+| 3 | `build_plan` 挂载 | 最新 APT 的 `apt_meta`/`apt_toolpath`/源路径/编码挂到对应 MPF 计划；报告 `files[]` 新增 `apt_meta`/`toolpath_stats` |
+| 4 | 参数统计页 APT 轨迹区 | 显示 APT 源文件名（框标题）、XYZ 行程（`X a ~ b　Y c ~ d　Z e ~ f`）、**抬刀高度可编辑**（回车/失焦生效，次数实时重算并同步）；无 APTSOURCE 时提示；FSXYZ 表格放入独立容器使滚动条跟随表格 |
+| 5 | 全部程序信息窗口 | 恢复 F/S/X/Y/Z 独立「次数/最小/最大」列 + G00 检查，新增 GOTO 点数、圆弧数、抬刀次数列；抬刀次数按手动高度优先 |
+
+**验证**：主工具 **265 项**全绿（+7 core、+2 gui 新用例），样例实测抬刀平面识别为 100；打包版用户实测通过。
+
+**执行确认（2026-08-05 新流程）**：改动完成、测试通过、打包实测确认后提交。
+
+---
+
 ## 三、后续建议（可选）
 
 1. **Batch 2 配置持久化**：必填字段/M03 策略/S/F 上下限/辅助顺序/换行目前仅本次运行生效；如需与 Batch 1 一致持久化，需扩展 `REGISTRY_DEFAULTS` 并同步调整 preferences 测试。
