@@ -8,6 +8,7 @@ from ncodeprocessreportviewer.viewer import (
     file_issue_counts,
     iter_stats_rows,
     load_report,
+    log_event_detail,
     report_summary,
     runtime_log_events,
     window_geometry_for_screen,
@@ -98,11 +99,23 @@ class ReportViewerTests(unittest.TestCase):
         filtered = list(runtime_log_events(data, event_filter="missing"))
         self.assertEqual(filtered, [])
 
+    def test_log_event_detail_combines_message_and_multiline_detail(self):
+        # WP-F2 配套：详情展示文本 = 消息 + detail（含多行 traceback 与关键数据）。
+        self.assertEqual(log_event_detail({"message": "处理文件：P.MPF", "detail": ""}), "处理文件：P.MPF")
+        self.assertEqual(log_event_detail({"message": "", "detail": "Traceback: boom"}), "Traceback: boom")
+        combined = log_event_detail({
+            "message": "处理文件失败：A.MPF",
+            "detail": "动作=keep\nTraceback (most recent call last):\n  boom",
+        })
+        self.assertIn("处理文件失败：A.MPF", combined)
+        self.assertIn("动作=keep", combined)
+        self.assertIn("Traceback (most recent call last)", combined)
+
 
 class LayoutMetricTests(unittest.TestCase):
     def test_supported_screen_geometry(self):
-        self.assertEqual(window_geometry_for_screen(1366, 768), (1206, 640, 1160, 640))
-        self.assertEqual(window_geometry_for_screen(1920, 1080), (1290, 720, 1160, 640))
+        self.assertEqual(window_geometry_for_screen(1366, 768), (1250, 680, 1250, 680))
+        self.assertEqual(window_geometry_for_screen(1920, 1080), (1500, 800, 1250, 680))
 
     def test_smaller_screen_does_not_request_more_than_screen(self):
         width, height, min_width, min_height = window_geometry_for_screen(1024, 600)
@@ -132,14 +145,13 @@ class ReportViewerLayoutTests(unittest.TestCase):
         # 1920x1080 下默认窗口约 1290x720，所有表头应直接可见、无需拖动。
         root, app = self._build_viewer(1290, 720)
         try:
-            for table, label in (
-                (app.report_table, "报告列表"),
-                (app.file_table, "文件明细"),
-            ):
-                self.assertGreaterEqual(float(table.xview()[1]), 0.999, label)
+            self.assertEqual(app.notebook.index(app.notebook.select()), 0)  # 默认展示概览与可视化
+            self.assertGreaterEqual(float(app.report_table.xview()[1]), 0.999, "报告列表")
+            self.assertGreaterEqual(float(app.program_table.xview()[1]), 0.999, "程序列表")
             for index, table, label in (
-                (1, app.stats_table, "参数统计"),
-                (2, app.issue_table, "校验问题"),
+                (1, app.file_table, "文件明细"),
+                (2, app.stats_table, "参数统计"),
+                (3, app.issue_table, "校验问题"),
             ):
                 app.notebook.select(index)
                 root.update_idletasks()
@@ -167,6 +179,36 @@ class ReportViewerLayoutTests(unittest.TestCase):
             self.assertEqual(values[4], "Traceback: OSError")
             # WP-R4：日志内嵌报告，不再生成磁盘日志文件。
             self.assertIn("运行日志已内嵌本报告", app.log_path_label.cget("text"))
+        finally:
+            root.destroy()
+
+    def test_log_detail_preview_shows_selected_event_full_content(self):
+        # WP-F2 配套：运行日志页下方详情区展示选中事件的完整消息与多行 detail。
+        root, app = self._build_viewer(1290, 720)
+        try:
+            app.report_data = {
+                "runtime_log": [
+                    {"time": "2026-08-05T09:30:01", "level": "info", "event": "process_file",
+                     "message": "处理文件：P.MPF（1/1）",
+                     "detail": "动作=keep；程序名=P；目标=D:\\NC\\P.MPF；统计 F=1 次"},
+                    {"time": "2026-08-05T09:30:02", "level": "error", "event": "error",
+                     "message": "处理文件失败：A.MPF",
+                     "detail": "Traceback (most recent call last):\n  boom"},
+                ],
+            }
+            app.file_items = []
+            app._update_views()
+            # 自动选中首行：详情区展示完整消息 + 关键数据。
+            text = app.log_detail_text.get("1.0", "end").strip()
+            self.assertIn("处理文件：P.MPF（1/1）", text)
+            self.assertIn("动作=keep", text)
+            # 选择 error 行：多行 traceback 完整可见。
+            app.log_table.selection_set("1")
+            app._on_log_row_selected()
+            text = app.log_detail_text.get("1.0", "end").strip()
+            self.assertIn("处理文件失败：A.MPF", text)
+            self.assertIn("Traceback (most recent call last)", text)
+            self.assertIn("boom", text)
         finally:
             root.destroy()
 
@@ -208,11 +250,43 @@ class ReportViewerLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_program_table_filters_file_details(self):
+        # 左侧程序列表含「全部程序」与各程序行（含未配对文件）；点击后右侧文件明细按程序联动过滤。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            app.report_data = {"files": [
+                {"file": "x_P.MPF", "program": "P", "status": "success", "issues": []},
+                {"file": "y_P.MPF", "program": "P", "status": "success", "issues": [{"severity": "warning"}]},
+                {"file": "Q.MPF", "program": "Q", "status": "failed", "issues": [{"severity": "error"}]},
+                {"file": "a.LOG", "program": "", "status": "deleted", "issues": []},
+            ]}
+            app.file_items = app.report_data["files"]
+            app._populate_programs()
+            labels = [app.program_table.item(i, "values")[0] for i in app.program_table.get_children()]
+            self.assertEqual(labels, ["全部程序", "P", "Q", "未配对文件"])
+            self.assertEqual(app.program_table.item("1", "values")[1], "0 错 / 1 警")
+            # 默认「全部程序」→ 文件明细含汇总行 + 全部 4 个文件
+            self.assertEqual(len(app.file_table.get_children()), 5)
+            # 选择程序 P → 只显示 P 相关 2 个文件（无汇总行）
+            app.program_table.selection_set("1")
+            app._on_program_selected()
+            rows = app.file_table.get_children()
+            self.assertEqual(len(rows), 2)
+            self.assertIn("P", app.file_table.item(rows[0], "values")[0])
+            # 选择「未配对文件」→ 只显示无程序名文件
+            app.program_table.selection_set("3")
+            app._on_program_selected()
+            rows = app.file_table.get_children()
+            self.assertEqual(len(rows), 1)
+            self.assertIn("a.LOG", app.file_table.item(rows[0], "values")[0])
+        finally:
+            root.destroy()
+
     def test_cell_tooltip_truncation_detection(self):
         # 查看器悬停浮窗：超长单元格判定为截断（显示提示），短内容不提示。
         root, app = self._build_viewer(1290, 720)
         try:
-            app.notebook.select(1)  # 参数统计页
+            app.notebook.select(2)  # 参数统计页
             root.update_idletasks()
             long_value = "很长很长的文件名_" * 20
             iid = app.stats_table.insert("", "end", values=(long_value, "F", "1", "10", "20", "否"))

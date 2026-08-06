@@ -3,7 +3,7 @@
 本仓库包含两个相互独立的 Windows 免安装项目（目标平台 Windows 7 及后续版本，Python 3.8 / Tkinter 纯标准库实现）：
 
 - [NCodeProcess](NCodeProcess/README.md)：CATIA 后处理 NC 程序批量整理工具——批量扫描、规范化命名、补全 MSG 头部、刀具信息、M03 补写、NC 校验、参数统计与报告导出。
-- [NCodeProcessReportViewer](NCodeProcessReportViewer/README.md)：NC 处理报告只读查看器——解析 `ncodeprocess-report-*.json`，以概览、统计、问题、差异、原始 JSON 页签可视化展示。
+- [NCodeProcessReportViewer](NCodeProcessReportViewer/README.md)：NC 处理报告只读查看器——解析 `ncodeprocess-report-*.json`，以概览、文件明细、统计、问题、差异、运行日志、原始 JSON 页签可视化展示，左侧程序列表联动过滤文件明细。
 
 ## 仓库结构
 

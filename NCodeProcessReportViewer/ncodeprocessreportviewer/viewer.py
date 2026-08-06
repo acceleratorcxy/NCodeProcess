@@ -156,19 +156,28 @@ def runtime_log_events(data: dict, event_filter: str = "") -> List[dict]:
     return entries
 
 
+def log_event_detail(entry: dict) -> str:
+    """拼接运行日志事件的完整展示文本（消息 + 详情，含多行 traceback 与关键数据）。"""
+    message = str(entry.get("message") or "")
+    detail = str(entry.get("detail") or "")
+    if detail:
+        return f"{message}\n{detail}" if message else detail
+    return message
+
+
 def window_geometry_for_screen(screen_width, screen_height):
     """Return the centered default size and minimum size for a screen.
 
-    Larger screens (1600x900, 1920x1080) open at roughly 1290x720 instead of
-    nearly full-screen, while 1366x768 keeps a comfortably smaller window.
+    Larger screens open wider (up to 1500x800) so report details and tables
+    stay fully readable, while 1366x768 still fits comfortably.
     """
     supported = screen_width >= 1366 and screen_height >= 768
     if supported:
-        width = min(1290, max(1180, screen_width - 160))
-        height = min(720, max(640, screen_height - 140))
-        return width, height, 1160, 640
-    width = min(screen_width, min(1290, max(900, screen_width - 60)))
-    height = min(screen_height, min(720, max(560, screen_height - 80)))
+        width = min(1500, max(1250, screen_width - 120))
+        height = min(800, max(680, screen_height - 120))
+        return width, height, 1250, 680
+    width = min(screen_width, min(1400, max(900, screen_width - 60)))
+    height = min(screen_height, min(800, max(560, screen_height - 80)))
     return width, height, width, height
 
 
@@ -230,39 +239,43 @@ class ReportViewer(ttk.Frame):
         report_box.grid(row=0, column=0, sticky="nsew", pady=(0, 7))
         report_box.rowconfigure(0, weight=1)
         report_box.columnconfigure(0, weight=1)
-        self.report_table = self._table(report_box, ("time", "name"), ("时间", "报告文件"), (135, 180))
+        self.report_table = self._table(report_box, ("time", "name"), ("时间", "报告文件"), (135, 260))
         self.report_table._container.grid(row=0, column=0, sticky="nsew")
         self.report_table.bind("<<TreeviewSelect>>", self._on_report_selected)
 
-        file_box = ttk.LabelFrame(left, text="报告文件明细")
-        file_box.grid(row=1, column=0, sticky="nsew")
-        file_box.rowconfigure(0, weight=1)
-        file_box.columnconfigure(0, weight=1)
-        self.file_table = self._table(file_box, ("program", "action", "issue", "target"), ("程序/文件", "动作", "校验", "目标"), (115, 62, 70, 105))
-        self.file_table._container.grid(row=0, column=0, sticky="nsew")
-        self.file_table.bind("<<TreeviewSelect>>", self._on_file_selected)
+        program_box = ttk.LabelFrame(left, text="程序列表")
+        program_box.grid(row=1, column=0, sticky="nsew")
+        program_box.rowconfigure(0, weight=1)
+        program_box.columnconfigure(0, weight=1)
+        self.program_table = self._table(program_box, ("program", "issue"), ("程序", "校验"), (170, 130))
+        self.program_table._container.grid(row=0, column=0, sticky="nsew")
+        self.program_table.column("program", width=170, minwidth=100, stretch=False)
+        self.program_table.bind("<<TreeviewSelect>>", self._on_program_selected)
 
         self.notebook = ttk.Notebook(right)
         self.notebook.pack(fill="both", expand=True)
         self.overview_page = ttk.Frame(self.notebook, padding=8)
+        self.files_page = ttk.Frame(self.notebook)
         self.stats_page = ttk.Frame(self.notebook)
         self.issues_page = ttk.Frame(self.notebook)
         self.changes_page = ttk.Frame(self.notebook)
         self.log_page = ttk.Frame(self.notebook)
         self.raw_page = ttk.Frame(self.notebook)
         self.notebook.add(self.overview_page, text="概览与可视化")
+        self.notebook.add(self.files_page, text="文件明细")
         self.notebook.add(self.stats_page, text="参数统计")
         self.notebook.add(self.issues_page, text="校验问题")
         self.notebook.add(self.changes_page, text="修改与差异")
         self.notebook.add(self.log_page, text="运行日志")
         self.notebook.add(self.raw_page, text="原始 JSON")
+        self._build_files()
         self._build_overview()
         self._build_stats()
         self._build_issues()
         self._build_changes()
         self._build_log()
         self._build_raw()
-        for tree in (self.report_table, self.file_table, self.stats_table, self.issue_table, self.log_table):
+        for tree in (self.report_table, self.program_table, self.file_table, self.stats_table, self.issue_table, self.log_table):
             self._bind_cell_tooltip(tree)
 
     def _bind_cell_tooltip(self, tree):
@@ -335,6 +348,13 @@ class ReportViewer(ttk.Frame):
         table._container = frame
         return table
 
+    def _build_files(self):
+        self.files_page.rowconfigure(0, weight=1)
+        self.files_page.columnconfigure(0, weight=1)
+        self.file_table = self._table(self.files_page, ("program", "action", "issue", "target"), ("程序/文件", "动作", "校验", "目标"), (180, 70, 70, 220))
+        self.file_table._container.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.file_table.bind("<<TreeviewSelect>>", self._on_file_selected)
+
     def _build_overview(self):
         self.overview_page.columnconfigure(0, weight=1)
         self.overview_page.rowconfigure(2, weight=1)
@@ -395,12 +415,25 @@ class ReportViewer(ttk.Frame):
         self.log_filter_combo = ttk.Combobox(filter_bar, textvariable=self.log_filter_var, state="readonly", width=22)
         self.log_filter_combo.pack(side="left", padx=(4, 0))
         self.log_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._fill_log(self._selected_item()))
-        self.log_table = self._table(self.log_page, ("time", "level", "event", "message", "detail"), ("时间", "级别", "事件", "消息", "详情"), (140, 55, 120, 220, 160))
+        self.log_table = self._table(self.log_page, ("time", "level", "event", "message", "detail"), ("时间", "级别", "事件", "消息", "详情"), (140, 55, 120, 220, 240))
         self.log_table._container.grid(row=1, column=0, sticky="nsew", padx=6)
+        self.log_table.bind("<<TreeviewSelect>>", lambda _event: self._on_log_row_selected())
         self.log_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
         self.log_table.tag_configure("warning", foreground="#b54708", font=("Microsoft YaHei UI", 9, "bold"))
+        detail_header = ttk.Label(self.log_page, text="选中事件详情：", foreground="#57606a")
+        detail_header.grid(row=2, column=0, sticky="w", padx=6, pady=(6, 2))
+        detail_frame = ttk.Frame(self.log_page)
+        detail_frame.grid(row=3, column=0, sticky="nsew", padx=6)
+        detail_frame.rowconfigure(0, weight=1)
+        detail_frame.columnconfigure(0, weight=1)
+        self.log_detail_text = tk.Text(detail_frame, wrap="word", height=6, undo=False)
+        detail_bar = ttk.Scrollbar(detail_frame, orient="vertical", command=self.log_detail_text.yview)
+        self.log_detail_text.configure(yscrollcommand=detail_bar.set)
+        self.log_detail_text.grid(row=0, column=0, sticky="nsew")
+        detail_bar.grid(row=0, column=1, sticky="ns")
+        self.log_detail_text.configure(state="disabled")
         self.log_path_label = ttk.Label(self.log_page, text="", foreground="#57606a", wraplength=700, justify="left")
-        self.log_path_label.grid(row=2, column=0, sticky="ew", padx=6, pady=4)
+        self.log_path_label.grid(row=4, column=0, sticky="ew", padx=6, pady=4)
 
     def _build_raw(self):
         self.raw_page.rowconfigure(0, weight=1)
@@ -460,26 +493,86 @@ class ReportViewer(ttk.Frame):
         self.selection = ReportSelection(path, None)
         self.file_items = data.get("files", [])
         self.report_label.set(f"当前报告：{path}")
-        self._populate_files()
+        self._populate_programs()
         self._update_views()
 
-    def _populate_files(self):
+    def _populate_programs(self):
+        """聚合程序列表（含「全部程序」与「未配对文件」行），并按默认「全部程序」填充文件明细。"""
+        for item in self.file_table.get_children():
+            self.file_table.delete(item)
+        for item in self.program_table.get_children():
+            self.program_table.delete(item)
+        program_groups = {}
+        unmatched = []
+        for item in self.file_items:
+            program = str(item.get("program") or "").strip()
+            if program:
+                program_groups.setdefault(program, []).append(item)
+            else:
+                unmatched.append(item)
+        rows = [("全部程序", "__all__", True)]
+        rows += [(program, program, False) for program in sorted(program_groups)]
+        if unmatched:
+            rows.append(("未配对文件", "__none__", False))
+        self._program_rows = rows
+        for index, (label, _filter, _is_all) in enumerate(rows):
+            group = [item for item in self.file_items if self._matches_filter(item, _filter)]
+            errors = warnings = 0
+            for item in group:
+                file_errors, file_warnings, _total = file_issue_counts(item)
+                errors += file_errors
+                warnings += file_warnings
+            issue_text = f"{errors} 错 / {warnings} 警" if (errors or warnings) else "无问题"
+            self.program_table.insert("", "end", iid=str(index), values=(label, issue_text))
+        if rows:
+            self.program_table.selection_set("0")
+            self.program_table.focus("0")
+            self._on_program_selected()
+
+    @staticmethod
+    def _matches_filter(item: dict, program_filter: str) -> bool:
+        program = str(item.get("program") or "").strip()
+        if program_filter == "__all__":
+            return True
+        if program_filter == "__none__":
+            return not program
+        return program == program_filter
+
+    def _on_program_selected(self, _event=None):
+        rows = getattr(self, "_program_rows", [])
+        selection = self.program_table.selection()
+        if not selection:
+            return
+        try:
+            _label, program_filter, _is_all = rows[int(selection[0])]
+        except (IndexError, TypeError, ValueError):
+            return
+        self._populate_files(program_filter)
+
+    def _populate_files(self, program_filter="__all__"):
         for item in self.file_table.get_children():
             self.file_table.delete(item)
         if not self.file_items:
             return
-        self.file_table.insert("", "end", iid="all", values=("全部文件", "汇总", "", ""))
+        if program_filter == "__all__":
+            self.file_table.insert("", "end", iid="all", values=("全部文件", "汇总", "", ""))
         for index, item in enumerate(self.file_items):
+            if not self._matches_filter(item, program_filter):
+                continue
             errors, warnings, total = file_issue_counts(item)
             issue_text = f"{errors} 错 / {warnings} 警" if total else "无"
-            program = item.get("program") or item.get("file") or ""
+            display_program = item.get("program") or item.get("file") or ""
             source = item.get("program_name_source") or ""
-            program_cell = f"{program}（{source}）" if source else program
+            program_cell = f"{display_program}（{source}）" if source else display_program
             target = item.get("target") or ""
             self.file_table.insert("", "end", iid=str(index), values=(program_cell, item.get("status") or item.get("action") or "", issue_text, target), tags=(("error",) if errors else (("warning",) if warnings else ())))
         self.file_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
         self.file_table.tag_configure("warning", foreground="#b54708", font=("Microsoft YaHei UI", 9, "bold"))
-        self.file_table.selection_set("all")
+        children = self.file_table.get_children()
+        if children:
+            self.file_table.selection_set(children[0])
+            self.file_table.focus(children[0])
+            self._on_file_selected()
 
     def _on_file_selected(self, _event=None):
         selection = self.file_table.selection()
@@ -592,17 +685,43 @@ class ReportViewer(ttk.Frame):
             self.log_filter_var.set("全部")
         filter_value = "" if self.log_filter_var.get() == "全部" else self.log_filter_var.get()
         rows = runtime_log_events(data, event_filter=filter_value)
+        self._log_entries = rows
         for index, entry in enumerate(rows):
             tags = (entry["level"],) if entry["level"] in ("error", "warning") else ()
             self.log_table.insert("", "end", iid=str(index),
                                   values=(entry["time"], entry["level"], entry["event"], entry["message"], entry["detail"]),
                                   tags=tags)
+        if rows:
+            self.log_table.selection_set("0")
+            self.log_table.focus("0")
+            self._on_log_row_selected()
+        else:
+            self._set_log_detail("")
         log_path = str(data.get("log_path") or "")
         if not events and not log_path:
             self.log_path_label.config(text="当前报告不包含运行日志（runtime_log）")
         else:
-            # WP-R4：运行日志完整内嵌报告，不再生成磁盘日志文件。
-            self.log_path_label.config(text="运行日志已内嵌本报告（runtime_log），不再生成磁盘日志文件")
+            # WP-R4：运行日志完整内嵌报告，不再生成磁盘日志文件；选择事件可查看完整详情。
+            self.log_path_label.config(text="运行日志已内嵌本报告（runtime_log），不再生成磁盘日志文件；选择事件可查看完整消息与详情（含 traceback）")
+
+    def _on_log_row_selected(self, _event=None):
+        """在下方详情区展示选中运行日志事件的完整消息与 detail（支持多行 traceback）。"""
+        entries = getattr(self, "_log_entries", [])
+        entry = None
+        selection = self.log_table.selection()
+        if selection:
+            try:
+                entry = entries[int(selection[0])]
+            except (IndexError, TypeError, ValueError):
+                entry = None
+        self._set_log_detail(log_event_detail(entry) if entry else "")
+
+    def _set_log_detail(self, text):
+        self.log_detail_text.configure(state="normal")
+        self.log_detail_text.delete("1.0", "end")
+        if text:
+            self.log_detail_text.insert("1.0", text)
+        self.log_detail_text.configure(state="disabled")
 
     def _clear_view(self, message):
         self.report_data = None
