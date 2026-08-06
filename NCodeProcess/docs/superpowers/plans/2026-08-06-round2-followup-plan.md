@@ -27,7 +27,7 @@
 | WP-F4 | `code_part` 分号语义文档化 + 锁定测试 | 低 | 无 | 需求文档、用户手册、`tests/test_core.py` | 需求/手册明确「分号后视为注释」；测试锁定 —— ✅ 已处理（2026-08-06，含注释敏感点审计修复，主 253 项全绿） |
 | WP-F5 | 构建脚本缩进清理 + 测试文件拆分（WP-T6） | 低 | D3 | `build_portable.ps1`、`tests/test_gui_*.py` | 缩进规整；拆分后用例数不变全绿 —— ✅ 已处理（2026-08-06，仅缩进清理；WP-T6 按 D3=B 维持登记待办） |
 | WP-F6 | 版本提升与发版（WP-16） | 发版 | D1/D2 | `__init__.py`、`VERSION.txt`、`version_info.txt`、发布说明 | 版本三处一致，`test_release_assets` 动态断言通过，打包+SHA256SUMS |
-| WP-F7 | 查看器增强 WP-14/15（大报告加载、问题筛选/导出） | 低 | D2 | `viewer.py`、`tests/test_report_viewer.py` | 加载大报告有状态提示；问题表可筛选并可导出 CSV |
+| WP-F7 | 查看器增强 WP-14/15（大报告加载、问题筛选/导出） | 低 | D2 | `viewer.py`、`tests/test_report_viewer.py` | 加载大报告有状态提示；问题表可筛选并可导出 CSV —— ✅ 已处理（2026-08-06，查看器 18 项全绿） |
 
 ## 决策点（Phase 0，执行前确认）
 
@@ -383,9 +383,9 @@ Run: `.\run_tests.ps1` 全绿；两项目 `build_portable.ps1` → `SHA256SUMS.t
 
 **Files:** `ncodeprocessreportviewer/viewer.py`、`tests/test_report_viewer.py`
 
-- [ ] **WP-14 大报告加载状态**：`_load_report` 前设置 `report_label` 为「正在加载报告……」，`update_idletasks` 后再解析渲染；超大报告提示「报告较大，加载中」。测试：mock 一个含 5000 files 的 `load_report` 数据，断言状态标签先变为加载中（UI 冒烟）。
-- [ ] **WP-15 问题筛选与导出**：`issues_page` 增加级别筛选下拉（全部/error/warning）；新增「导出问题 CSV」按钮（`filedialog.asksaveasfilename` + csv 写入，utf-8-sig）。测试：`_fill_issues` 筛选后行数正确；导出 helper 纯函数 `issues_csv_rows(report_data) -> list[tuple]` 单测。
-- [ ] **回归**：查看器用例数 12 → 15 项左右全绿（以 discover 输出为准）；提交门：`feat(viewer): 大报告加载状态与问题筛选/导出`。
+- [x] **WP-14 大报告加载状态**：`_load_report` 前设置 `report_label` 为「正在加载报告……」，`update_idletasks` 后再解析渲染；超大报告提示「报告较大，加载中」。测试：mock 一个含 5000 files 的 `load_report` 数据，断言状态标签先变为加载中（UI 冒烟）。
+- [x] **WP-15 问题筛选与导出**：`issues_page` 增加级别筛选下拉（全部/error/warning）；新增「导出问题 CSV」按钮（`filedialog.asksaveasfilename` + csv 写入，utf-8-sig）。测试：`_fill_issues` 筛选后行数正确；导出 helper 纯函数 `issues_csv_rows(report_data) -> list[tuple]` 单测。
+- [x] **回归**：查看器用例数 12 → 15 项左右全绿（以 discover 输出为准）；提交门：`feat(viewer): 大报告加载状态与问题筛选/导出`。
 
 ---
 

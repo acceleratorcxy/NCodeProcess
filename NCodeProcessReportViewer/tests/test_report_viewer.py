@@ -2,11 +2,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ncodeprocessreportviewer.viewer import (
     chart_number,
     discover_reports,
     file_issue_counts,
+    issues_csv_rows,
     iter_stats_rows,
     load_report,
     log_event_detail,
@@ -118,6 +120,19 @@ class ReportViewerTests(unittest.TestCase):
         self.assertEqual(chart_number("3"), 3.0)
         self.assertEqual(chart_number("abc"), 0)
         self.assertEqual(chart_number(None), 0)
+
+    def test_issues_csv_rows_expands_all_files(self):
+        # WP-15：问题 CSV 行 = 表头 + 全部文件 issues 逐条展开。
+        data = {"files": [
+            {"file": "P.MPF", "issues": [{"line": 5, "severity": "error", "kind": "G00", "text": "G0", "suggestion": "移除"}]},
+            {"file": "Q.MPF", "issues": [{"line": 8, "severity": "warning", "kind": "feed-outlier", "text": "F20", "suggestion": "确认"}]},
+        ]}
+        rows = issues_csv_rows(data)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0], ("文件", "行号", "级别", "类型", "原始文本", "建议"))
+        self.assertEqual(rows[1][0], "P.MPF")
+        self.assertEqual(rows[1][2], "error")
+        self.assertEqual(rows[2][4], "F20")
 
 
 class LayoutMetricTests(unittest.TestCase):
@@ -301,6 +316,45 @@ class ReportViewerLayoutTests(unittest.TestCase):
             }
             app.file_items = []
             app._update_views()   # 不应抛异常
+        finally:
+            root.destroy()
+
+    def test_issue_filter_filters_rows(self):
+        # WP-15：校验问题页按级别筛选（全部/error/warning）。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            app.report_data = {"files": [
+                {"file": "P.MPF", "issues": [{"severity": "error", "kind": "G00"}, {"severity": "warning", "kind": "feed-outlier"}]},
+                {"file": "Q.MPF", "issues": [{"severity": "warning", "kind": "block-number"}]},
+            ]}
+            app.issue_filter_var.set("error")
+            app._fill_issues(None)
+            self.assertEqual(len(app.issue_table.get_children()), 1)
+            app.issue_filter_var.set("warning")
+            app._fill_issues(None)
+            self.assertEqual(len(app.issue_table.get_children()), 2)
+            app.issue_filter_var.set("全部")
+            app._fill_issues(None)
+            self.assertEqual(len(app.issue_table.get_children()), 3)
+        finally:
+            root.destroy()
+
+    def test_report_load_shows_loading_state(self):
+        # WP-14：报告加载期间状态栏先显示「正在加载报告」。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            captured = {}
+
+            def fake_load(_path):
+                captured["label_during_load"] = app.report_label.get()
+                return {"files": [{"file": f"P{i}.MPF", "program": f"P{i}", "issues": []} for i in range(10)]}
+
+            report_path = Path(tempfile.mkdtemp(prefix="nc-report-load-")) / "ncodeprocess-report-20260806_120000.json"
+            report_path.write_text("{}", encoding="utf-8")
+            with patch("ncodeprocessreportviewer.viewer.load_report", side_effect=fake_load):
+                app._load_report(report_path)
+            self.assertIn("正在加载报告", captured["label_during_load"])
+            self.assertIn("当前报告", app.report_label.get())
         finally:
             root.destroy()
 

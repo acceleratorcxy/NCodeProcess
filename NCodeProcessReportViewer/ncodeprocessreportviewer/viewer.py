@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tkinter as tk
@@ -162,6 +163,26 @@ def runtime_log_events(data: dict, event_filter: str = "") -> List[dict]:
             "detail": str(entry.get("detail") or ""),
         })
     return entries
+
+
+def issues_csv_rows(data: dict) -> List[tuple]:
+    """导出问题清单 CSV 行（表头 + 全部文件 issues 逐条展开，缺字段回退空串）。"""
+    rows = [("文件", "行号", "级别", "类型", "原始文本", "建议")]
+    for file_item in data.get("files") or []:
+        if not isinstance(file_item, dict):
+            continue
+        for issue in file_item.get("issues") or []:
+            if not isinstance(issue, dict):
+                continue
+            rows.append((
+                str(file_item.get("file") or ""),
+                str(issue.get("line") or ""),
+                str(issue.get("severity") or ""),
+                str(issue.get("kind") or ""),
+                str(issue.get("text") or ""),
+                str(issue.get("suggestion") or ""),
+            ))
+    return rows
 
 
 def log_event_detail(entry: dict) -> str:
@@ -397,10 +418,18 @@ class ReportViewer(ttk.Frame):
         self.stats_table._container.grid(row=0, column=0, sticky="nsew")
 
     def _build_issues(self):
-        self.issues_page.rowconfigure(0, weight=1)
+        self.issues_page.rowconfigure(1, weight=1)
         self.issues_page.columnconfigure(0, weight=1)
+        filter_bar = ttk.Frame(self.issues_page)
+        filter_bar.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
+        ttk.Label(filter_bar, text="级别筛选：").pack(side="left")
+        self.issue_filter_var = tk.StringVar(value="全部")
+        self.issue_filter_combo = ttk.Combobox(filter_bar, textvariable=self.issue_filter_var, state="readonly", width=12, values=("全部", "error", "warning"))
+        self.issue_filter_combo.pack(side="left", padx=(4, 0))
+        self.issue_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._fill_issues(self._selected_item()))
+        ttk.Button(filter_bar, text="导出问题 CSV", command=self.export_issues_csv).pack(side="right")
         self.issue_table = self._table(self.issues_page, ("file", "line", "severity", "kind", "text", "suggestion"), ("文件", "行", "级别", "类型", "原始文本", "建议"), (145, 45, 60, 90, 220, 190))
-        self.issue_table._container.grid(row=0, column=0, sticky="nsew")
+        self.issue_table._container.grid(row=1, column=0, sticky="nsew", padx=6)
         self.issue_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
         self.issue_table.tag_configure("warning", foreground="#b54708", font=("Microsoft YaHei UI", 9, "bold"))
 
@@ -492,6 +521,14 @@ class ReportViewer(ttk.Frame):
             self._load_report(self.report_paths[int(selection[0])])
 
     def _load_report(self, path: Path):
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            file_size = 0
+        # WP-14：大报告加载状态提示（解析同步进行，先刷新状态栏再读取）。
+        loading_text = "报告较大，正在加载，请稍候……" if file_size > 5 * 1024 * 1024 else "正在加载报告……"
+        self.report_label.set(loading_text)
+        self.master.update_idletasks()
         try:
             data = load_report(path)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -652,13 +689,43 @@ class ReportViewer(ttk.Frame):
     def _fill_issues(self, selected):
         for item in self.issue_table.get_children():
             self.issue_table.delete(item)
+        filter_value = self.issue_filter_var.get()
         items = [selected] if selected else (self.report_data or {}).get("files", [])
         for file_item in items:
             if not isinstance(file_item, dict):
                 continue
             for issue in file_item.get("issues") or []:
+                if not isinstance(issue, dict):
+                    continue
                 severity = str(issue.get("severity", "info"))
+                if filter_value != "全部" and severity != filter_value:
+                    continue
                 self.issue_table.insert("", "end", values=(file_item.get("file", ""), issue.get("line", ""), severity, issue.get("kind", ""), issue.get("text", ""), issue.get("suggestion", "")), tags=(severity,) if severity in ("error", "warning") else ())
+
+    def export_issues_csv(self):
+        """导出当前报告的全部校验问题为 UTF-8 BOM CSV。"""
+        data = self.report_data or {}
+        rows = issues_csv_rows(data)
+        if len(rows) <= 1:
+            messagebox.showinfo("无问题", "当前报告没有可导出的校验问题。", parent=self.master)
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出校验问题 CSV",
+            initialdir=str(self.base_dir),
+            defaultextension=".csv",
+            filetypes=(("CSV 文件", "*.csv"),),
+            initialfile="ncodeprocess-issues.csv",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerows(rows)
+        except OSError as exc:
+            messagebox.showerror("导出失败", f"无法写入 CSV：\n{exc}", parent=self.master)
+            return
+        messagebox.showinfo("导出完成", f"已导出 {len(rows) - 1} 条校验问题：\n{path}", parent=self.master)
 
     def _fill_changes(self, selected):
         self.change_text.configure(state="normal")
