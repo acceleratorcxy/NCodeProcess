@@ -1199,6 +1199,19 @@ e1af69f feat(core): 必填 MSG 字段可配置（required_fields），validate/a
 
 ---
 
+### 2.88 第三轮收尾 WP-F5：构建脚本缩进规整（2026-08-06）
+
+| # | 改动 | 说明 |
+|---|---|---|
+| 1 | 主工具 `build_portable.ps1` | `$spec`/`$pyInstallerArgs`/UPX 注入/`conda run` 段落缩进统一为 try 块内 4 空格（此前顶格） |
+| 2 | 查看器 `build_portable.ps1` | `$pyInstallerArgs` 等段落由 6 空格修正为 4 空格，与其余代码一致 |
+
+行为零变化：PowerShell 语法检查通过；两项目用清理后的脚本各打包一次成功（主工具 SHA256 `df7aaf29…`、查看器 `67440b11…`），已同步 `测试\`。测试文件拆分（WP-T6）按 D3=B 维持登记待办。
+
+**执行确认（2026-08-05 新流程）**：改动完成、语法检查与打包验证通过后提交。
+
+---
+
 ## 三、后续建议（可选）
 
 1. **Batch 2 配置持久化**：必填字段/M03 策略/S/F 上下限/辅助顺序/换行目前仅本次运行生效；如需与 Batch 1 一致持久化，需扩展 `REGISTRY_DEFAULTS` 并同步调整 preferences 测试。

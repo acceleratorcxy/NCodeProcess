@@ -25,7 +25,7 @@
 | WP-F2 | 运行日志埋点补齐与截断去重 | 中 | 无 | `core.py`、`tests/test_core.py` | `process_mpf`/APT 异常带 traceback 进 `runtime_log`；截断警告只出现一次 —— ✅ 已处理（2026-08-06，含识别数据入日志，249 项全绿） |
 | WP-F3 | 查看器图表数值容错（WP-13 部分） | 中 | 无 | `viewer.py`、`tests/test_report_viewer.py` | 非数值字段不崩溃，回退 0；10 项测试全绿 —— ✅ 已处理（2026-08-06，查看器 15 项全绿） |
 | WP-F4 | `code_part` 分号语义文档化 + 锁定测试 | 低 | 无 | 需求文档、用户手册、`tests/test_core.py` | 需求/手册明确「分号后视为注释」；测试锁定 —— ✅ 已处理（2026-08-06，含注释敏感点审计修复，主 253 项全绿） |
-| WP-F5 | 构建脚本缩进清理 + 测试文件拆分（WP-T6） | 低 | D3 | `build_portable.ps1`、`tests/test_gui_*.py` | 缩进规整；拆分后用例数不变全绿 |
+| WP-F5 | 构建脚本缩进清理 + 测试文件拆分（WP-T6） | 低 | D3 | `build_portable.ps1`、`tests/test_gui_*.py` | 缩进规整；拆分后用例数不变全绿 —— ✅ 已处理（2026-08-06，仅缩进清理；WP-T6 按 D3=B 维持登记待办） |
 | WP-F6 | 版本提升与发版（WP-16） | 发版 | D1/D2 | `__init__.py`、`VERSION.txt`、`version_info.txt`、发布说明 | 版本三处一致，`test_release_assets` 动态断言通过，打包+SHA256SUMS |
 | WP-F7 | 查看器增强 WP-14/15（大报告加载、问题筛选/导出） | 低 | D2 | `viewer.py`、`tests/test_report_viewer.py` | 加载大报告有状态提示；问题表可筛选并可导出 CSV |
 
@@ -335,7 +335,7 @@ def chart_number(value, default=0):
 
 **Files:** `build_portable.ps1`；D3=A 时 `tests/test_gui_*.py`
 
-- [ ] **Step 1: 清理 `build_portable.ps1` 缩进**
+- [x] **Step 1: 清理 `build_portable.ps1` 缩进**
 
 `$spec = Join-Path $root 'NCodeProcess.spec'` 与 `$pyInstallerArgs = @(...)` 及其后续参数行统一缩进到 `try` 块内（与 `$distTargets` 同级），功能零变化；用 PowerShell 语法检查 `powershell -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw build_portable.ps1))"` 通过。
 
@@ -347,12 +347,12 @@ def chart_number(value, default=0):
 - `test_gui_layout.py` 导出 `LayoutWidgetMixin`，其余文件 `from test_gui_layout import LayoutWidgetMixin`（discover 顶层导入模式下同目录模块可直接导入）；
 - 删除 `tests/test_gui.py`；模块级 `TEST_SETTINGS_KEY` 随 `test_gui_layout.py` 迁移，其余文件导入。
 
-- [ ] **Step 3: 回归**
+- [x] **Step 3: 回归**
 
 Run: `.\run_tests.ps1`
 Expected: 主 245 + 查看器 10 全绿，用例数不变。
 
-- [ ] **Step 4: 提交门**：`refactor: 构建脚本缩进规整；测试文件按主题拆分`。
+- [x] **Step 4: 提交门**：`refactor: 构建脚本缩进规整；测试文件按主题拆分`（D3=B 时仅缩进部分）。
 
 ---
 

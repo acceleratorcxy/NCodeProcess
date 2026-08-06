@@ -139,6 +139,12 @@ NCodeProcessReportViewer/
 
 ---
 
+### 2.10 第三轮收尾 WP-F5：构建脚本缩进规整（2026-08-06）
+
+`build_portable.ps1` 中 `$pyInstallerArgs`/UPX 注入/`conda run` 段落的缩进由 6 空格修正为 4 空格，与其余代码一致；行为零变化，PowerShell 语法检查通过，用清理后脚本打包成功（SHA256 `67440b11…`）。
+
+---
+
 ## 三、后续建议（可选）
 
 1. **大报告性能**：后台线程加载 + 进度提示（当前主线程同步解析）。

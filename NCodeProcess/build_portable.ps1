@@ -46,17 +46,17 @@ try {
         Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-$spec = Join-Path $root 'NCodeProcess.spec'
-$pyInstallerArgs = @(
-    '-OO', '-m', 'PyInstaller', '--noconfirm', '--clean',
-    '--distpath', $dist, '--workpath', $workPath, $spec
-)
-# WP-S3: optional UPX support - add tools\upx to PATH when present so PyInstaller compresses.
-$upxDir = Join-Path $root 'tools\upx'
-if (Test-Path (Join-Path $upxDir 'upx.exe')) {
-    $env:PATH = "$upxDir;$env:PATH"
-}
-conda run -n $CondaEnvironment python @pyInstallerArgs
+    $spec = Join-Path $root 'NCodeProcess.spec'
+    $pyInstallerArgs = @(
+        '-OO', '-m', 'PyInstaller', '--noconfirm', '--clean',
+        '--distpath', $dist, '--workpath', $workPath, $spec
+    )
+    # WP-S3: optional UPX support - add tools\upx to PATH when present so PyInstaller compresses.
+    $upxDir = Join-Path $root 'tools\upx'
+    if (Test-Path (Join-Path $upxDir 'upx.exe')) {
+        $env:PATH = "$upxDir;$env:PATH"
+    }
+    conda run -n $CondaEnvironment python @pyInstallerArgs
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 
     $exe = Join-Path $dist 'NCodeProcess.exe'
