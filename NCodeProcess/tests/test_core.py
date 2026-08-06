@@ -367,6 +367,41 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(any(e["event"] == "feed_outlier" and "F99999" in e["message"] and "P.MPF" in e["message"] for e in events))
         self.assertTrue(any(e["event"] == "issues_found" and "P.MPF" in e["message"] and "feed-outlier" in e["detail"] for e in events))
 
+    def test_semicolon_after_code_is_trailing_comment(self):
+        # WP-F4：HASS 分号视为块终止符，分号后内容按行内注释处理，不参与统计/校验/补写。
+        text = 'MSG("PROGRAM:P")\nN10 S5000;S9000\nN20 M30\n%\n'
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg(auto_m03=False))
+        self.assertFalse(any(i.kind == "multiple-spindle-speeds" for i in issues))
+        stats = calculate_stats(text)
+        self.assertEqual(stats.counts["S"], 1)
+        out, changed, _note = add_m03('MSG("PROGRAM:P")\nN10 S5000;说明\nN20 M30\n', self._cfg())
+        self.assertTrue(changed)
+        self.assertIn("S5000M03;说明", out)
+
+    def test_initial_tool_change_preserves_comment_tool_refs(self):
+        # WP-F4：自动换刀改写只作用于代码部分，括号与分号后注释中的 T 号保持原样。
+        tools = [ToolInfo(1, "10", "", "平底立铣刀")]
+        text = 'MSG("PROGRAM:P")\nN10 T2;T99 备用刀具\nN20 (T8 备用) T2\nN30 M30\n'
+        out, changed, _note = add_initial_tool_change(text, tools, self._cfg(auto_tool_change=True))
+        self.assertTrue(changed)
+        self.assertIn("T1M6", out)
+        self.assertIn("N10 T1;T99 备用刀具", out)
+        self.assertIn("N20 (T8 备用) T1", out)
+
+    def test_unclosed_quote_inside_comment_is_not_flagged(self):
+        # WP-F4：括号与分号注释内的引号不参与未闭合引号检查。
+        text = 'MSG("PROGRAM:P")\nN10 G1 X10 (说明 "引号)\nN20 M30;注释 "引号\n'
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(i.kind == "unclosed-quote" for i in issues))
+
+    def test_m03_fallback_skips_comment_only_lines(self):
+        # WP-F4：无 S 时 M03 独立行插入跳过括号/分号注释行，落在第一条真实指令前。
+        text = 'MSG("PROGRAM:P")\n;说明注释\n(另一注释)\nN1 G1 X10 F500\nN2 M30\n'
+        out, changed, _note = add_m03(text, self._cfg())
+        self.assertTrue(changed)
+        self.assertLess(out.index("M03"), out.index("N1 G1 X10 F500"))
+        self.assertGreater(out.index("M03"), out.index(";说明注释"))
+
     def test_apply_header_marks_existing_tool_as_update_not_insert(self):
         # 已有 T1 刀具被替换时记录为「更新刀具 T1」而非「插入刀具 T1」，
         # 避免执行确认列表出现“重复插入刀具”。

@@ -1106,9 +1106,15 @@ def add_initial_tool_change(text: str, tools: Sequence[ToolInfo], config: Config
     for line in body:
         if STANDALONE_CHANGE_RE.match(line):
             continue
-        # 只替换括号注释前的代码部分，注释中的 T 号（如 (T2 备用)）保持原样。
-        code, separator, comment = line.partition("(")
-        corrected.append(TOOL_REF_RE.sub("T" + str(number), code) + (separator + comment if separator else ""))
+        # 只替换真实代码部分的 T 号：括号注释（如 (T2 备用)）与分号后注释
+        # （HASS 的 ;T99 备用）中的 T 号一律保持原样。
+        code_segment, semicolon_sep, semicolon_tail = line.partition(";")
+        segments = re.split(r"(\(.*?\))", code_segment)
+        replaced = "".join(
+            segment if segment.startswith("(") else TOOL_REF_RE.sub("T" + str(number), segment)
+            for segment in segments
+        )
+        corrected.append(replaced + (semicolon_sep + semicolon_tail if semicolon_sep else ""))
 
     semicolon = any(line.rstrip().endswith(";") for line in corrected[:30] if line.strip())
     command = "T{}M6{}".format(number, ";" if semicolon else "")
@@ -1153,7 +1159,7 @@ def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
         return newline.join(lines), True, f"第 {idx + 1} 行 S 指令后补写 M03"
     for idx in range(start, len(lines)):
         stripped = lines[idx].strip()
-        if stripped and stripped != "%" and not stripped.startswith("("):
+        if stripped and stripped != "%" and not stripped.startswith("(") and not stripped.startswith(";"):
             lines.insert(idx, "M03;" if any(l.rstrip().endswith(";") for l in lines[start:] if l.strip()) else "M03")
             return newline.join(lines), True, f"第 {idx + 1} 行前插入独立 M03"
     return text, False, "无法确定 M03 插入位置"
@@ -1175,7 +1181,7 @@ def _insert_standalone_m03(text: str, lines: Sequence[str], start: int, newline:
             return newline.join(lines), True, f"第 {idx + 1} 行前插入独立 M03"
     for idx in range(start, len(lines)):
         stripped = lines[idx].strip()
-        if stripped and stripped != "%" and not stripped.startswith("("):
+        if stripped and stripped != "%" and not stripped.startswith("(") and not stripped.startswith(";"):
             lines.insert(idx, command)
             return newline.join(lines), True, f"第 {idx + 1} 行前插入独立 M03"
     return text, False, "无法确定 M03 插入位置"
@@ -1271,11 +1277,12 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         line = raw_line.strip()
         if not line:
             continue
-        if '"' in raw_line and raw_line.count('"') % 2:
+        code = code_part(raw_line)
+        # 只检查代码部分：括号注释与分号后注释内的引号不参与未闭合引号判定。
+        if '"' in code and code.count('"') % 2:
             issues.append(Issue(filename, i, raw_line, "unclosed-quote", "error", "补全或删除未闭合引号"))
         if CONTROL_CHAR_RE.search(raw_line):
             issues.append(Issue(filename, i, raw_line, "control-character", "error", "删除异常控制字符"))
-        code = code_part(raw_line)
         upper_code = code.upper()
         if not has_end and (line.startswith("%") and END_LINE_RE.match(line) or "M" in upper_code and END_CODE_RE.search(code)):
             has_end = True
