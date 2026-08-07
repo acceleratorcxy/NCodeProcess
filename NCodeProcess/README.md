@@ -69,6 +69,7 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 
 ```powershell
 .\build_portable.ps1
+程序使用 `assets/NCodeProcess_icon.ico` 作为 EXE 与运行窗口图标（替换该文件后重新打包即可换图标）。
 ```
 
 输出为单文件 `dist\NCodeProcess.exe`，同时生成 `dist\NCodeProcess-Windows7-Portable.zip`。把 EXE 移到待处理目录即可使用，不会创建安装项、启动项或文件关联。编制和审核/校对信息保存在当前 Windows 用户设置中，不会在 NC 目录生成配置文件，因此移动 EXE 后仍可保留。
