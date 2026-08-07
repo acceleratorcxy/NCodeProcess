@@ -35,6 +35,8 @@ REPORT_PREFIXES = ("ncodeprocess-report", "ncpostprocess-report")
 DEFAULT_NAME_PATTERN = r"^[A-Za-z0-9_一-鿿-]+$"
 # 《F值异常检测方法》第 3 节档位表：一档 100/300（轴向切入/下刀）、
 # 四档 5000/6000（非切削移动/抬刀）。
+# Legacy context constants retained only for the unreachable compatibility block below;
+# the active episode/peer-group detector never uses fixed F values.
 FEED_LOW_GEARS = (100.0, 300.0)
 FEED_HIGH_GEARS = (5000.0, 6000.0)
 # 仅作为角色内“近似档位”的软先验，不得绕过角色距离/包络/硬边界判定。
@@ -247,6 +249,12 @@ class FeedEpisode:
     signature: str
     feature: str
     at_retract: bool = False
+    phase_role: str = "transition-uncertain"
+    direction: str = "unknown"
+    transition_evidence: Dict[str, object] = field(default_factory=dict)
+    start_z: Optional[float] = None
+    end_z: Optional[float] = None
+    motion_row_count: int = 0
 
 
 @dataclass
@@ -254,8 +262,13 @@ class FeedOutlierData:
     """F 离群检测过程数据（episode/peer-group 结构对照法）。
 
     - common_feeds/stage_common_feeds：兼容诊断汇总，不是固定合法 F 表
+    - phase_common_feeds：按进退刀阶段汇总的程序内参照
     - peer_groups：按 episode 结构签名分组的程序内参照及样本计数
+    - compatible_peer_groups：同阶段兼容结构父组
     - insufficient_evidence：结构组不足、无重复参照或模式不稳定的记录
+      （普通唯一结构只计入 coverage，不逐条输出）
+    - episodes：显式 F episode 的阶段角色与转阶段证据
+    - coverage：可比较与未比较 episode 数量
     - envelope：兼容诊断字段，仅表示汇总参照的相对容差范围
     - outliers：同结构 episode 相对离群明细，含 peer_group、sample_count、
       confidence、evidence 等证据字段
@@ -265,8 +278,12 @@ class FeedOutlierData:
     apt_feeds: List[float] = field(default_factory=list)
     common_feeds: List[float] = field(default_factory=list)
     stage_common_feeds: Dict[str, List[float]] = field(default_factory=dict)
+    phase_common_feeds: Dict[str, List[float]] = field(default_factory=dict)
     peer_groups: Dict[str, dict] = field(default_factory=dict)
+    compatible_peer_groups: Dict[str, dict] = field(default_factory=dict)
     insufficient_evidence: List[dict] = field(default_factory=list)
+    episodes: List[dict] = field(default_factory=list)
+    coverage: Dict[str, int] = field(default_factory=dict)
     envelope: List[Optional[float]] = field(default_factory=lambda: [None, None])
     min_count: int = 3
     ratio: float = 2.0
@@ -1710,9 +1727,144 @@ def _feed_structure_signature(raw_line: str, feature: str, at_retract: bool,
         axis_label, motion_label, z_direction, int(bool(at_retract)), feature)
 
 
+def _episode_geometry(records: Sequence[tuple], start_index: int, end_index: int,
+                      motion_trace: Sequence[tuple], z_vals: Sequence[Optional[float]],
+                      move_level: float) -> Dict[str, object]:
+    """Collect phase facts without reading any F value."""
+    segment = records[start_index:end_index]
+    z_sequence: List[float] = []
+    motion_rows = []
+    has_xy_motion = False
+    has_g00 = False
+    for rec in segment:
+        (_line, raw, g00, has_xy, z_value, _lfv, _lfraw, _at_retract,
+         has_motion, _mraw, _mval, tid, _feature, _motion_family) = rec
+        effective_z = z_vals[tid] if 0 <= tid < len(z_vals) else z_value
+        if effective_z is not None:
+            z_sequence.append(effective_z)
+        has_g00 = has_g00 or bool(g00) or bool(G00_RE.search(code_part(raw)))
+        if has_motion:
+            motion_rows.append(rec)
+            has_xy_motion = has_xy_motion or bool(has_xy)
+
+    first_tid = segment[0][11] if segment else None
+    last_tid = segment[-1][11] if segment else None
+    start_z = None
+    if first_tid is not None and first_tid > 0 and first_tid - 1 < len(z_vals):
+        start_z = z_vals[first_tid - 1]
+    if start_z is None and z_sequence:
+        start_z = z_sequence[0]
+    end_z = z_sequence[-1] if z_sequence else start_z
+    all_z = ([start_z] if start_z is not None else []) + z_sequence
+    directions = {1 if b > a else -1 for a, b in zip(all_z, all_z[1:])
+                  if abs(b - a) > 1e-9}
+    direction = ("mixed" if len(directions) > 1 else
+                 "down" if directions == {-1} else
+                 "up" if directions == {1} else "stable")
+    starts_below = start_z is not None and start_z < move_level
+    reaches_retract = any(value >= move_level for value in all_z)
+    safe_positioning = bool(
+        (has_g00 and (not has_xy_motion or
+                      (all_z and all(value >= move_level for value in all_z))))
+        or (all_z and direction != "down" and
+            all(value >= move_level for value in all_z))
+    )
+    # XY motion below the safe plane is a strong cut signal.  A descent that
+    # starts at the safe plane remains plunge even when XY is present.
+    cut_like = bool(has_xy_motion and direction in ("stable", "down") and
+                    not safe_positioning and
+                    not (direction == "down" and
+                         start_z is not None and start_z >= move_level))
+    if not cut_like and direction == "stable" and starts_below and motion_rows:
+        cut_like = True
+    return {
+        "start_z": start_z,
+        "end_z": end_z,
+        "direction": direction,
+        "has_xy_motion": has_xy_motion,
+        "has_g00": has_g00,
+        "motion_row_count": len(motion_rows),
+        "starts_below_retract": starts_below,
+        "reaches_retract_plane": reaches_retract,
+        "safe_positioning": safe_positioning,
+        "cut_like": cut_like,
+        "last_tid": last_tid,
+    }
+
+
+def _annotate_feed_episode_phases(episodes: Sequence[FeedEpisode], spans: Sequence[tuple],
+                                  records: Sequence[tuple], motion_trace: Sequence[tuple],
+                                  z_vals: Sequence[Optional[float]], move_level: float) -> None:
+    """Annotate entry/exit phases from trajectory context, never from F values."""
+    facts = [
+        _episode_geometry(records, span[0], span[1], motion_trace, z_vals, move_level)
+        for span in spans
+    ]
+    seen_cut = False
+    seen_exit = False
+    for index, episode in enumerate(episodes):
+        current = facts[index]
+        previous_role = episodes[index - 1].phase_role if index else ""
+        next_fact = facts[index + 1] if index + 1 < len(facts) else None
+        next_line = episodes[index + 1].line if index + 1 < len(episodes) else None
+        role = "transition-uncertain"
+        if current["cut_like"]:
+            role = "cut"
+            seen_cut = True
+            seen_exit = False
+        elif current["safe_positioning"]:
+            role = "move-out" if seen_cut or seen_exit else "move-in"
+            if role == "move-out":
+                seen_exit = True
+        elif current["direction"] == "up":
+            if seen_cut or seen_exit or previous_role in ("retreat-near", "retreat-clear"):
+                continued_upward = bool(
+                    next_fact and (next_fact["direction"] == "up" or
+                                   next_fact["safe_positioning"])
+                )
+                if continued_upward:
+                    role = ("retreat-clear" if previous_role in ("retreat-near", "retreat-clear")
+                            and (current["reaches_retract_plane"] or current["safe_positioning"])
+                            else "retreat-near")
+                    seen_exit = True
+        elif current["direction"] == "down":
+            if not seen_cut:
+                if next_fact and next_fact["cut_like"] and not current["safe_positioning"]:
+                    role = "approach"
+                else:
+                    role = "plunge"
+            else:
+                role = "approach" if next_fact and next_fact["cut_like"] else "transition-uncertain"
+                if role != "transition-uncertain":
+                    seen_cut = False
+                    seen_exit = False
+        elif current["direction"] == "stable" and current["cut_like"]:
+            role = "cut"
+            seen_cut = True
+        episode.phase_role = role
+        episode.direction = str(current["direction"])
+        episode.start_z = current["start_z"]
+        episode.end_z = current["end_z"]
+        episode.motion_row_count = int(current["motion_row_count"])
+        episode.transition_evidence = {
+            "start_z": current["start_z"],
+            "end_z": current["end_z"],
+            "retract_plane": move_level,
+            "starts_below_retract": bool(current["starts_below_retract"]),
+            "reaches_retract_plane": bool(current["reaches_retract_plane"]),
+            "next_episode_line": next_line,
+            "next_role": "",
+            "continued_upward": current["direction"] == "up",
+        }
+    for index, episode in enumerate(episodes):
+        if index + 1 < len(episodes):
+            episode.transition_evidence["next_role"] = episodes[index + 1].phase_role
+
+
 def _feed_episode_signature(records: Sequence[tuple], start_index: int, end_index: int,
                             feature: str, at_retract: bool,
-                            motion_trace: Sequence[tuple], z_vals: Sequence[Optional[float]]) -> str:
+                            motion_trace: Sequence[tuple], z_vals: Sequence[Optional[float]],
+                            phase_role: Optional[str] = None) -> str:
     axes = set()
     motions = set()
     z_values = []
@@ -1747,7 +1899,7 @@ def _feed_episode_signature(records: Sequence[tuple], start_index: int, end_inde
     z_direction = ("mixed" if len(directions) > 1 else
                    "down" if directions == {-1} else
                    "up" if directions == {1} else "stable")
-    dominant_role = roles.most_common(1)[0][0] if roles else feature
+    dominant_role = phase_role or (roles.most_common(1)[0][0] if roles else feature)
     retract = int(retract_count * 2 >= max(1, len(records[start_index:end_index])))
     return "axes={}|motion={}|z={}|retract={}|role={}".format(
         axis_label, motion_label, z_direction, retract, dominant_role)
@@ -1798,6 +1950,7 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     modal_feed_raw = ""
     modal_feed_value: Optional[float] = None
     current_z: Optional[float] = None
+    move_level = retract_plane if retract_plane is not None else config.retract_z_threshold
     first_cut: Optional[int] = None
     m03_pos: Optional[int] = None
     m04_pos: Optional[int] = None
@@ -2055,24 +2208,10 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             issues.append(Issue(filename, m08_pos, lines[m08_pos - 1], "aux-order", "warning", "M08 出现在首次切削之后，首刀无冷却"))
         if "m09-before-end" in aux and m09_pos is not None and end_pos is not None and end_pos < m09_pos:
             issues.append(Issue(filename, m09_pos, lines[m09_pos - 1], "aux-order", "warning", "M09 出现在程序结束指令之后，冷却液未及时关闭"))
-    # F 离群：先按 F 档位归属（移动/进刀/切削）分组，再按模态 F 统计分布。
-    # NC 程序的 F 档位与动作强相关（切削 900、抬刀 5000、进刀 300 等），
-    # 档位归属依据数控加工一般逻辑：无 XY 且 Z 下降（下刀）→ 进刀档；
-    # Z ≥ 抬刀平面（退刀/定位）→ 移动档；其余（带 XY 的平面/曲面切削）→ 切削档。
-    # 组内出现 ≥2 次的值构成“常见档位”，只检查组内出现 1 次的孤立值是否低于
-    # 最低常见档位 × low_ratio 或高于最高常见档位 × high_ratio；
-    # 组内无常见档位（F 值连续变化）时回退 IQR 极端值标准（k=3）。
+    # F 离群当前仅使用显式 episode 与结构 peer group 的相对参照。
+    # 不建立固定合法 F 表；APT FEDRAT 只保留为辅助上下文，硬边界独立处理。
     stage_labels = {"move": "移动/退刀", "plunge": "进刀", "cut": "切削"}
-    # 《F值异常检测方法》三层法：
-    #   ① 硬边界：F0/负值/超上限（feed_max，默认 10000）→ error（feed-zero、
-    #      negative-parameter、feed-range 已在主遍历上报）；
-    #   ② 档位离群（核心）：F 是离散档位——出现次数 ≥ min_count 的值构成常用档位；
-    #      少见值（出现 ≤2 次）且与最近常用档位的对数距离 > ln2（比值 >2 或 <0.5）
-    #      → warning；落在档位包络 [0.8×min(常用), 1.2×max(常用)] 之外的值
-    #      无论次数都 warning；
-    #   ③ 上下文角色校验：切削区（带 XY 运动）突现抬刀大档（5000/6000）、
-    #      快速移动用小档（100/300）→ 复核提示（info，不阻止输出）。
-    # 出现次数统计含模态继承（无 F 的行沿用上一行 F，计入该档位次数）。
+    # 每个显式 F 只计一个 episode；模态继承行只补充结构，不增加样本权重。
     apt_feeds = [float(feed) for feed, _units in apt_meta.feeds] if apt_meta and apt_meta.feeds else []
 
     def matches_apt_feed(value: float) -> bool:
@@ -2097,6 +2236,7 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     # inherited modal rows enrich its structure but never increase its weight.
     record_indexes = {rec[0]: index for index, rec in enumerate(classified_records)}
     episodes: List[FeedEpisode] = []
+    episode_spans: List[tuple] = []
     for index, (line_no, raw_value, value, raw_line, feature, at_retract) in enumerate(explicit_feeds):
         start_index = record_indexes.get(line_no)
         if start_index is None:
@@ -2111,15 +2251,57 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             motion_trace, _z_vals)
         episodes.append(FeedEpisode(
             line_no, raw_value, value, raw_line, signature, feature, at_retract))
+        episode_spans.append((start_index, end_index))
+
+    _annotate_feed_episode_phases(
+        episodes, episode_spans, classified_records, motion_trace, _z_vals, move_level)
+    for episode, span in zip(episodes, episode_spans):
+        episode.signature = _feed_episode_signature(
+            classified_records, span[0], span[1], episode.feature, episode.at_retract,
+            motion_trace, _z_vals, phase_role=episode.phase_role)
+    if feed_outlier is not None:
+        feed_outlier.episodes = [
+            {
+                "line": episode.line,
+                "value": episode.value,
+                "raw_value": episode.raw_value,
+                "text": episode.raw_line,
+                "signature": episode.signature,
+                "feature": episode.feature,
+                "phase_role": episode.phase_role,
+                "direction": episode.direction,
+                "start_z": episode.start_z,
+                "end_z": episode.end_z,
+                "motion_row_count": episode.motion_row_count,
+                "transition_evidence": dict(episode.transition_evidence),
+            }
+            for episode in episodes
+        ]
 
     episode_groups: Dict[str, List[FeedEpisode]] = {}
     for episode in episodes:
         episode_groups.setdefault(episode.signature, []).append(episode)
-
     def coarse_signature(signature: str) -> str:
         parts = [part for part in signature.split("|")
                  if not part.startswith(("z=", "retract=", "shape=", "zscale="))]
         return "|".join(parts)
+
+    def compatible_signature(signature: str) -> str:
+        """Return a structure-only parent key for compatible phase variants."""
+        fields = {}
+        for part in signature.split("|"):
+            if "=" in part:
+                key, value = part.split("=", 1)
+                fields[key] = value
+        role = fields.get("role", "")
+        if role in ("plunge", "approach", "retreat-near", "retreat-clear"):
+            fields["axes"] = "transition"
+        return "|".join("{}={}".format(key, fields[key]) for key in
+                        ("axes", "motion", "z", "retract", "role") if key in fields)
+
+    compatible_groups: Dict[str, List[FeedEpisode]] = {}
+    for episode in episodes:
+        compatible_groups.setdefault(compatible_signature(episode.signature), []).append(episode)
 
     coarse_counts: Dict[str, Counter] = {}
     global_episode_counts = Counter()
@@ -2132,6 +2314,14 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     ratio = max(1.0, config.feed_outlier_ratio)
     all_common = set()
     stage_common: Dict[str, set] = {}
+    phase_common: Dict[str, set] = {}
+    legacy_stage_counts: Dict[str, Counter] = {}
+    for episode in episodes:
+        legacy_stage_counts.setdefault(episode.feature, Counter())[episode.value] += 1
+    for stage, counts in legacy_stage_counts.items():
+        stage_common[stage] = {
+            value for value, count in counts.items() if count >= min_count
+        }
     peer_group_data: Dict[str, dict] = {}
     for signature, group in episode_groups.items():
         counts = Counter(episode.value for episode in group if episode.value > 0)
@@ -2140,12 +2330,26 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         all_common.update(common_values)
         for episode in group:
             if episode.value in common_values:
-                stage_common.setdefault(episode.feature, set()).add(episode.value)
+                phase_common.setdefault(episode.phase_role, set()).add(episode.value)
         peer_group_data[signature] = {
             "sample_count": len(group),
             "feed_counts": {str(value): count for value, count in sorted(counts.items())},
             "common_feeds": common_values,
             "mode_stable": mode_stable,
+            "lines": [episode.line for episode in group],
+            "phase_roles": sorted({episode.phase_role for episode in group}),
+            "compatible_group": compatible_signature(signature),
+        }
+
+    compatible_peer_group_data: Dict[str, dict] = {}
+    for signature, group in compatible_groups.items():
+        counts = Counter(episode.value for episode in group if episode.value > 0)
+        common_values = sorted(value for value, count in counts.items() if count >= min_count)
+        compatible_peer_group_data[signature] = {
+            "sample_count": len(group),
+            "feed_counts": {str(value): count for value, count in sorted(counts.items())},
+            "common_feeds": common_values,
+            "mode_stable": len(common_values) == 1,
             "lines": [episode.line for episode in group],
         }
 
@@ -2161,40 +2365,116 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         feed_outlier.high_ratio = config.feed_outlier_high_ratio
         feed_outlier.common_feeds = common_feeds
         feed_outlier.stage_common_feeds = stage_common_feeds
+        feed_outlier.phase_common_feeds = {
+            phase: sorted(values) for phase, values in sorted(phase_common.items())
+        }
         feed_outlier.peer_groups = peer_group_data
+        feed_outlier.compatible_peer_groups = compatible_peer_group_data
         if common_feeds:
             feed_outlier.envelope = [
                 common_feeds[0] * config.feed_outlier_low_ratio,
                 common_feeds[-1] * config.feed_outlier_high_ratio,
             ]
 
+    coverage = {
+        "total_episodes": len(episodes),
+        "compared_episodes": 0,
+        "uncompared_episodes": 0,
+        "insufficient_groups": 0,
+    }
+
+    def add_insufficient_summary(signature: str, group: Sequence[FeedEpisode], reason: str,
+                                 counts: Counter) -> None:
+        if feed_outlier is None:
+            return
+        representative = [
+            {
+                "line": episode.line,
+                "value": episode.value,
+                "in_apt": matches_apt_feed(episode.value),
+                "text": episode.raw_line,
+            }
+            for episode in group[:5]
+        ]
+        feed_outlier.insufficient_evidence.append({
+            "peer_group": signature,
+            "sample_count": len(group),
+            "reason": reason,
+            "episode_lines": [episode.line for episode in group],
+            "feed_counts": {str(value): count for value, count in sorted(counts.items())},
+            "representative_lines": representative,
+            "in_apt_values": sorted({
+                episode.value for episode in group if matches_apt_feed(episode.value)
+            }),
+        })
+
     for signature, group in episode_groups.items():
         counts = Counter(episode.value for episode in group if episode.value > 0)
         common_values = sorted(value for value, count in counts.items() if count >= min_count)
         mode_stable = len(common_values) == 1
         if len(group) < 3 or not common_values:
-            if feed_outlier is not None:
-                reason = "peer-group-too-small" if len(group) < 3 else "no-repeated-reference"
+            parent_signature = compatible_signature(signature)
+            parent_group = compatible_groups.get(parent_signature, [])
+            parent_counts = Counter(episode.value for episode in parent_group if episode.value > 0)
+            parent_common = sorted(value for value, count in parent_counts.items()
+                                   if count >= min_count)
+            if len(parent_group) >= 3 and len(parent_common) == 1:
+                reference = parent_common[0]
+                coverage["compared_episodes"] += len(group)
                 for episode in group:
-                    feed_outlier.insufficient_evidence.append({
-                        "line": episode.line, "value": episode.value,
-                        "peer_group": signature, "sample_count": len(group),
-                        "reason": reason, "in_apt": matches_apt_feed(episode.value),
-                        "text": episode.raw_line,
-                    })
+                    value = episode.value
+                    if value <= 0 or parent_counts.get(value, 0) >= min_count:
+                        continue
+                    if global_episode_counts.get(value, 0) >= 2:
+                        continue
+                    if coarse_counts.get(coarse_signature(signature), Counter()).get(value, 0) >= min_count:
+                        continue
+                    relative_ratio = max(value / reference, reference / value)
+                    outside_reference_tolerance = (
+                        value < reference * config.feed_outlier_low_ratio or
+                        value > reference * config.feed_outlier_high_ratio)
+                    if relative_ratio <= ratio and not outside_reference_tolerance:
+                        continue
+                    direction = "低于" if value < reference else "高于"
+                    report_feed_outlier(
+                        episode.line, episode.raw_value, episode.raw_line,
+                        "F{} 在兼容结构组中明显{}重复参照 F{}（{} 次，倍率 {:.3g}），请确认".format(
+                            episode.raw_value, direction, reference,
+                            parent_counts[reference], relative_ratio),
+                        "compatible-peer-outlier", parent_signature, len(parent_group),
+                        "medium", {
+                            "reference_feed": reference,
+                            "reference_count": parent_counts[reference],
+                            "candidate_count": parent_counts.get(value, 0),
+                            "relative_ratio": relative_ratio,
+                            "compatible_group": parent_signature,
+                            "in_apt": matches_apt_feed(value),
+                        })
+                continue
+            coverage["uncompared_episodes"] += len(group)
             continue
         if not mode_stable:
-            if feed_outlier is not None:
-                for episode in group:
-                    if counts.get(episode.value, 0) < min_count:
-                        feed_outlier.insufficient_evidence.append({
-                            "line": episode.line, "value": episode.value,
-                            "peer_group": signature, "sample_count": len(group),
-                            "reason": "unstable-peer-mode",
-                            "in_apt": matches_apt_feed(episode.value),
-                            "text": episode.raw_line,
-                        })
+            coverage["uncompared_episodes"] += len(group)
+            rare_candidates = []
+            for value, count in counts.items():
+                if count >= min_count or global_episode_counts.get(value, 0) >= 2:
+                    continue
+                if coarse_counts.get(coarse_signature(signature), Counter()).get(value, 0) >= min_count:
+                    continue
+                reference = min(
+                    common_values, key=lambda item: abs(log(item) - log(value)))
+                relative_ratio = max(value / reference, reference / value)
+                outside_reference_tolerance = (
+                    value < reference * config.feed_outlier_low_ratio or
+                    value > reference * config.feed_outlier_high_ratio)
+                if relative_ratio > ratio or outside_reference_tolerance:
+                    rare_candidates.append(value)
+            if rare_candidates:
+                coverage["insufficient_groups"] += 1
+                add_insufficient_summary(
+                    signature, group, "unstable-peer-mode", counts)
             continue
+        coverage["compared_episodes"] += len(group)
         for episode in group:
             value = episode.value
             # Upper hard boundaries have already produced feed-range and must
@@ -2242,6 +2522,9 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                     episode.raw_value, direction, reference, counts[reference], relative_ratio),
                 "episode-peer-outlier", signature, len(group), confidence, evidence)
 
+    if feed_outlier is not None:
+        feed_outlier.coverage = coverage
+
     # Cross-role review is also learned from this program.  It is deliberately
     # weaker than peer-group detection and never relies on fixed F numbers.
     cut_references = stage_common_feeds.get("cut", [])
@@ -2286,6 +2569,8 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                                 f"程序包含多个不同 S 值（{values}），请确认转速切换是否符合工艺要求"))
     return issues
 
+    # Unreachable legacy F-role detector below is retained only as historical
+    # source context; the return above is the sole active path.
     feed_counts = Counter(value for _l, _r, value, _t, _f, _a in row_feeds)
     stage_feed_counts: Dict[str, Counter] = {}
     for _l, _r, value, _t, _f, _a in row_feeds:

@@ -454,6 +454,16 @@ class ReportViewerLayoutTests(unittest.TestCase):
                     "ratio": 2.0,
                     "low_ratio": 0.8,
                     "high_ratio": 1.2,
+                    "compatible_peer_groups": {
+                        "axes=transition|motion=linear|z=up|retract=0|role=retreat-near": {
+                            "sample_count": 2, "common_feeds": [], "mode_stable": False,
+                        },
+                    },
+                    "episodes": [
+                        {"phase_role": "cut"}, {"phase_role": "retreat-near"},
+                        {"phase_role": "retreat-clear"}, {"phase_role": "move-out"},
+                    ],
+                    "coverage": {"total_episodes": 4, "compared_episodes": 3, "uncompared_episodes": 1},
                     "peer_groups": {
                         "axis=xy|g=G01|role=cut": {
                             "sample_count": 4, "common_feeds": [300.0], "mode_stable": True,
@@ -463,10 +473,10 @@ class ReportViewerLayoutTests(unittest.TestCase):
                                   "in_apt": False, "peer_group": "axis=xy|g=G01|role=cut",
                                   "confidence": "high", "evidence": {"reference_feed": 300.0, "relative_ratio": 5.0},
                                   "text": "N6G1X60F1500"}],
-                    "insufficient_evidence": [{"line": 8, "value": 900.0,
+                    "insufficient_evidence": [{"episode_lines": [8], "feed_counts": {"900.0": 1},
                                                "reason": "peer-group-too-small",
                                                "peer_group": "axis=z|g=G01|role=plunge",
-                                               "sample_count": 1, "in_apt": True,
+                                               "sample_count": 1, "in_apt_values": [900.0],
                                                "text": "N8G1Z-2F900"}],
                 }},
                 {"file": "Q.MPF"},
@@ -478,7 +488,9 @@ class ReportViewerLayoutTests(unittest.TestCase):
             content = app.feed_outlier_text.get("1.0", "end")
             self.assertIn("APT 进给参考：300", content)
             self.assertIn("结构参照组：1 组", content)
+            self.assertIn("retreat-near 1", content)
             self.assertIn("证据不足 1", content)
+            self.assertIn("覆盖 3/4", content)
             self.assertIn("参照 F300", content)
             self.assertIn("相对倍率 ×5", content)
             self.assertIn("置信度 高", content)

@@ -1763,13 +1763,27 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
                         "mode_stable": False,
                     },
                 },
+                compatible_peer_groups={
+                    "axes=transition|motion=linear|z=up|retract=0|role=retreat-near": {
+                        "sample_count": 2,
+                        "common_feeds": [],
+                        "mode_stable": False,
+                    },
+                },
+                episodes=[
+                    {"phase_role": "cut"},
+                    {"phase_role": "retreat-near"},
+                    {"phase_role": "retreat-clear"},
+                    {"phase_role": "move-out"},
+                ],
+                coverage={"total_episodes": 4, "compared_episodes": 3, "uncompared_episodes": 1},
                 insufficient_evidence=[{
-                    "line": 5,
-                    "value": 900.0,
+                    "episode_lines": [5],
+                    "feed_counts": {"900.0": 1},
                     "peer_group": "axis=z|g=G01|z=1|retract=0|role=plunge",
                     "sample_count": 1,
                     "reason": "peer-group-too-small",
-                    "in_apt": True,
+                    "in_apt_values": [900.0],
                     "text": "N5G1X5F900",
                 }],
                 outliers=[{
@@ -1792,7 +1806,9 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
             app.keep_table.selection_set("0")
             app.show_selected()
             self.assertIn("结构参照组", app.feed_common_var.get())
+            self.assertIn("retreat-near", app.feed_common_var.get())
             self.assertIn("证据不足", app.feed_envelope_var.get())
+            self.assertIn("覆盖 3/4", app.feed_envelope_var.get())
             headings = [app.feed_outlier_table.heading(col, "text") for col in app.feed_outlier_table["columns"]]
             self.assertIn("参照 F", headings)
             self.assertIn("置信度", headings)

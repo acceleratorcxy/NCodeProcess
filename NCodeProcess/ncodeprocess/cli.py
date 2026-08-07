@@ -183,6 +183,26 @@ def main(argv=None):
         print(f"[{f.action}] {f.source}" + (f" -> {Path(f.target).name}" if f.target else ""))
         for change in f.changes:
             print("  *", change)
+        feed_outlier = getattr(f, "feed_outlier", None)
+        if feed_outlier is not None:
+            coverage = getattr(feed_outlier, "coverage", {}) or {}
+            phase_counts = {}
+            for episode in getattr(feed_outlier, "episodes", []) or []:
+                role = episode.get("phase_role") if isinstance(episode, dict) else None
+                if role:
+                    phase_counts[role] = phase_counts.get(role, 0) + 1
+            phase_text = ", ".join(
+                f"{role}={count}" for role, count in sorted(phase_counts.items())
+            ) or "无"
+            print(
+                "  F阶段：{}；覆盖 {}/{}，未比较 {}，证据不足 {} 组".format(
+                    phase_text,
+                    coverage.get("compared_episodes", 0),
+                    coverage.get("total_episodes", 0),
+                    coverage.get("uncompared_episodes", 0),
+                    len(getattr(feed_outlier, "insufficient_evidence", []) or []),
+                )
+            )
         for issue in f.issues:
             print(f"  {issue.severity}: {issue.kind} L{issue.line} {issue.suggestion}")
     if not args.yes:

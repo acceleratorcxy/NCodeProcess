@@ -2185,6 +2185,7 @@ class App(ttk.Frame):
         """刷新 F episode/peer-group 证据区。"""
         reason_labels = {
             "episode-peer-outlier": "同结构参照明显偏离",
+            "compatible-peer-outlier": "兼容结构参照偏离",
             "peer-group-too-small": "结构组样本不足",
             "no-repeated-reference": "没有重复参照",
             "unstable-peer-mode": "结构组模式不稳定",
@@ -2210,19 +2211,32 @@ class App(ttk.Frame):
             self.feed_apt_feeds_var.set("APT 进给参考：无（仅按程序自身结构比较）")
         common = data.common_feeds or []
         groups = getattr(data, "peer_groups", {}) or {}
+        compatible_groups = getattr(data, "compatible_peer_groups", {}) or {}
         stable_groups = sum(1 for item in groups.values()
                             if isinstance(item, dict) and item.get("mode_stable") and item.get("common_feeds"))
         common_hint = "、".join(f"{v:g}" for v in common) if common else "无"
+        phase_counts = {}
+        for episode in getattr(data, "episodes", []) or []:
+            role = episode.get("phase_role") if isinstance(episode, dict) else None
+            if role:
+                phase_counts[role] = phase_counts.get(role, 0) + 1
+        phase_hint = "、".join(
+            f"{role} {count}" for role, count in sorted(phase_counts.items())
+        ) if phase_counts else "无"
         self.feed_common_var.set(
-            f"结构参照组：{len(groups)} 组，稳定重复参照 {stable_groups} 组；兼容汇总 F：{common_hint}"
+            f"结构参照组：{len(groups)} 组，稳定重复参照 {stable_groups} 组；"
+            f"兼容父组 {len(compatible_groups)} 组；阶段：{phase_hint}；兼容汇总 F：{common_hint}"
             f"（最小参照数 ≥{data.min_count}，不代表固定合法档位）")
         outlier_count = len(data.outliers or [])
         boundary_count = len(data.boundary_errors or [])
         context_count = len(data.context_reviews or [])
         evidence_count = len(getattr(data, "insufficient_evidence", []) or [])
+        coverage = getattr(data, "coverage", {}) or {}
         self.feed_envelope_var.set(
             f"检测结论：离群 {outlier_count}，边界错误 {boundary_count}，上下文复核 {context_count}，"
-            f"证据不足 {evidence_count}；倍率阈值 ×{data.ratio:g}，低/高容差 ×{getattr(data, 'low_ratio', 0.8):g}/×{getattr(data, 'high_ratio', 1.2):g}")
+            f"证据不足 {evidence_count}；覆盖 {coverage.get('compared_episodes', 0)}/"
+            f"{coverage.get('total_episodes', 0)}，未比较 {coverage.get('uncompared_episodes', 0)}；"
+            f"倍率阈值 ×{data.ratio:g}，低/高容差 ×{getattr(data, 'low_ratio', 0.8):g}/×{getattr(data, 'high_ratio', 1.2):g}")
         outlier_rows = []
         for out in data.outliers:
             row = dict(out)
@@ -2241,7 +2255,11 @@ class App(ttk.Frame):
             outlier_rows.append(row)
         for item in getattr(data, "insufficient_evidence", []) or []:
             row = dict(item)
-            row.setdefault("in_apt", False)
+            row.setdefault("in_apt", bool(row.get("in_apt_values")))
+            if not row.get("line") and row.get("episode_lines"):
+                row["line"] = "、".join(str(value) for value in row["episode_lines"])
+            if row.get("value") is None and row.get("feed_counts"):
+                row["value"] = "、".join(str(value) for value in sorted(row["feed_counts"]))
             row["status"] = "证据不足"
             outlier_rows.append(row)
         for out in outlier_rows:

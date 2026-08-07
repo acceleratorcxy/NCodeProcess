@@ -1475,7 +1475,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(feed.outliers[0]["confidence"], "high")
 
     def test_feed_episode_unique_structure_is_insufficient_evidence(self):
-        # 每个显式 F 都属于不同结构且只出现一次时，不得依靠数值大小强行判异常。
+        # 每个显式 F 都属于不同结构且只出现一次时，只计入覆盖率，不逐条刷证据不足。
         text = (
             "N1G1X1F900\nN2G1Z-1F100\n"
             "N3G2X2Y2I1J1F1500\nN4G0Z100F6000\nN5M30\n"
@@ -1483,18 +1483,19 @@ class CoreTests(unittest.TestCase):
         _stats, issues, feed = analyze_program(
             text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
         self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        self.assertEqual(len(feed.insufficient_evidence), 4)
+        self.assertEqual(len(feed.insufficient_evidence), 0)
+        self.assertEqual(feed.coverage["uncompared_episodes"], 4)
 
     def test_feed_insufficient_evidence_keeps_apt_match_flag(self):
-        # 证据不足不是离群，但仍必须保留 F 是否命中 APT 参考的事实。
+        # 唯一结构不再逐条输出证据不足，但 APT 参考仍保留在汇总数据中。
         text = "N1G1X1F300\nN2G1Z-1F100\nN3M30\n"
         meta = AptMeta(feeds=[("300.0000", "MMPM")])
         _stats, issues, feed = analyze_program(
             text, "P.MPF", "P", DEFAULT_INFO, self._cfg(), apt_meta=meta)
         self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        apt_rows = [item for item in feed.insufficient_evidence if item["value"] == 300.0]
-        self.assertEqual(len(apt_rows), 1)
-        self.assertTrue(apt_rows[0]["in_apt"])
+        self.assertEqual(feed.insufficient_evidence, [])
+        self.assertEqual(feed.apt_feeds, [300.0])
+        self.assertEqual(feed.coverage["uncompared_episodes"], 2)
 
     def test_feed_episode_modal_inheritance_counts_once(self):
         # 一个显式 F 被后续 99 个运动行继承，仍只能形成一个 episode 样本。
@@ -1505,6 +1506,167 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
         self.assertEqual(
             sum(group["sample_count"] for group in feed.peer_groups.values()), 1)
+
+    def test_feed_phase_entry_sequence(self):
+        text = (
+            "N1G0Z100X0Y0F6000\n"
+            "N2G1Z20F1200\n"
+            "N3G1Z2F300\n"
+            "N4G1X10Y10Z0F900\n"
+            "N5M30\n"
+        )
+        _stats, _issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertEqual(
+            [item["phase_role"] for item in feed.episodes],
+            ["move-in", "plunge", "approach", "cut"],
+        )
+
+    def test_feed_phase_exit_reuses_entry_speeds(self):
+        text = (
+            "N1G1X10Y10Z0F900\n"
+            "N2G1Z2F300\n"
+            "N3G1Z20F1200\n"
+            "N4G0Z100F6000\n"
+            "N5M30\n"
+        )
+        _stats, _issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        roles = [item["phase_role"] for item in feed.episodes]
+        self.assertEqual(roles, ["cut", "retreat-near", "retreat-clear", "move-out"])
+        self.assertEqual(feed.episodes[1]["value"], 300.0)
+        self.assertEqual(feed.episodes[2]["value"], 1200.0)
+
+    def test_feed_phase_does_not_use_absolute_f_for_role(self):
+        base = (
+            "N1G0Z100X0Y0F6000\nN2G1Z20F1200\n"
+            "N3G1Z2F300\nN4G1X10Y10Z0F900\nN5M30\n"
+        )
+        scaled = (
+            base.replace("6000", "600")
+            .replace("1200", "120")
+            .replace("300", "30")
+            .replace("900", "90")
+        )
+        first = analyze_program(base, "A.MPF", "A", DEFAULT_INFO, self._cfg())[2]
+        second = analyze_program(scaled, "B.MPF", "B", DEFAULT_INFO, self._cfg())[2]
+        self.assertEqual(
+            [item["phase_role"] for item in first.episodes],
+            [item["phase_role"] for item in second.episodes],
+        )
+
+    def test_surface_oscillation_is_not_retreat(self):
+        text = (
+            "N1G1X1Z0F900\nN2G1X2Z1F900\n"
+            "N3G1X3Z0F900\nN4G1X4Z1F900\nN5M30\n"
+        )
+        _stats, _issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertNotIn(
+            "retreat-near", [item["phase_role"] for item in feed.episodes])
+
+    def test_same_f_reused_by_plunge_and_retreat_is_not_cross_role_outlier(self):
+        text = (
+            "N1G1X1Z0F900\nN2G1Z2F300\nN3G1Z20F1200\n"
+            "N4G0Z100F6000\nN5G1Z20F1200\nN6G1Z2F300\n"
+            "N7G1X2Z0F900\nN8M30\n"
+        )
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+
+    def test_diagonal_retreat_is_not_cut(self):
+        text = (
+            "N1G1X10Y10Z0F900\n"
+            "N2G1X11Z2F300\n"
+            "N3G1Z20F1200\n"
+            "N4G0Z100F6000\n"
+            "N5M30\n"
+        )
+        _stats, _issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertEqual(
+            [item["phase_role"] for item in feed.episodes],
+            ["cut", "retreat-near", "retreat-clear", "move-out"],
+        )
+
+    def test_compatible_transition_parent_group_ignores_axis_variant(self):
+        text = (
+            "N1G1X10Y10Z0F900\nN2G1Z2F300\nN3G1Z20F1200\nN4G0Z100F6000\n"
+            "N5G1X20Y20Z0F900\nN6G1X21Z2F300\nN7G1Z20F1200\n"
+            "N8G0Z100F6000\nN9M30\n"
+        )
+        _stats, _issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        parent_groups = [
+            group for key, group in feed.compatible_peer_groups.items()
+            if "role=retreat-near" in key
+        ]
+        self.assertEqual(len(parent_groups), 1)
+        self.assertEqual(parent_groups[0]["sample_count"], 2)
+
+    def test_compatible_transition_parent_can_provide_medium_reference(self):
+        text = (
+            "N1G1X1Z0F900\nN2G1Z2F300\nN3G1Z20F1200\nN4G0Z100F6000\n"
+            "N5G1X2Z0F900\nN6G1Z2F300\nN7G1Z20F1200\nN8G0Z100F6000\n"
+            "N9G1X3Z0F900\nN10G1Z2F300\nN11G1Z20F1200\nN12G0Z100F6000\n"
+            "N13G1X4Z0F900\nN14G1X5Z2F100\nN15G1Z20F1200\n"
+            "N16G0Z100F6000\nN17M30\n"
+        )
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [item for item in feed.outliers if item["line"] == 14]
+        self.assertEqual(len(outliers), 1)
+        self.assertEqual(outliers[0]["reason"], "compatible-peer-outlier")
+        self.assertEqual(outliers[0]["confidence"], "medium")
+
+    def test_compatible_transition_parent_accepts_feed_reused_in_other_phase(self):
+        text = (
+            "N1G1X1Z0F2500\nN2G1X2Z0F2500\n"
+            "N3G1X3Z0F900\nN4G1Z2F300\nN5G1Z20F1200\nN6G0Z100F6000\n"
+            "N7G1X4Z0F900\nN8G1X5Z2F300\nN9G1Z20F1200\nN10G0Z100F6000\n"
+            "N11G1X6Z0F900\nN12G1Y1Z2F300\nN13G1Z20F1200\nN14G0Z100F6000\n"
+            "N15G1X7Z0F900\nN16G1X8Y2Z2F2500\nN17G1Z20F1200\n"
+            "N18G0Z100F6000\nN19M30\n"
+        )
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(item["line"] == 16 for item in feed.outliers))
+        self.assertFalse(any(
+            issue.kind == "feed-outlier" and issue.line == 16
+            for issue in issues
+        ))
+
+    def test_unique_episode_is_counted_in_coverage_not_issue_rows(self):
+        text = (
+            "N1G1X1F900\nN2G1Z-1F100\n"
+            "N3G2X2Y2I1J1F1500\nN4G0Z100F6000\nN5M30\n"
+        )
+        _stats, _issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertGreater(feed.coverage["uncompared_episodes"], 0)
+        self.assertLessEqual(len(feed.insufficient_evidence), 1)
+
+    def test_conflicting_peer_group_has_one_summary_record(self):
+        text = "\n".join([
+            "N1G1X1Y1Z0F900", "N2G1X2Y2Z0F900",
+            "N3G1X3Y3Z0F900", "N4G1X4Y4Z0F100", "N5M30",
+        ])
+        _stats, _issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertEqual(len(feed.insufficient_evidence), 0)
+        self.assertTrue(any(item["value"] == 100.0 for item in feed.outliers))
+
+    def test_multimodal_group_without_rare_candidate_needs_no_evidence_row(self):
+        text = "\n".join([
+            "N1G1X1Y1Z0F300", "N2G1X2Y2Z0F300", "N3G1X3Y3Z0F300",
+            "N4G1X4Y4Z0F900", "N5G1X5Y5Z0F900", "N6G1X6Y6Z0F900",
+            "N7M30",
+        ])
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+        self.assertEqual(feed.insufficient_evidence, [])
 
     def test_feed_outlier_low_value_flagged(self):
         # 二层：F1800 常用，F25 少见且明显偏低 → 离群警告（F25 ≥ 默认下限 20，不触发 feed-range）。
@@ -1602,8 +1764,10 @@ class CoreTests(unittest.TestCase):
         _stats, issues, feed = analyze_program(
             text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
         self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
-        self.assertTrue(any(item["value"] == 450.0
-                            for item in feed.insufficient_evidence))
+        self.assertEqual(len(feed.insufficient_evidence), 1)
+        summary = feed.insufficient_evidence[0]
+        self.assertEqual(summary["feed_counts"]["450.0"], 1)
+        self.assertIn(17, summary["episode_lines"])
         return
         issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
         outliers = [i for i in issues if i.kind == "feed-outlier"]

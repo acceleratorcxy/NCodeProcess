@@ -912,6 +912,7 @@ class ReportViewer(ttk.Frame):
         self.feed_outlier_text.delete("1.0", "end")
         reason_labels = {
             "episode-peer-outlier": "同结构参照明显偏离",
+            "compatible-peer-outlier": "兼容结构参照偏离",
             "peer-group-too-small": "结构组样本不足",
             "no-repeated-reference": "没有重复参照",
             "unstable-peer-mode": "结构组模式不稳定",
@@ -940,11 +941,23 @@ class ReportViewer(ttk.Frame):
                 self.feed_outlier_text.insert("end", "  APT 进给参考：无（仅按程序自身结构比较）\n")
             common = data.get("common_feeds") or []
             groups = data.get("peer_groups") or {}
+            compatible_groups = data.get("compatible_peer_groups") or {}
             stable_groups = sum(1 for item in groups.values()
                                 if isinstance(item, dict) and item.get("mode_stable") and item.get("common_feeds"))
             common_hint = "、".join(f"{v:g}" for v in common) if common else "无"
+            phase_counts = {}
+            for episode in data.get("episodes") or []:
+                if not isinstance(episode, dict):
+                    continue
+                role = episode.get("phase_role")
+                if role:
+                    phase_counts[role] = phase_counts.get(role, 0) + 1
+            phase_hint = "、".join(
+                f"{role} {count}" for role, count in sorted(phase_counts.items())
+            ) if phase_counts else "无"
             self.feed_outlier_text.insert(
-                "end", f"  结构参照组：{len(groups)} 组，稳定重复参照 {stable_groups} 组；兼容汇总 F：{common_hint}"
+                "end", f"  结构参照组：{len(groups)} 组，稳定重复参照 {stable_groups} 组；"
+                f"兼容父组 {len(compatible_groups)} 组；阶段：{phase_hint}；兼容汇总 F：{common_hint}"
                 f"（最小参照数 ≥{data.get('min_count', 3)}，不代表固定合法档位）\n")
             outlier_rows = []
             for item in data.get("outliers") or []:
@@ -964,12 +977,18 @@ class ReportViewer(ttk.Frame):
                 outlier_rows.append(row)
             for item in data.get("insufficient_evidence") or []:
                 row = dict(item)
-                row.setdefault("in_apt", False)
+                row.setdefault("in_apt", bool(row.get("in_apt_values")))
+                if not row.get("line") and row.get("episode_lines"):
+                    row["line"] = "、".join(str(value) for value in row["episode_lines"])
+                if row.get("value") is None and row.get("feed_counts"):
+                    row["value"] = "、".join(str(value) for value in sorted(row["feed_counts"]))
                 row["status"] = "证据不足"
                 outlier_rows.append(row)
             self.feed_outlier_text.insert(
                 "end", f"  检测结论：离群 {len(data.get('outliers') or [])}，边界错误 {len(data.get('boundary_errors') or [])}，"
                 f"上下文复核 {len(data.get('context_reviews') or [])}，证据不足 {len(data.get('insufficient_evidence') or [])}；"
+                f"覆盖 {(data.get('coverage') or {}).get('compared_episodes', 0)}/"
+                f"{(data.get('coverage') or {}).get('total_episodes', 0)}，未比较 {(data.get('coverage') or {}).get('uncompared_episodes', 0)}；"
                 f"倍率阈值 ×{data.get('ratio', 2):g}，低/高容差 ×{data.get('low_ratio', 0.8):g}/×{data.get('high_ratio', 1.2):g}\n")
             if outlier_rows:
                 self.feed_outlier_text.insert("end", "  检测证据明细：\n")
