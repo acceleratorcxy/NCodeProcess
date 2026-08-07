@@ -3117,6 +3117,25 @@ class App(ttk.Frame):
         messagebox.showinfo("导出完成", f"报告已自动保存到：\n{path}", parent=self.master)
 
 
+def _set_window_icon(root):
+    """Set the Tk window icon (title bar/taskbar) from the bundled .ico.
+
+    PyInstaller extracts datas under sys._MEIPASS; in development the icon
+    lives next to the package (../assets).  Failures are ignored so a missing
+    icon never prevents the app from starting.
+    """
+    try:
+        if getattr(sys, "frozen", False):
+            base = Path(sys._MEIPASS)
+        else:
+            base = Path(__file__).resolve().parent.parent
+        icon_path = base / "assets" / "NCodeProcess_icon.ico"
+        if icon_path.exists():
+            root.iconbitmap(str(icon_path))
+    except (tk.TclError, OSError):
+        pass
+
+
 def main():
     anchor = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve()
     if not acquire_single_instance(str(anchor)):
@@ -3130,6 +3149,7 @@ def main():
         # WP-R3：启动不自动创建 NCodeProcessData/logs；磁盘日志仅在导出报告时落盘。
         emit_event("info", "startup", f"程序启动（版本 {__version__}）")
         root = tk.Tk()
+        _set_window_icon(root)
         root.withdraw()
         try:
             style = ttk.Style()
