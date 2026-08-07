@@ -374,11 +374,11 @@ class ReportViewerLayoutTests(unittest.TestCase):
             root.destroy()
 
     def test_issue_filter_filters_rows(self):
-        # WP-15：校验问题页按级别筛选（全部/error/warning）。
+        # WP-15：校验问题页按级别筛选（全部/error/warning/info）。
         root, app = self._build_viewer(1500, 800)
         try:
             app.report_data = {"files": [
-                {"file": "P.MPF", "issues": [{"severity": "error", "kind": "G00"}, {"severity": "warning", "kind": "feed-outlier"}]},
+                {"file": "P.MPF", "issues": [{"severity": "error", "kind": "G00"}, {"severity": "warning", "kind": "feed-outlier"}, {"severity": "info", "kind": "apt-coolant-missing"}]},
                 {"file": "Q.MPF", "issues": [{"severity": "warning", "kind": "block-number"}]},
             ]}
             app.issue_filter_var.set("error")
@@ -387,9 +387,45 @@ class ReportViewerLayoutTests(unittest.TestCase):
             app.issue_filter_var.set("warning")
             app._fill_issues(None)
             self.assertEqual(len(app.issue_table.get_children()), 2)
+            app.issue_filter_var.set("info")
+            app._fill_issues(None)
+            self.assertEqual(len(app.issue_table.get_children()), 1)
             app.issue_filter_var.set("全部")
             app._fill_issues(None)
-            self.assertEqual(len(app.issue_table.get_children()), 3)
+            self.assertEqual(len(app.issue_table.get_children()), 4)
+        finally:
+            root.destroy()
+
+    def test_changes_page_shows_summary_and_side_by_side_diff(self):
+        # 修改与差异页：修改摘要表格 + 左右对照（删除行在左、新增行在右）。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            app.report_data = {"files": [
+                {"file": "P.MPF", "changes": ["补全程序头", "重命名"],
+                 "diff": ["--- before", "+++ after", "@@ -1 +1 @@", "-OLD", "+NEW", " KEEP"]},
+                {"file": "Q.MPF", "changes": ["补全 M03"], "diff": ["--- b", "+++ a", "@@ -1 +1 @@", "+M03"]},
+                {"file": "R.MPF", "changes": [], "diff": []},
+            ]}
+            app._fill_changes(None)
+            # 摘要表只含有效果的文件（P/Q），R 无变化不出现。
+            rows = app.change_summary_table.get_children()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(app.change_summary_table.item(rows[0], "values")[0], "P.MPF")
+            self.assertIn("补全程序头", app.change_summary_table.item(rows[0], "values")[1])
+            # 默认展示第一个文件的左右对照。
+            left = app.change_left.get("1.0", "end")
+            right = app.change_right.get("1.0", "end")
+            self.assertIn("OLD", left)
+            self.assertIn("NEW", right)
+            self.assertNotIn("NEW", left)
+            self.assertNotIn("OLD", right)
+            # 删除行打 removed tag、新增行打 added tag。
+            self.assertEqual(len(app.change_left.tag_ranges("removed")), 2)
+            self.assertEqual(len(app.change_right.tag_ranges("added")), 2)
+            # 点击摘要第二行切换到 Q.MPF。
+            app.change_summary_table.selection_set(rows[1])
+            app._on_change_summary_selected()
+            self.assertIn("M03", app.change_right.get("1.0", "end"))
         finally:
             root.destroy()
 
@@ -442,44 +478,52 @@ class ReportViewerLayoutTests(unittest.TestCase):
             root.destroy()
 
     def test_issues_page_shows_feed_outlier_detail(self):
-        # F episode/peer-group 明细：显示结构参照、相对证据和证据不足记录。
+        # F 抬刀平面分段对比明细：显示段统计、离群/复核、边界错误与分布表。
         root, app = self._build_viewer(1500, 800)
         try:
             app.report_data = {"files": [
                 {"file": "P.MPF", "feed_outlier": {
-                    "apt_feeds": [300.0],
-                    "common_feeds": [300.0],
-                    "envelope": [240.0, 360.0],
-                    "min_count": 3,
-                    "ratio": 2.0,
-                    "low_ratio": 0.8,
-                    "high_ratio": 1.2,
-                    "compatible_peer_groups": {
-                        "axes=transition|motion=linear|z=up|retract=0|role=retreat-near": {
-                            "sample_count": 2, "common_feeds": [], "mode_stable": False,
-                        },
-                    },
-                    "episodes": [
-                        {"phase_role": "cut"}, {"phase_role": "retreat-near"},
-                        {"phase_role": "retreat-clear"}, {"phase_role": "move-out"},
+                    "safe_plane": 100.0,
+                    "tolerance": 0.3,
+                    "segments": [
+                        {"index": 1, "first_line": 1, "last_line": 5,
+                         "feed_counts": {"300": 1, "1800": 3, "6000": 1},
+                         "feeds": [300.0, 1800.0, 6000.0]},
+                        {"index": 2, "first_line": 6, "last_line": 9,
+                         "feed_counts": {"300": 1, "1500": 1, "8888": 1, "6000": 1},
+                         "feeds": [300.0, 1500.0, 8888.0, 6000.0]},
                     ],
-                    "coverage": {"total_episodes": 4, "compared_episodes": 3, "uncompared_episodes": 1},
-                    "peer_groups": {
-                        "axis=xy|g=G01|role=cut": {
-                            "sample_count": 4, "common_feeds": [300.0], "mode_stable": True,
-                        },
-                    },
-                    "outliers": [{"line": 6, "value": 1500.0, "reason": "episode-peer-outlier",
-                                  "in_apt": False, "peer_group": "axis=xy|g=G01|role=cut",
-                                  "confidence": "high", "evidence": {"reference_feed": 300.0, "relative_ratio": 5.0},
-                                  "text": "N6G1X60F1500"}],
-                    "insufficient_evidence": [{"episode_lines": [8], "feed_counts": {"900.0": 1},
-                                               "reason": "peer-group-too-small",
-                                               "peer_group": "axis=z|g=G01|role=plunge",
-                                               "sample_count": 1, "in_apt_values": [900.0],
-                                               "text": "N8G1Z-2F900"}],
+                    "outliers": [
+                        {"line": 7, "value": 1500.0, "raw_value": "1500",
+                         "text": "N7G1X70F1500", "count": 1, "level": "warning",
+                         "reason": "segment-gap", "gap": 0.7, "axial_only": False,
+                         "in_apt": False, "segment_index": 2,
+                         "other_segment_feeds": [300.0, 1800.0, 6000.0]},
+                        {"line": 8, "value": 8888.0, "raw_value": "8888",
+                         "text": "N8G1X80F8888", "count": 1, "level": "review",
+                         "reason": "segment-gap", "gap": 0.325, "axial_only": False,
+                         "in_apt": True, "segment_index": 2,
+                         "other_segment_feeds": [300.0, 1800.0, 6000.0]},
+                    ],
+                    "boundary_errors": [
+                        {"line": 9, "value": 20000.0, "reason": "out-of-range",
+                         "in_apt": False, "text": "N9G1X90F20000"},
+                    ],
+                    "distribution": [],
+                    "apt_feeds": [300.0],
                 }},
-                {"file": "Q.MPF"},
+                {"file": "Q.MPF", "feed_outlier": {
+                    "safe_plane": 100.0, "tolerance": 0.3, "segments": [
+                        {"index": 1, "first_line": 1, "last_line": 4,
+                         "feed_counts": {"300": 1, "1800": 2, "6000": 1},
+                         "feeds": [300.0, 1800.0, 6000.0]},
+                    ], "outliers": [], "boundary_errors": [],
+                    "distribution": [
+                        {"value": 300.0, "count": 1, "first_line": 2,
+                         "note": "仅出现一次，请人工确认"},
+                        {"value": 1800.0, "count": 2, "first_line": 3, "note": ""},
+                    ], "apt_feeds": []},
+                },
             ]}
             app.file_items = app.report_data["files"]
             app._populate_files()
@@ -487,21 +531,97 @@ class ReportViewerLayoutTests(unittest.TestCase):
             app._on_file_selected()
             content = app.feed_outlier_text.get("1.0", "end")
             self.assertIn("APT 进给参考：300", content)
-            self.assertIn("结构参照组：1 组", content)
-            self.assertIn("retreat-near 1", content)
-            self.assertIn("证据不足 1", content)
-            self.assertIn("覆盖 3/4", content)
-            self.assertIn("参照 F300", content)
-            self.assertIn("相对倍率 ×5", content)
-            self.assertIn("置信度 高", content)
-            self.assertIn("结构组样本不足", content)
-            self.assertIn("N8G1Z-2F900", content)
-            self.assertIn("N6G1X60F1500", content)
-            self.assertIn("不在 APT 档位内", content)
+            self.assertIn("抬刀平面 100，2 段，容差 30%", content)
+            self.assertIn("警告 1，复核 1，边界错误 1", content)
+            self.assertIn("第 7 行 F1500（离群告警", content)
+            self.assertIn("最小差距 70.0%，不在 APT 档位内", content)
+            self.assertIn("第 8 行 F8888（复核提示", content)
+            self.assertIn("在 APT 档位内", content)
+            self.assertIn("N9G1X90F20000", content)
             app.file_table.selection_set("1")
             app._on_file_selected()
             content = app.feed_outlier_text.get("1.0", "end")
-            self.assertIn("当前报告无 F 离群检测数据", content)
+            self.assertIn("单段程序无段间参照", content)
+            self.assertIn("F 范围：300 ~ 1800", content)
+            self.assertIn("F 分布：300 × 1 次（仅出现一次", content)
+            self.assertIn("F 分布：1800 × 2 次", content)
+        finally:
+            root.destroy()
+
+    def test_feed_outlier_without_apt_shows_no_apt_reference(self):
+        # 无配对 APT 时，APT 状态写“无 APT 参考”，不写“不在 APT 档位内”。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            app.report_data = {"files": [
+                {"file": "P.MPF", "feed_outlier": {
+                    "safe_plane": 100.0, "tolerance": 0.3,
+                    "segments": [{"index": 1, "first_line": 1, "last_line": 5,
+                                  "feed_counts": {"300": 1, "66": 1, "6000": 1},
+                                  "feeds": [66.0, 300.0, 6000.0]}],
+                    "outliers": [{"line": 4, "value": 66.0, "raw_value": "66",
+                                  "text": "N4G1X4Y4F66", "count": 1, "level": "warning",
+                                  "reason": "segment-gap", "gap": 0.9,
+                                  "axial_only": False, "in_apt": False,
+                                  "segment_index": 1,
+                                  "other_segment_feeds": [300.0, 6000.0]}],
+                    "boundary_errors": [], "distribution": [], "apt_feeds": [],
+                }},
+            ]}
+            app.file_items = app.report_data["files"]
+            app._populate_files()
+            app.file_table.selection_set("0")
+            app._on_file_selected()
+            content = app.feed_outlier_text.get("1.0", "end")
+            self.assertIn("无 APT 参考", content)
+            self.assertNotIn("不在 APT 档位内", content)
+        finally:
+            root.destroy()
+
+    def test_feed_outlier_tab_has_dedicated_tables(self):
+        # F 离群检测独立页签：汇总/证据/分布三张表格展示，支持“仅检出异常”筛选。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            tabs = [app.notebook.tab(i, "text") for i in range(app.notebook.index("end"))]
+            self.assertIn("F 离群检测", tabs)
+            app.report_data = {"files": [
+                {"file": "P.MPF", "feed_outlier": {
+                    "safe_plane": 100.0, "tolerance": 0.3,
+                    "segments": [{"index": 1, "first_line": 1, "last_line": 4,
+                                  "feed_counts": {"300": 1, "66": 1, "6000": 1},
+                                  "feeds": [66.0, 300.0, 6000.0]}],
+                    "outliers": [{"line": 4, "value": 66.0, "raw_value": "66",
+                                  "text": "N4G1X4Y4F66", "count": 1, "level": "warning",
+                                  "reason": "segment-gap", "gap": 0.9,
+                                  "axial_only": False, "in_apt": False,
+                                  "segment_index": 1,
+                                  "other_segment_feeds": [300.0, 6000.0]}],
+                    "boundary_errors": [], "distribution": [], "apt_feeds": [],
+                }},
+                {"file": "Q.MPF", "feed_outlier": {
+                    "safe_plane": 100.0, "tolerance": 0.3,
+                    "segments": [{"index": 1, "first_line": 1, "last_line": 3,
+                                  "feed_counts": {"300": 1, "6000": 1},
+                                  "feeds": [300.0, 6000.0]}],
+                    "outliers": [], "boundary_errors": [], "distribution": [], "apt_feeds": [],
+                }},
+            ]}
+            app.file_items = app.report_data["files"]
+            app._populate_files()
+            app.file_table.selection_set("all")
+            app._on_file_selected()
+            # 汇总表与证据表按全部文件填充。
+            self.assertEqual(len(app.feed_summary_table.get_children()), 2)
+            self.assertEqual(len(app.feed_evidence_table.get_children()), 1)
+            values = app.feed_evidence_table.item(app.feed_evidence_table.get_children()[0], "values")
+            self.assertEqual(values[0], "P.MPF")
+            self.assertEqual(values[3], "离群告警")
+            self.assertEqual(values[7], "无 APT 参考")
+            # “仅检出异常”筛选：无证据的 Q.MPF 从汇总表移除。
+            app.feed_filter_var.set("仅检出异常")
+            app._fill_feed_outlier(app._selected_item())
+            rows = app.feed_summary_table.get_children()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(app.feed_summary_table.item(rows[0], "values")[0], "P.MPF")
         finally:
             root.destroy()
 

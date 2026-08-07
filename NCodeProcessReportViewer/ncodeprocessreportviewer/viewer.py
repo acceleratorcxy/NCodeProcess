@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
@@ -183,6 +184,59 @@ def issues_csv_rows(data: dict) -> List[tuple]:
                 str(issue.get("suggestion") or ""),
             ))
     return rows
+
+
+def feed_evidence_csv_rows(data: dict) -> List[tuple]:
+    """导出 F 离群检测证据 CSV 行（表头 + 离群/复核 + 边界错误逐条展开）。"""
+    level_labels = {"warning": "离群告警", "review": "复核提示"}
+    reason_labels = {"segment-gap": "与其它段差距过大",
+                     "cross-program-gap": "与同目录程序差距过大",
+                     "boundary-error": "超上下限"}
+    rows = [("文件", "行号", "F值", "状态", "原因", "全程次数", "最小差距",
+             "APT参考", "原始文本")]
+    for file_item in data.get("files") or []:
+        if not isinstance(file_item, dict):
+            continue
+        feed = file_item.get("feed_outlier")
+        if not isinstance(feed, dict) or feed.get("safe_plane") is None:
+            continue
+        has_apt = bool(feed.get("apt_feeds"))
+        for item in feed.get("outliers") or []:
+            if not isinstance(item, dict):
+                continue
+            level = str(item.get("level") or "")
+            apt_note = ("在 APT 档位内" if item.get("in_apt")
+                        else ("不在 APT 档位内" if has_apt else "无 APT 参考"))
+            gap = item.get("gap")
+            rows.append((
+                str(file_item.get("file") or ""),
+                str(item.get("line") or ""),
+                str(item.get("value") or ""),
+                level_labels.get(level, level),
+                reason_labels.get(str(item.get("reason") or ""), str(item.get("reason") or "")),
+                str(item.get("count") or ""),
+                f"{gap:.1%}" if isinstance(gap, (int, float)) else "",
+                apt_note,
+                str(item.get("text") or ""),
+            ))
+        for item in feed.get("boundary_errors") or []:
+            if not isinstance(item, dict):
+                continue
+            apt_note = ("在 APT 档位内" if item.get("in_apt")
+                        else ("不在 APT 档位内" if has_apt else "无 APT 参考"))
+            rows.append((
+                str(file_item.get("file") or ""),
+                str(item.get("line") or ""),
+                str(item.get("value") or ""),
+                "边界错误",
+                reason_labels["boundary-error"],
+                "",
+                "",
+                apt_note,
+                str(item.get("text") or ""),
+            ))
+    return rows
+
 
 
 def apt_meta_rows(item: dict) -> List[Tuple[str, str]]:
@@ -454,6 +508,8 @@ class ReportViewer(ttk.Frame):
         self.notebook.add(self.apt_page, text="APT 信息")
         self.notebook.add(self.stats_page, text="参数统计")
         self.notebook.add(self.issues_page, text="校验问题")
+        self.feed_page = ttk.Frame(self.notebook)
+        self.notebook.add(self.feed_page, text="F 离群检测")
         self.notebook.add(self.changes_page, text="修改与差异")
         self.notebook.add(self.log_page, text="运行日志")
         self.notebook.add(self.raw_page, text="原始 JSON")
@@ -462,6 +518,7 @@ class ReportViewer(ttk.Frame):
         self._build_apt()
         self._build_stats()
         self._build_issues()
+        self._build_feed()
         self._build_changes()
         self._build_log()
         self._build_raw()
@@ -606,7 +663,7 @@ class ReportViewer(ttk.Frame):
         filter_bar.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
         ttk.Label(filter_bar, text="级别筛选：").pack(side="left")
         self.issue_filter_var = tk.StringVar(value="全部")
-        self.issue_filter_combo = ttk.Combobox(filter_bar, textvariable=self.issue_filter_var, state="readonly", width=12, values=("全部", "error", "warning"))
+        self.issue_filter_combo = ttk.Combobox(filter_bar, textvariable=self.issue_filter_var, state="readonly", width=12, values=("全部", "error", "warning", "info"))
         self.issue_filter_combo.pack(side="left", padx=(4, 0))
         self.issue_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._fill_issues(self._selected_item()))
         ttk.Button(filter_bar, text="导出问题 CSV", command=self.export_issues_csv).pack(side="right")
@@ -614,25 +671,414 @@ class ReportViewer(ttk.Frame):
         self.issue_table._container.grid(row=1, column=0, sticky="nsew", padx=6)
         self.issue_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
         self.issue_table.tag_configure("warning", foreground="#b54708", font=("Microsoft YaHei UI", 9, "bold"))
-        feed_frame = ttk.LabelFrame(self.issues_page, text="F 离群检测明细")
-        feed_frame.grid(row=2, column=0, sticky="ew", padx=6, pady=(2, 6))
+
+    def _build_feed(self):
+        """F 离群检测独立页签：文件汇总 + 检测证据/F 分布子页签。
+
+        汇总表固定高度置顶；下方子页签分别展示检测证据与 F 分布表，
+        各自占满剩余空间，空数据时显示占位提示，不再出现空白区域。
+        """
+        self.feed_page.columnconfigure(0, weight=1)
+        toolbar = ttk.Frame(self.feed_page)
+        toolbar.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
+        ttk.Label(toolbar, text="文件筛选：").pack(side="left")
+        self.feed_filter_var = tk.StringVar(value="全部文件")
+        self.feed_filter_combo = ttk.Combobox(
+            toolbar, textvariable=self.feed_filter_var, state="readonly", width=14,
+            values=("全部文件", "仅检出异常"))
+        self.feed_filter_combo.pack(side="left", padx=(4, 0))
+        self.feed_filter_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._fill_feed_outlier(self._selected_item()))
+        ttk.Button(toolbar, text="导出证据 CSV", command=self.export_feed_evidence_csv).pack(side="right")
+
+        summary_box = ttk.LabelFrame(self.feed_page, text="文件汇总")
+        summary_box.grid(row=1, column=0, sticky="ew", padx=6)
+        summary_box.columnconfigure(0, weight=1)
+        summary_box.rowconfigure(0, weight=1)
+        self.feed_summary_table = self._table(
+            summary_box,
+            ("file", "plane", "segments", "warning", "review", "boundary", "distribution"),
+            ("文件/程序", "抬刀平面", "段数", "离群告警", "复核提示", "边界错误", "F 分布项"),
+            (220, 90, 60, 90, 90, 90, 90),
+        )
+        self.feed_summary_table.configure(height=6)
+        self.feed_summary_table._container.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        summary_box.configure(height=6)
+
+        self.feed_sub_notebook = ttk.Notebook(self.feed_page)
+        self.feed_sub_notebook.grid(row=2, column=0, sticky="nsew", padx=6, pady=(4, 0))
+        self.feed_page.rowconfigure(2, weight=1)
+
+        evidence_page = ttk.Frame(self.feed_sub_notebook)
+        evidence_page.columnconfigure(0, weight=1)
+        evidence_page.rowconfigure(0, weight=1)
+        self.feed_sub_notebook.add(evidence_page, text="检测证据（离群/复核/边界错误）")
+        self.feed_evidence_table = self._table(
+            evidence_page,
+            ("file", "line", "value", "status", "reason", "count", "gap", "apt", "text"),
+            ("文件", "行", "F值", "状态", "原因", "次数", "最小差距", "APT参考", "原始文本"),
+            (140, 45, 70, 85, 130, 55, 80, 105, 260),
+        )
+        self.feed_evidence_table.tag_configure("warning", foreground="#b42318",
+                                               font=("Microsoft YaHei UI", 9, "bold"))
+        self.feed_evidence_table.tag_configure("review", foreground="#b54708")
+        self.feed_evidence_table.tag_configure("boundary", foreground="#7d3c98")
+        self.feed_evidence_table.tag_configure("empty", foreground="#9aa0a6")
+        self.feed_evidence_table._container.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+        distribution_page = ttk.Frame(self.feed_sub_notebook)
+        distribution_page.columnconfigure(0, weight=1)
+        distribution_page.rowconfigure(0, weight=1)
+        self.feed_sub_notebook.add(distribution_page, text="F 分布表（单段程序人工判定）")
+        self.feed_distribution_table = self._table(
+            distribution_page,
+            ("file", "value", "count", "first_line", "note"),
+            ("文件", "F值", "次数", "首次行号", "说明"),
+            (220, 90, 70, 90, 320),
+        )
+        self.feed_distribution_table.tag_configure("empty", foreground="#9aa0a6")
+        self.feed_distribution_table._container.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+        detail_bar = ttk.Frame(self.feed_page)
+        detail_bar.grid(row=3, column=0, sticky="ew", padx=6, pady=(4, 2))
+        self.feed_detail_toggle = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            detail_bar, text="显示文本明细", variable=self.feed_detail_toggle,
+            command=self._toggle_feed_detail,
+        ).pack(side="left")
+        self.feed_detail_frame = ttk.Frame(self.feed_page)
+        self.feed_detail_frame.grid(row=4, column=0, sticky="nsew", padx=6, pady=(0, 4))
+        self.feed_page.rowconfigure(4, weight=1)
         self.feed_outlier_text = tk.Text(
-            feed_frame, height=7, wrap="none", state="disabled",
+            self.feed_detail_frame, wrap="none", state="disabled",
             font=("Consolas", 9), background="#fbfbfb", relief="flat", padx=6, pady=4,
         )
-        feed_ybar = ttk.Scrollbar(feed_frame, orient="vertical", command=self.feed_outlier_text.yview)
+        feed_ybar = ttk.Scrollbar(self.feed_detail_frame, orient="vertical",
+                                  command=self.feed_outlier_text.yview)
         self.feed_outlier_text.configure(yscrollcommand=feed_ybar.set)
         feed_ybar.pack(side="right", fill="y")
         self.feed_outlier_text.pack(fill="both", expand=True)
+        self.feed_detail_frame.grid_remove()
+
+
+    def _toggle_feed_detail(self):
+        if self.feed_detail_toggle.get():
+            self.feed_detail_frame.grid()
+        else:
+            self.feed_detail_frame.grid_remove()
+
+
+    def _fill_feed_outlier(self, selected):
+        """F 离群检测页：汇总/证据/分布三张表格 + 文本明细（选中文件或汇总）。
+
+        表格展示为主，文本明细保留供复制；均按“全部文件 / 仅检出异常”筛选。
+        """
+        for table in (self.feed_summary_table, self.feed_evidence_table,
+                      self.feed_distribution_table):
+            for item in table.get_children():
+                table.delete(item)
+        self.feed_outlier_text.configure(state="normal")
+        self.feed_outlier_text.delete("1.0", "end")
+        files = [selected] if selected is not None else (self.report_data or {}).get("files", [])
+        filter_value = self.feed_filter_var.get()
+        reason_labels = {"segment-gap": "与其它段差距过大",
+                         "cross-program-gap": "与同目录程序差距过大",
+                         "boundary-error": "超上下限"}
+        level_labels = {"warning": "离群告警", "review": "复核提示"}
+        shown = 0
+        for file_item in files:
+            data = file_item.get("feed_outlier") if isinstance(file_item, dict) else None
+            if not isinstance(data, dict) or data.get("safe_plane") is None:
+                continue
+            outliers = data.get("outliers") or []
+            boundary_errors = data.get("boundary_errors") or []
+            distribution = data.get("distribution") or []
+            warning = sum(1 for item in outliers if item.get("level") == "warning")
+            review = sum(1 for item in outliers if item.get("level") == "review")
+            if filter_value == "仅检出异常" and not (outliers or boundary_errors):
+                continue
+            shown += 1
+            file_name = str(file_item.get("file") or "")
+            safe_plane = data.get("safe_plane")
+            self.feed_summary_table.insert("", "end", values=(
+                file_name,
+                f"{safe_plane:g}" if isinstance(safe_plane, (int, float)) else "-",
+                len(data.get("segments") or []),
+                warning, review, len(boundary_errors), len(distribution),
+            ))
+            has_apt = bool(data.get("apt_feeds"))
+            evidence_rows = []
+            for item in outliers:
+                level = str(item.get("level") or "")
+                apt_note = ("在 APT 档位内" if item.get("in_apt")
+                            else ("不在 APT 档位内" if has_apt else "无 APT 参考"))
+                gap = item.get("gap")
+                evidence_rows.append((
+                    item, level_labels.get(level, level), level,
+                    reason_labels.get(str(item.get("reason") or ""), str(item.get("reason") or "")),
+                    f"{gap:.1%}" if isinstance(gap, (int, float)) else "-", apt_note))
+            for item in boundary_errors:
+                apt_note = ("在 APT 档位内" if item.get("in_apt")
+                            else ("不在 APT 档位内" if has_apt else "无 APT 参考"))
+                evidence_rows.append((
+                    item, "边界错误", "boundary", reason_labels["boundary-error"], "-", apt_note))
+            for item, status, tag, reason, gap_s, apt_note in evidence_rows:
+                value = item.get("value")
+                value_s = f"{value:g}" if isinstance(value, (int, float)) else str(value)
+                self.feed_evidence_table.insert(
+                    "", "end", tags=(tag,),
+                    values=(file_name, item.get("line", ""), value_s, status, reason,
+                            item.get("count", "-"), gap_s, apt_note,
+                            (item.get("text") or "").strip()))
+            for row in distribution:
+                value = row.get("value")
+                value_s = f"{value:g}" if isinstance(value, (int, float)) else str(value)
+                self.feed_distribution_table.insert(
+                    "", "end",
+                    values=(file_name, value_s, row.get("count", 0),
+                            row.get("first_line", ""), str(row.get("note") or "")))
+            header = f"【{file_item.get('file') or ''}】"
+            self.feed_outlier_text.insert("end", header + "\n")
+            apt_feeds = data.get("apt_feeds") or []
+            if apt_feeds:
+                feeds = "、".join(f"{v:g}" for v in apt_feeds)
+                self.feed_outlier_text.insert("end", f"  APT 进给参考：{feeds}（仅辅助上下文，不是合法值白名单）\n")
+            else:
+                self.feed_outlier_text.insert("end", "  APT 进给参考：无（仅按程序自身结构比较）\n")
+            segments = data.get("segments") or []
+            if len(segments) <= 1:
+                if data.get("reference_count"):
+                    single_note = (
+                        f"单段参照同目录其他程序 {data.get('reference_count')} 个常见档位")
+                else:
+                    single_note = "单段程序无段间参照，输出 F 分布表供人工检查"
+                self.feed_outlier_text.insert(
+                    "end",
+                    f"  分段统计：抬刀平面 {safe_plane:g}，{len(segments)} 段，"
+                    f"容差 {data.get('tolerance', 0.3):.0%}；{single_note}\n")
+            else:
+                self.feed_outlier_text.insert(
+                    "end",
+                    f"  分段统计：抬刀平面 {safe_plane:g}，{len(segments)} 段，"
+                    f"容差 {data.get('tolerance', 0.3):.0%}\n")
+            conclusion = (
+                f"  检测结论：警告 {warning}，复核 {review}，边界错误 {len(boundary_errors)}"
+                + (f"；F 分布表 {len(distribution)} 项" if distribution else ""))
+            self.feed_outlier_text.insert("end", conclusion + "\n")
+            if evidence_rows:
+                self.feed_outlier_text.insert("end", "  检测证据明细：\n")
+                for item, status, _tag, reason, gap_s, apt_note in evidence_rows:
+                    value = item.get("value")
+                    value_s = f"{value:g}" if isinstance(value, (int, float)) else str(value)
+                    line_text = (item.get("text") or "").strip()
+                    self.feed_outlier_text.insert(
+                        "end",
+                        f"    第 {item.get('line')} 行 F{value_s}（{status}，{reason}）"
+                        f"全程 {item.get('count', '-')} 次，最小差距 {gap_s}，{apt_note}）：{line_text}\n")
+            else:
+                self.feed_outlier_text.insert("end", "  检测证据明细：无\n")
+            dist_values = [row.get("value") for row in distribution
+                           if isinstance(row.get("value"), (int, float))]
+            if dist_values:
+                self.feed_outlier_text.insert(
+                    "end",
+                    f"  F 范围：{min(dist_values):g} ~ {max(dist_values):g}（最小值/ 最大值）\n")
+            for row in distribution:
+                note = "（" + str(row.get("note")) + "）" if row.get("note") else ""
+                value = row.get("value")
+                value_s = f"{value:g}" if isinstance(value, (int, float)) else str(value)
+                self.feed_outlier_text.insert(
+                    "end", f"  F 分布：{value_s} × {row.get('count', 0)} 次{note}\n")
+        if not self.feed_summary_table.get_children():
+            self.feed_summary_table.insert(
+                "", "end", tags=("empty",),
+                values=("当前报告无 F 离群检测数据", "-", "-", "-", "-", "-", "-"))
+        if not self.feed_evidence_table.get_children():
+            self.feed_evidence_table.insert(
+                "", "end", tags=("empty",),
+                values=("", "", "", "无检测证据", "", "", "", "", ""))
+        if not self.feed_distribution_table.get_children():
+            self.feed_distribution_table.insert(
+                "", "end", tags=("empty",),
+                values=("", "", "", "", "无 F 分布数据（单段程序才输出分布表）"))
+        if shown == 0:
+            self.feed_outlier_text.insert("end", "当前报告无 F 离群检测数据\n")
+        self.feed_outlier_text.configure(state="disabled")
+
+    def export_feed_evidence_csv(self):
+        """导出 F 离群检测证据（离群/复核/边界错误）为 UTF-8 BOM CSV。"""
+        rows = feed_evidence_csv_rows(self.report_data or {})
+        if len(rows) <= 1:
+            messagebox.showinfo("无检测证据", "当前报告没有可导出的 F 离群检测证据。", parent=self.master)
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出 F 离群检测证据 CSV",
+            initialdir=str(self.base_dir),
+            defaultextension=".csv",
+            filetypes=(("CSV 文件", "*.csv"),),
+            initialfile="ncodeprocess-feed-evidence.csv",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerows(rows)
+        except OSError as exc:
+            messagebox.showerror("导出失败", f"无法写入 CSV：\n{exc}", parent=self.master)
+            return
+        messagebox.showinfo("导出完成", f"已导出 {len(rows) - 1} 条检测证据：\n{path}", parent=self.master)
+
 
     def _build_changes(self):
-        self.changes_page.rowconfigure(0, weight=1)
+        """修改与差异页：修改摘要表格 + 带行号的左右对照 diff 视图。"""
         self.changes_page.columnconfigure(0, weight=1)
-        self.change_text = self._text(self.changes_page)
-        self.change_text.tag_configure("removed", foreground="#b42318", background="#ffebe9")
-        self.change_text.tag_configure("added", foreground="#137333", background="#e6f4ea")
-        self.change_text.tag_configure("header", foreground="#0969da")
-        self.change_text.tag_configure("hidden", foreground="#0969da")
+        self.changes_page.rowconfigure(1, weight=1)
+        summary_box = ttk.LabelFrame(self.changes_page, text="修改摘要")
+        summary_box.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
+        summary_box.columnconfigure(0, weight=1)
+        summary_box.rowconfigure(0, weight=1)
+        self.change_summary_table = self._table(
+            summary_box, ("file", "summary"), ("文件", "修改内容"), (260, 740))
+        self.change_summary_table.configure(height=5)
+        self.change_summary_table._container.pack(fill="both", expand=True, padx=4, pady=4)
+        self.change_summary_table.bind("<<TreeviewSelect>>", self._on_change_summary_selected)
+        self._change_summary_map = {}
+
+        diff_box = ttk.LabelFrame(self.changes_page, text="差异对照（左：处理前　右：处理后）")
+        diff_box.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        diff_box.columnconfigure(1, weight=1)
+        diff_box.columnconfigure(3, weight=1)
+        diff_box.rowconfigure(0, weight=1)
+        gutter_font = ("Consolas", 9)
+        self.change_left_gutter = tk.Text(
+            diff_box, width=6, wrap="none", state="disabled", takefocus=0,
+            font=gutter_font, background="#eef1f4", foreground="#57606a",
+            relief="flat", padx=4, pady=4, cursor="arrow",
+        )
+        self.change_right_gutter = tk.Text(
+            diff_box, width=6, wrap="none", state="disabled", takefocus=0,
+            font=gutter_font, background="#eef1f4", foreground="#57606a",
+            relief="flat", padx=4, pady=4, cursor="arrow",
+        )
+        self.change_left = tk.Text(
+            diff_box, wrap="none", state="disabled", takefocus=0,
+            font=("Consolas", 9), background="#fafafa", relief="flat", padx=6, pady=4,
+        )
+        self.change_right = tk.Text(
+            diff_box, wrap="none", state="disabled", takefocus=0,
+            font=("Consolas", 9), background="#fafafa", relief="flat", padx=6, pady=4,
+        )
+        self.change_left.tag_configure("removed", foreground="#b42318", background="#ffebe9")
+        self.change_left.tag_configure("header", foreground="#0969da", font=("Consolas", 9, "bold"))
+        self.change_left.tag_configure("context", foreground="#57606a")
+        self.change_right.tag_configure("added", foreground="#137333", background="#e6f4ea")
+        self.change_right.tag_configure("header", foreground="#0969da", font=("Consolas", 9, "bold"))
+        self.change_right.tag_configure("context", foreground="#57606a")
+        self.change_left_gutter.tag_configure("removed", foreground="#b42318")
+        self.change_left_gutter.tag_configure("header", foreground="#0969da")
+        self.change_right_gutter.tag_configure("added", foreground="#137333")
+        self.change_right_gutter.tag_configure("header", foreground="#0969da")
+        ybar = ttk.Scrollbar(diff_box, orient="vertical", command=self._sync_change_scroll)
+        xbar_l = ttk.Scrollbar(diff_box, orient="horizontal", command=self.change_left.xview)
+        xbar_r = ttk.Scrollbar(diff_box, orient="horizontal", command=self.change_right.xview)
+        for widget in (self.change_left_gutter, self.change_right_gutter,
+                       self.change_left, self.change_right):
+            widget.configure(yscrollcommand=lambda first, last: ybar.set(first, last))
+        self.change_left.configure(xscrollcommand=xbar_l.set)
+        self.change_right.configure(xscrollcommand=xbar_r.set)
+        self.change_left_gutter.grid(row=0, column=0, sticky="ns")
+        self.change_left.grid(row=0, column=1, sticky="nsew")
+        self.change_right_gutter.grid(row=0, column=2, sticky="ns")
+        self.change_right.grid(row=0, column=3, sticky="nsew")
+        ybar.grid(row=0, column=4, sticky="ns")
+        xbar_l.grid(row=1, column=0, columnspan=2, sticky="ew")
+        xbar_r.grid(row=1, column=2, columnspan=2, sticky="ew")
+
+    def _sync_change_scroll(self, *args):
+        self.change_left_gutter.yview(*args)
+        self.change_left.yview(*args)
+        self.change_right_gutter.yview(*args)
+        self.change_right.yview(*args)
+
+
+    def _on_change_summary_selected(self, _event=None):
+        selection = self.change_summary_table.selection()
+        if not selection:
+            return
+        item = self._change_summary_map.get(selection[0])
+        if item is not None:
+            self._fill_change_diff(item)
+
+    def _fill_change_diff(self, file_item):
+        """把文件的 unified diff 渲染为左右对照，含左右行号（解析 @@ 起始行）。"""
+        for widget in (self.change_left_gutter, self.change_right_gutter,
+                       self.change_left, self.change_right):
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+        diff = file_item.get("diff") or [] if isinstance(file_item, dict) else []
+        if not diff:
+            self.change_left.insert("end", "（无差异）\n", "context")
+            self.change_right.insert("end", "（无差异）\n", "context")
+            for widget in (self.change_left_gutter, self.change_right_gutter,
+                           self.change_left, self.change_right):
+                widget.configure(state="disabled")
+            return
+        left_no = right_no = None
+        for line in diff:
+            if line.startswith("@@ -"):
+                match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+                if match:
+                    left_no = int(match.group(1))
+                    right_no = int(match.group(2))
+                self.change_left_gutter.insert("end", "\n", "header")
+                self.change_right_gutter.insert("end", "\n", "header")
+                self.change_left.insert("end", line + "\n", "header")
+                self.change_right.insert("end", line + "\n", "header")
+            elif line.startswith("---") or line.startswith("+++"):
+                self.change_left_gutter.insert("end", "\n", "header")
+                self.change_right_gutter.insert("end", "\n", "header")
+                self.change_left.insert("end", line + "\n", "header")
+                self.change_right.insert("end", line + "\n", "header")
+            elif line.startswith("-") and not line.startswith("---"):
+                self.change_left_gutter.insert(
+                    "end", (str(left_no) + "\n") if left_no is not None else "\n", "removed")
+                self.change_right_gutter.insert("end", "\n", "header")
+                self.change_left.insert("end", line[1:] + "\n", "removed")
+                self.change_right.insert("end", "\n", "context")
+                if left_no is not None:
+                    left_no += 1
+            elif line.startswith("+") and not line.startswith("+++"):
+                self.change_left_gutter.insert("end", "\n", "header")
+                self.change_right_gutter.insert(
+                    "end", (str(right_no) + "\n") if right_no is not None else "\n", "added")
+                self.change_left.insert("end", "\n", "context")
+                self.change_right.insert("end", line[1:] + "\n", "added")
+                if right_no is not None:
+                    right_no += 1
+            elif line.startswith(" "):
+                self.change_left_gutter.insert(
+                    "end", (str(left_no) + "\n") if left_no is not None else "\n", "context")
+                self.change_right_gutter.insert(
+                    "end", (str(right_no) + "\n") if right_no is not None else "\n", "context")
+                self.change_left.insert("end", line[1:] + "\n", "context")
+                self.change_right.insert("end", line[1:] + "\n", "context")
+                if left_no is not None:
+                    left_no += 1
+                if right_no is not None:
+                    right_no += 1
+            elif line.startswith("\\"):
+                continue
+            else:
+                self.change_left_gutter.insert("end", "\n", "header")
+                self.change_right_gutter.insert("end", "\n", "header")
+                self.change_left.insert("end", line + "\n", "context")
+                self.change_right.insert("end", "\n", "context")
+        for widget in (self.change_left_gutter, self.change_right_gutter,
+                       self.change_left, self.change_right):
+            widget.configure(state="disabled")
+
+
 
     def _build_log(self):
         self.log_page.columnconfigure(0, weight=1)
@@ -906,117 +1352,6 @@ class ReportViewer(ttk.Frame):
                     continue
                 self.issue_table.insert("", "end", values=(file_item.get("file", ""), issue.get("line", ""), severity, issue.get("kind", ""), issue.get("text", ""), issue.get("suggestion", "")), tags=(severity,) if severity in ("error", "warning") else ())
 
-    def _fill_feed_outlier(self, selected):
-        """F episode/peer-group 证据：选中文件或汇总显示结构参照与证据不足。"""
-        self.feed_outlier_text.configure(state="normal")
-        self.feed_outlier_text.delete("1.0", "end")
-        reason_labels = {
-            "episode-peer-outlier": "同结构参照明显偏离",
-            "compatible-peer-outlier": "兼容结构参照偏离",
-            "peer-group-too-small": "结构组样本不足",
-            "no-repeated-reference": "没有重复参照",
-            "unstable-peer-mode": "结构组模式不稳定",
-            "rare-below-common": "兼容：低于程序内参照",
-            "rare-above-common": "兼容：高于程序内参照",
-            "envelope-out": "兼容：超出相对容差",
-            "non-gear-value": "兼容：非结构参照值",
-            "boundary-error": "超上下限",
-            "cut-high-gear": "切削用抬刀大档",
-            "move-low-gear": "移动用小档",
-        }
-        files = [selected] if selected is not None else (self.report_data or {}).get("files", [])
-        shown = 0
-        for file_item in files:
-            data = file_item.get("feed_outlier") if isinstance(file_item, dict) else None
-            if not isinstance(data, dict):
-                continue
-            shown += 1
-            header = f"〔{file_item.get('file') or ''}〕"
-            self.feed_outlier_text.insert("end", header + "\n")
-            apt_feeds = data.get("apt_feeds") or []
-            if apt_feeds:
-                feeds = "、".join(f"{v:g}" for v in apt_feeds)
-                self.feed_outlier_text.insert("end", f"  APT 进给参考：{feeds}（仅辅助上下文，不是合法值白名单）\n")
-            else:
-                self.feed_outlier_text.insert("end", "  APT 进给参考：无（仅按程序自身结构比较）\n")
-            common = data.get("common_feeds") or []
-            groups = data.get("peer_groups") or {}
-            compatible_groups = data.get("compatible_peer_groups") or {}
-            stable_groups = sum(1 for item in groups.values()
-                                if isinstance(item, dict) and item.get("mode_stable") and item.get("common_feeds"))
-            common_hint = "、".join(f"{v:g}" for v in common) if common else "无"
-            phase_counts = {}
-            for episode in data.get("episodes") or []:
-                if not isinstance(episode, dict):
-                    continue
-                role = episode.get("phase_role")
-                if role:
-                    phase_counts[role] = phase_counts.get(role, 0) + 1
-            phase_hint = "、".join(
-                f"{role} {count}" for role, count in sorted(phase_counts.items())
-            ) if phase_counts else "无"
-            self.feed_outlier_text.insert(
-                "end", f"  结构参照组：{len(groups)} 组，稳定重复参照 {stable_groups} 组；"
-                f"兼容父组 {len(compatible_groups)} 组；阶段：{phase_hint}；兼容汇总 F：{common_hint}"
-                f"（最小参照数 ≥{data.get('min_count', 3)}，不代表固定合法档位）\n")
-            outlier_rows = []
-            for item in data.get("outliers") or []:
-                row = dict(item)
-                row["status"] = "离群告警"
-                outlier_rows.append(row)
-            for item in data.get("boundary_errors") or []:
-                row = dict(item)
-                row.setdefault("in_apt", False)
-                row["reason"] = "boundary-error"
-                row["status"] = "边界错误"
-                outlier_rows.append(row)
-            for item in data.get("context_reviews") or []:
-                row = dict(item)
-                row.setdefault("in_apt", False)
-                row["status"] = "上下文复核"
-                outlier_rows.append(row)
-            for item in data.get("insufficient_evidence") or []:
-                row = dict(item)
-                row.setdefault("in_apt", bool(row.get("in_apt_values")))
-                if not row.get("line") and row.get("episode_lines"):
-                    row["line"] = "、".join(str(value) for value in row["episode_lines"])
-                if row.get("value") is None and row.get("feed_counts"):
-                    row["value"] = "、".join(str(value) for value in sorted(row["feed_counts"]))
-                row["status"] = "证据不足"
-                outlier_rows.append(row)
-            self.feed_outlier_text.insert(
-                "end", f"  检测结论：离群 {len(data.get('outliers') or [])}，边界错误 {len(data.get('boundary_errors') or [])}，"
-                f"上下文复核 {len(data.get('context_reviews') or [])}，证据不足 {len(data.get('insufficient_evidence') or [])}；"
-                f"覆盖 {(data.get('coverage') or {}).get('compared_episodes', 0)}/"
-                f"{(data.get('coverage') or {}).get('total_episodes', 0)}，未比较 {(data.get('coverage') or {}).get('uncompared_episodes', 0)}；"
-                f"倍率阈值 ×{data.get('ratio', 2):g}，低/高容差 ×{data.get('low_ratio', 0.8):g}/×{data.get('high_ratio', 1.2):g}\n")
-            if outlier_rows:
-                self.feed_outlier_text.insert("end", "  检测证据明细：\n")
-                for out in outlier_rows:
-                    line_text = (out.get("text") or "").strip()
-                    apt_note = "在 APT 档位内" if out.get("in_apt") else "不在 APT 档位内"
-                    reason = reason_labels.get(out.get("reason", ""), out.get("reason", ""))
-                    value = out.get("value")
-                    value_s = f"{value:g}" if isinstance(value, (int, float)) else str(value)
-                    evidence = out.get("evidence") or {}
-                    reference = evidence.get("reference_feed", out.get("reference_feed"))
-                    reference_s = f"{reference:g}" if isinstance(reference, (int, float)) else "-"
-                    relative_ratio = evidence.get("relative_ratio", out.get("relative_ratio"))
-                    ratio_s = f"×{relative_ratio:.3g}" if isinstance(relative_ratio, (int, float)) else "-"
-                    confidence_labels = {"high": "高", "medium": "中", "low": "低"}
-                    confidence = confidence_labels.get(out.get("confidence", ""), out.get("confidence", "-"))
-                    self.feed_outlier_text.insert(
-                        "end",
-                        f"    第 {out.get('line')} 行 F{value_s}（{out.get('status', '')}，{reason}，"
-                        f"结构组 {out.get('peer_group', '-') or '-'}，参照 F{reference_s}，相对倍率 {ratio_s}，"
-                        f"置信度 {confidence}，{apt_note}）：{line_text}\n",
-                    )
-            else:
-                self.feed_outlier_text.insert("end", "  检测证据明细：无\n")
-        if shown == 0:
-            self.feed_outlier_text.insert("end", "当前报告无 F 离群检测数据\n")
-        self.feed_outlier_text.configure(state="disabled")
-
     def _fill_apt(self, selected):
         """APT 信息页签：选中文件显示其 apt_meta/toolpath_stats；全部文件显示报告 apt_summary。"""
         for item in self.apt_table.get_children():
@@ -1056,25 +1391,36 @@ class ReportViewer(ttk.Frame):
         messagebox.showinfo("导出完成", f"已导出 {len(rows) - 1} 条校验问题：\n{path}", parent=self.master)
 
     def _fill_changes(self, selected):
-        self.change_text.configure(state="normal")
-        self.change_text.delete("1.0", "end")
-        items = [selected] if selected else (self.report_data or {}).get("files", [])
-        for file_item in items:
+        """填充修改摘要表并展示第一个有差异文件的对照视图。"""
+        for item in self.change_summary_table.get_children():
+            self.change_summary_table.delete(item)
+        self._change_summary_map = {}
+        items = [selected] if selected is not None else (self.report_data or {}).get("files", [])
+        first_item = None
+        for idx, file_item in enumerate(items):
             if not isinstance(file_item, dict):
                 continue
-            title = file_item.get("file", "未命名文件")
             changes = file_item.get("changes") or []
             diff = file_item.get("diff") or []
             if not changes and not diff:
                 continue
-            self.change_text.insert("end", f"【{title}】\n", "header")
-            for change in changes:
-                self.change_text.insert("end", f"修改：{change}\n")
-            for line in diff:
-                tag = "added" if line.startswith("+") and not line.startswith("+++") else ("removed" if line.startswith("-") and not line.startswith("---") else ("header" if line.startswith("@@") or line.startswith("---") or line.startswith("+++") else ""))
-                self.change_text.insert("end", line + "\n", tag)
-            self.change_text.insert("end", "\n")
-        self.change_text.configure(state="disabled")
+            summary = "、".join(str(change) for change in changes[:8])
+            if len(changes) > 8:
+                summary += "…"
+            iid = str(idx)
+            self.change_summary_table.insert(
+                "", "end", iid=iid,
+                values=(file_item.get("file", ""), summary))
+            self._change_summary_map[iid] = file_item
+            if first_item is None:
+                first_item = file_item
+        if first_item is not None:
+            self.change_summary_table.selection_set(self.change_summary_table.get_children()[0])
+            self._fill_change_diff(first_item)
+        else:
+            self._fill_change_diff({})
+
+
 
     def _fill_log(self, selected):
         for item in self.log_table.get_children():
