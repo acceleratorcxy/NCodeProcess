@@ -48,7 +48,7 @@
 python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe GAOWEI --drawing-number D0354F31311-201 --part-version A --nc-machine 2500B --control-system SIE840D
 ```
 
-预览不会修改文件；确认执行时追加 `--yes`。命令行如需保存 APTSOURCE，应追加 `--save-aptsource`。此外支持 `--output` 指定独立输出目录、`--overwrite`、`--overwrite-fields`、`--g00-level`、`--no-m03`、`--tool number,dia,tool_coner,tool_type` 和 JSON/CSV 报告导出。校验与处理策略参数与 GUI 设置一致：`--m03-position`、`--newline`、`--feed-min/--feed-max/--spindle-min/--spindle-max`、`--aux-m03/--aux-m05/--aux-m08/--aux-m09`（及 `--no-` 前缀禁用）、`--feed-outlier-iqr/--feed-outlier-low/--feed-outlier-high`、`--multiple-spindle/--no-multiple-spindle`、`--max-file-size/--max-files`、`--retract-z-threshold`；未显式传参的项自动读取 GUI 持久化偏好（注册表/AppData/用户主目录）。
+预览不会修改文件；确认执行时追加 `--yes`。命令行如需保存 APTSOURCE，应追加 `--save-aptsource`。此外支持 `--output` 指定独立输出目录、`--overwrite`、`--overwrite-fields`、`--g00-level`、`--no-m03`、`--tool number,dia,tool_coner,tool_type` 和 JSON/CSV 报告导出。校验与处理策略参数与 GUI 设置一致：`--m03-position`、`--newline`、`--feed-min/--feed-max/--spindle-min/--spindle-max`、`--aux-m03/--aux-m05/--aux-m08/--aux-m09`（及 `--no-` 前缀禁用）、`--feed-outlier-min-count/--feed-outlier-ratio/--feed-outlier-low/--feed-outlier-high`、`--multiple-spindle/--no-multiple-spindle`、`--max-file-size/--max-files`、`--retract-z-threshold`；未显式传参的项自动读取 GUI 持久化偏好（注册表/AppData/用户主目录）。
 
 ## 处理内容
 
@@ -58,12 +58,15 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 - 保持原文件编码（UTF-8、UTF-8 BOM、GB18030 等）和 CRLF/LF 换行风格，MPF 使用临时文件原子替换。
 - 读取/补全 MSG 头部，HASS 的 `%` 起始行始终保留在第一行；刀具信息支持自动识别和人工编辑。
 - 检查正文 M03，按首个 S 指令补写；统计 F/S/X/Y/Z；报告语法、G00、程序结束标记、刀具换刀等问题。
+- 从最新 APTSOURCE 提取 APT 规划信息（机床/后处理表/生成时间/操作/主轴/进给/冷却/装夹刀具/轨迹行程），并与 MPF 执行指令交叉校验：主轴方向不符为错误，加工参数不符（S/F、刀具几何）与程序名不一致为警告，冷却液/装夹序列/DATE 过期等为提示；有 APT 时头部 DATE 优先采用 APT 生成时间。报告 `files[]` 记录 `apt_meta`/`toolpath_stats`，报告级 `apt_summary` 聚合备刀清单与操作清单。
 
 ## 程序设置
 
-「程序设置…」对话框分两页并按分类分组：**基本设置**（文件处理：文件编码、程序名允许字符、单文件大小上限、扫描文件数量上限；文件类型：待删除扩展名、主程序扩展名、输出扩展名；目录与存储：APTSOURCE 归档子目录、处理前询问备份、配置保存位置：注册表/AppData/用户主目录、导出设置）与**校验规则**（基础检查：结束标记/M06/S；工艺校验：G00 级别、必填 MSG 字段、M03 补写位置、F/S 上下限；F 离群与 S 警告：按移动/进刀/切削阶段分组检测常见档位（可调 IQR 倍数、低值/高值比例与抬刀高度阈值）；输出格式：换行策略、辅助指令顺序）。全部设置持久化保存，重启后自动恢复。文件大小/数量上限留空或 0 表示不限制，超限文件跳过或停止扫描并提示。
+「程序设置…」对话框分两页并按分类分组：**基本设置**（文件处理：文件编码、程序名允许字符、单文件大小上限、扫描文件数量上限；文件类型：待删除扩展名、主程序扩展名、输出扩展名；目录与存储：APTSOURCE 归档子目录、处理前询问备份、配置保存位置：注册表/AppData/用户主目录、导出设置）与**校验规则**（基础检查：结束标记/M06/S；工艺校验：G00 级别、必填 MSG 字段、M03 补写位置、F/S 上下限（默认 20~10000/500~12000，留空不检查）；F 离群与 S 警告：按《F值异常检测方法》三层法（硬边界 + 档位离群 + 上下文复核）检测，可调常用档位门槛、离群比值、低包络/高包络系数与抬刀高度阈值；输出格式：换行策略、辅助指令顺序）。全部设置持久化保存，重启后自动恢复。文件大小/数量上限留空或 0 表示不限制，超限文件跳过或停止扫描并提示。
 
 ## 便携打包
+
+> F 离群设置的当前口径（2026-08-07）：界面中的四个参数分别表示同结构 peer group 的最小重复参照数、相对离群倍率、低侧容差和高侧容差；它们不定义固定合法 F 表。每个显式 F 建立一个 episode，模态继承不增加样本权重；结构证据不足时只展示 `insufficient_evidence`，不生成 `feed-outlier`。APT 仅作上下文辅助，不能全局豁免结构离群。
 
 在 Windows 上准备 Python 3.8 环境，并安装 PyInstaller 后运行：
 
@@ -88,3 +91,5 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+当前主工具测试基线约 272 项、查看器 21 项（以 `python -m unittest discover -s tests -v` 输出为准）。

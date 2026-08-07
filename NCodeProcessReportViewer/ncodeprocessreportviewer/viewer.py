@@ -614,6 +614,16 @@ class ReportViewer(ttk.Frame):
         self.issue_table._container.grid(row=1, column=0, sticky="nsew", padx=6)
         self.issue_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
         self.issue_table.tag_configure("warning", foreground="#b54708", font=("Microsoft YaHei UI", 9, "bold"))
+        feed_frame = ttk.LabelFrame(self.issues_page, text="F 离群检测明细")
+        feed_frame.grid(row=2, column=0, sticky="ew", padx=6, pady=(2, 6))
+        self.feed_outlier_text = tk.Text(
+            feed_frame, height=7, wrap="none", state="disabled",
+            font=("Consolas", 9), background="#fbfbfb", relief="flat", padx=6, pady=4,
+        )
+        feed_ybar = ttk.Scrollbar(feed_frame, orient="vertical", command=self.feed_outlier_text.yview)
+        self.feed_outlier_text.configure(yscrollcommand=feed_ybar.set)
+        feed_ybar.pack(side="right", fill="y")
+        self.feed_outlier_text.pack(fill="both", expand=True)
 
     def _build_changes(self):
         self.changes_page.rowconfigure(0, weight=1)
@@ -866,6 +876,7 @@ class ReportViewer(ttk.Frame):
         self._fill_apt(selected)
         self._fill_stats(selected)
         self._fill_issues(selected)
+        self._fill_feed_outlier(selected)
         self._fill_changes(selected)
         self._fill_log(selected)
         self.raw_text.configure(state="normal")
@@ -894,6 +905,98 @@ class ReportViewer(ttk.Frame):
                 if filter_value != "全部" and severity != filter_value:
                     continue
                 self.issue_table.insert("", "end", values=(file_item.get("file", ""), issue.get("line", ""), severity, issue.get("kind", ""), issue.get("text", ""), issue.get("suggestion", "")), tags=(severity,) if severity in ("error", "warning") else ())
+
+    def _fill_feed_outlier(self, selected):
+        """F episode/peer-group 证据：选中文件或汇总显示结构参照与证据不足。"""
+        self.feed_outlier_text.configure(state="normal")
+        self.feed_outlier_text.delete("1.0", "end")
+        reason_labels = {
+            "episode-peer-outlier": "同结构参照明显偏离",
+            "peer-group-too-small": "结构组样本不足",
+            "no-repeated-reference": "没有重复参照",
+            "unstable-peer-mode": "结构组模式不稳定",
+            "rare-below-common": "兼容：低于程序内参照",
+            "rare-above-common": "兼容：高于程序内参照",
+            "envelope-out": "兼容：超出相对容差",
+            "non-gear-value": "兼容：非结构参照值",
+            "boundary-error": "超上下限",
+            "cut-high-gear": "切削用抬刀大档",
+            "move-low-gear": "移动用小档",
+        }
+        files = [selected] if selected is not None else (self.report_data or {}).get("files", [])
+        shown = 0
+        for file_item in files:
+            data = file_item.get("feed_outlier") if isinstance(file_item, dict) else None
+            if not isinstance(data, dict):
+                continue
+            shown += 1
+            header = f"〔{file_item.get('file') or ''}〕"
+            self.feed_outlier_text.insert("end", header + "\n")
+            apt_feeds = data.get("apt_feeds") or []
+            if apt_feeds:
+                feeds = "、".join(f"{v:g}" for v in apt_feeds)
+                self.feed_outlier_text.insert("end", f"  APT 进给参考：{feeds}（仅辅助上下文，不是合法值白名单）\n")
+            else:
+                self.feed_outlier_text.insert("end", "  APT 进给参考：无（仅按程序自身结构比较）\n")
+            common = data.get("common_feeds") or []
+            groups = data.get("peer_groups") or {}
+            stable_groups = sum(1 for item in groups.values()
+                                if isinstance(item, dict) and item.get("mode_stable") and item.get("common_feeds"))
+            common_hint = "、".join(f"{v:g}" for v in common) if common else "无"
+            self.feed_outlier_text.insert(
+                "end", f"  结构参照组：{len(groups)} 组，稳定重复参照 {stable_groups} 组；兼容汇总 F：{common_hint}"
+                f"（最小参照数 ≥{data.get('min_count', 3)}，不代表固定合法档位）\n")
+            outlier_rows = []
+            for item in data.get("outliers") or []:
+                row = dict(item)
+                row["status"] = "离群告警"
+                outlier_rows.append(row)
+            for item in data.get("boundary_errors") or []:
+                row = dict(item)
+                row.setdefault("in_apt", False)
+                row["reason"] = "boundary-error"
+                row["status"] = "边界错误"
+                outlier_rows.append(row)
+            for item in data.get("context_reviews") or []:
+                row = dict(item)
+                row.setdefault("in_apt", False)
+                row["status"] = "上下文复核"
+                outlier_rows.append(row)
+            for item in data.get("insufficient_evidence") or []:
+                row = dict(item)
+                row.setdefault("in_apt", False)
+                row["status"] = "证据不足"
+                outlier_rows.append(row)
+            self.feed_outlier_text.insert(
+                "end", f"  检测结论：离群 {len(data.get('outliers') or [])}，边界错误 {len(data.get('boundary_errors') or [])}，"
+                f"上下文复核 {len(data.get('context_reviews') or [])}，证据不足 {len(data.get('insufficient_evidence') or [])}；"
+                f"倍率阈值 ×{data.get('ratio', 2):g}，低/高容差 ×{data.get('low_ratio', 0.8):g}/×{data.get('high_ratio', 1.2):g}\n")
+            if outlier_rows:
+                self.feed_outlier_text.insert("end", "  检测证据明细：\n")
+                for out in outlier_rows:
+                    line_text = (out.get("text") or "").strip()
+                    apt_note = "在 APT 档位内" if out.get("in_apt") else "不在 APT 档位内"
+                    reason = reason_labels.get(out.get("reason", ""), out.get("reason", ""))
+                    value = out.get("value")
+                    value_s = f"{value:g}" if isinstance(value, (int, float)) else str(value)
+                    evidence = out.get("evidence") or {}
+                    reference = evidence.get("reference_feed", out.get("reference_feed"))
+                    reference_s = f"{reference:g}" if isinstance(reference, (int, float)) else "-"
+                    relative_ratio = evidence.get("relative_ratio", out.get("relative_ratio"))
+                    ratio_s = f"×{relative_ratio:.3g}" if isinstance(relative_ratio, (int, float)) else "-"
+                    confidence_labels = {"high": "高", "medium": "中", "low": "低"}
+                    confidence = confidence_labels.get(out.get("confidence", ""), out.get("confidence", "-"))
+                    self.feed_outlier_text.insert(
+                        "end",
+                        f"    第 {out.get('line')} 行 F{value_s}（{out.get('status', '')}，{reason}，"
+                        f"结构组 {out.get('peer_group', '-') or '-'}，参照 F{reference_s}，相对倍率 {ratio_s}，"
+                        f"置信度 {confidence}，{apt_note}）：{line_text}\n",
+                    )
+            else:
+                self.feed_outlier_text.insert("end", "  检测证据明细：无\n")
+        if shown == 0:
+            self.feed_outlier_text.insert("end", "当前报告无 F 离群检测数据\n")
+        self.feed_outlier_text.configure(state="disabled")
 
     def _fill_apt(self, selected):
         """APT 信息页签：选中文件显示其 apt_meta/toolpath_stats；全部文件显示报告 apt_summary。"""

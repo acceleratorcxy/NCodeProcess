@@ -11,7 +11,7 @@
 
 - **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `Python 3.8 环境`，3.8.19）。
 - **目录**：`tests/`（与 `ncodeprocess/` 同级），模块划分与源码分层一一对应。
-- **当前基线**：**主项目约 245 项、查看器 10 项，以 `python -m unittest discover -s tests -v` 输出为准**（数字仅作参考；2026-08-06 测试套件整改 WP-T1~T5 完成：消除继承重复执行、合并 11 组重叠用例、tooltip 轮询化、删除脆弱断言、新增 CLI/CSV/程序名直测），全量运行约 35~40 秒。
+- **当前基线**：**主项目约 280 项、查看器 22 项，以 `python -m unittest discover -s tests -v` 输出为准**（数字仅作参考；2026-08-06 测试套件整改 WP-T1~T5 完成：消除继承重复执行、合并 11 组重叠用例、tooltip 轮询化、删除脆弱断言、新增 CLI/CSV/程序名直测；APT 计划 A1~A5 追加 crosscheck/元数据/轨迹/查看器用例；F 离群按《F值异常检测方法》三层法重构——删除 17 项旧阶段/IQR 测试、新增 17 项三层法测试，含 B0701 上下文复核误报、in_apt 一致性、层四抬刀平面确认与相邻 Z 趋势判定回归），全量运行约 40~45 秒。
 - **运行命令**（cwd 为 `NCodeProcess` 项目目录）：
 
 | 场景 | 命令 |
@@ -54,7 +54,7 @@
    - `LayoutWidgetTests`（`SettingsDialogTests` 继承）：`_build_app(w, h)`、`_descendants(widget)`、`_collect_buttons(widget)`、`_relative_x_to_root(widget, root)`、`_column_total`。
    - 成对/同模式场景用 `subTest` 表驱动合并（如 `test_fit_column_widths_cases`、`test_feed_limits_check_both_ends`、`test_drill_types_detected_independent_of_diameter`），减少重复同时保留全部断言。
 5. **Python 3.8 兼容**：测试代码同样避免 3.9+ 语法（如 `str.removeprefix`、`dict |` 合并）。
-6. **运行与验证**：改动后先跑目标模块，再跑全量回归；以 `python -m unittest discover -s tests -v` 输出为准保持全绿（主项目约 245 项、查看器 10 项）；也可用根目录 `run_tests.ps1` 一键跑两套测试。
+6. **运行与验证**：改动后先跑目标模块，再跑全量回归；以 `python -m unittest discover -s tests -v` 输出为准保持全绿（主项目约 280 项、查看器 22 项）；也可用根目录 `run_tests.ps1` 一键跑两套测试。
 
 ## 六、与其他文档的关系
 

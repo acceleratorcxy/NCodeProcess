@@ -171,6 +171,19 @@ NCodeProcessReportViewer/
 
 ---
 
+### 2.13 F 离群检测明细展示（2026-08-06）
+
+消费主工具报告新增的 `files[].feed_outlier` 字段，在「校验问题」页签问题表格下方新增「F 离群检测明细」只读文本区：
+
+- 选中文件时显示该程序的 APT 规划档位、常用档位（含出现门槛）、档位包络，以及离群/复核明细（行号、F 值、原因、是否在 APT 档位内、原始行文本）。
+- 全部文件时按文件逐项汇总；无检测数据时显示「当前报告无 F 离群检测数据」。
+
+**2026-08-06 结构更新**：随主工具《F值异常检测方法》三层法重构，`files[].feed_outlier` 由 `stages` 改为 `common_feeds`/`envelope`/`outliers`/`boundary_errors`/`context_reviews`；查看器对应展示 APT 档位、常用档位、包络与离群/复核明细（原因含 `rare-below-common`/`rare-above-common`/`envelope-out`/`non-gear-value`/`cut-high-gear`/`move-low-gear`）。
+
+**测试基线**：21 → **22 项**（明细区展示含原始文本与无数据提示），全量通过。
+
+---
+
 ## 三、后续建议（可选）
 
 1. **大报告性能**：后台线程加载 + 进度提示（当前主线程同步解析）。

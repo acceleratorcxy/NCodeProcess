@@ -763,11 +763,12 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var = tk.BooleanVar(value=loaded.get("aux_m05_before_end", "1") == "1")
         self.aux_m08_before_cut_var = tk.BooleanVar(value=loaded.get("aux_m08_before_cut", "1") == "1")
         self.aux_m09_before_end_var = tk.BooleanVar(value=loaded.get("aux_m09_before_end", "1") == "1")
-        # 启发式校验阈值（持久化）：F 离群按工艺阶段分组检测常见档位，
-        # 无常见档位时回退 IQR 极端值标准。
-        self.feed_outlier_iqr_var = tk.StringVar(value=loaded.get("feed_outlier_iqr_factor", "3"))
-        self.feed_outlier_low_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_low_ratio", "0.1"))
-        self.feed_outlier_high_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_high_ratio", "3"))
+        # F episode/peer-group 参数（持久化）：
+        #   最小重复参照数、同结构相对倍率、相对低/高容差。
+        self.feed_outlier_min_count_var = tk.StringVar(value=loaded.get("feed_outlier_min_count", "3"))
+        self.feed_outlier_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_ratio", "2"))
+        self.feed_outlier_low_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_low_ratio", "0.8"))
+        self.feed_outlier_high_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_high_ratio", "1.2"))
         self.multiple_spindle_var = tk.BooleanVar(value=loaded.get("multiple_spindle_warn", "1") == "1")
         # WP-C1：文件大小/数量上限（持久化，留空 = 不限制）。
         self.max_file_size_var = tk.StringVar(value=loaded.get("max_file_size", ""))
@@ -869,6 +870,7 @@ class App(ttk.Frame):
         info_page = ttk.Frame(notebook)
         issue_page = ttk.Frame(notebook)
         stats_page = ttk.Frame(notebook)
+        recog_page = ttk.Frame(notebook)
         self.stats_page = stats_page
         self.info_table = self._table(info_page, ("key", "value"), ("字段 / 解析项目", "当前值"), (180, 560))
         self.issue_table = self._table(issue_page, ("line", "kind", "severity", "text", "suggestion"), ("行", "类型", "级别", "原始文本", "建议"), (45, 90, 60, 220, 300))
@@ -888,8 +890,43 @@ class App(ttk.Frame):
         self.info_table.pack(fill="both", expand=True)
         self.issue_table.pack(fill="both", expand=True)
         self.stats_table.pack(fill="both", expand=True)
-        apt_frame = ttk.LabelFrame(stats_page, text="APT 轨迹（来源：最新 APTSOURCE）")
-        apt_frame.pack(fill="x", padx=6, pady=(2, 4))
+        # 「识别数据」页签：合并 APT 轨迹与 F 离群检测明细，避免占用参数统计/校验问题主区。
+        # 页签内部用固定高度 Canvas + 垂直滚动承载两个展示区，请求高度与其他页一致，
+        # 避免识别数据内容把整个窗口初始尺寸撑高。
+        recog_canvas = tk.Canvas(recog_page, height=40, highlightthickness=0, background="#eef2f7")
+        recog_scroll = ttk.Scrollbar(recog_page, orient="vertical", command=recog_canvas.yview)
+        recog_canvas.configure(yscrollcommand=recog_scroll.set)
+        recog_style = ttk.Style(recog_page)
+        try:
+            recog_style.configure("Recog.TFrame", background="#eef2f7")
+        except tk.TclError:
+            pass
+        recog_frame = ttk.Frame(recog_canvas, style="Recog.TFrame")
+        recog_window = recog_canvas.create_window((0, 0), window=recog_frame, anchor="nw")
+
+        def _on_recog_configure(_event=None):
+            recog_canvas.configure(scrollregion=recog_canvas.bbox("all"))
+            recog_canvas.itemconfigure(recog_window, width=recog_canvas.winfo_width())
+
+        def _on_recog_wheel(event):
+            recog_canvas.yview_scroll(-int(event.delta / 120), "units")
+            return "break"
+
+        def _bind_recog_wheel(widget):
+            widget.bind("<MouseWheel>", _on_recog_wheel)
+            widget.bind("<Button-4>", lambda _event: (recog_canvas.yview_scroll(-1, "units"), "break")[1])
+            widget.bind("<Button-5>", lambda _event: (recog_canvas.yview_scroll(1, "units"), "break")[1])
+            for child in widget.winfo_children():
+                _bind_recog_wheel(child)
+
+        recog_frame.bind("<Configure>", _on_recog_configure)
+        recog_canvas.bind("<Configure>", _on_recog_configure)
+        _bind_recog_wheel(recog_canvas)
+        _bind_recog_wheel(recog_frame)
+        recog_canvas.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=4)
+        recog_scroll.pack(side="right", fill="y", pady=4)
+        apt_frame = ttk.LabelFrame(recog_frame, text="APT 轨迹（来源：最新 APTSOURCE）")
+        apt_frame.pack(fill="x", pady=(0, 4))
         self.apt_trace_frame = apt_frame
         self.apt_retract_count_var = tk.StringVar(value="-")
         self.apt_xyz_var = tk.StringVar(value="-")
@@ -902,7 +939,8 @@ class App(ttk.Frame):
         ttk.Label(height_row, text="抬刀高度：").pack(side="left")
         self.apt_retract_height_var = tk.StringVar(value="")
         self.apt_retract_height_entry = ttk.Entry(height_row, textvariable=self.apt_retract_height_var, width=12)
-        self.apt_retract_height_entry.pack(side="left", padx=(0, 8))
+        self.apt_retract_height_entry.pack(side="left")
+        ttk.Button(height_row, text="确认", width=6, command=self._apply_apt_retract_height).pack(side="left", padx=(4, 8))
         self.apt_retract_height_entry.bind("<Return>", self._apply_apt_retract_height)
         self.apt_retract_height_entry.bind("<FocusOut>", self._apply_apt_retract_height)
         self.apt_retract_auto_var = tk.StringVar(value="自动识别：-")
@@ -911,6 +949,27 @@ class App(ttk.Frame):
         ttk.Label(height_row, textvariable=self.apt_retract_count_var).pack(side="left")
         self.apt_trace_hint_var = tk.StringVar(value="（回车生效并同步报告/全部程序信息）")
         ttk.Label(height_row, textvariable=self.apt_trace_hint_var, foreground="#57606a").pack(side="left", padx=(10, 0))
+        feed_frame = ttk.LabelFrame(recog_frame, text="F 离群检测明细")
+        feed_frame.pack(fill="x", pady=(2, 0))
+        self.feed_apt_feeds_var = tk.StringVar(value="APT 规划档位：-")
+        ttk.Label(feed_frame, textvariable=self.feed_apt_feeds_var).pack(anchor="w", padx=6, pady=(2, 0))
+        self.feed_common_var = tk.StringVar(value="结构参照组：-")
+        ttk.Label(feed_frame, textvariable=self.feed_common_var).pack(anchor="w", padx=6, pady=(1, 0))
+        self.feed_envelope_var = tk.StringVar(value="检测结论：-")
+        ttk.Label(feed_frame, textvariable=self.feed_envelope_var).pack(anchor="w", padx=6, pady=(1, 0))
+        outlier_row = ttk.Frame(feed_frame)
+        outlier_row.pack(fill="x", padx=6, pady=(3, 0))
+        ttk.Label(outlier_row, text="检测证据明细：", foreground="#57606a").pack(side="left")
+        self.feed_outlier_table = self._table(
+            feed_frame,
+            ("line", "value", "status", "reason", "peer_group", "reference", "ratio", "confidence", "in_apt", "text"),
+            ("行", "F 值", "结论", "原因", "结构组", "参照 F", "相对倍率", "置信度", "APT 参考", "原始行"),
+            (45, 65, 65, 125, 190, 70, 75, 65, 80, 280),
+            height=3,
+        )
+        self.feed_outlier_table.pack(fill="x", padx=6, pady=(2, 4))
+        # 子控件全部创建后递归绑定滚轮（识别数据页内容区整体可滚动）。
+        _bind_recog_wheel(recog_frame)
         diff_frame = ttk.Frame(notebook)
         diff_frame.rowconfigure(0, weight=1)
         diff_frame.columnconfigure(0, weight=1, uniform="diff")
@@ -930,6 +989,7 @@ class App(ttk.Frame):
         notebook.add(info_page, text="解析信息")
         notebook.add(issue_page, text="校验问题")
         notebook.add(stats_page, text="参数统计")
+        notebook.add(recog_page, text="识别数据")
         notebook.add(diff_frame, text="修改差异")
 
         # The editor reserves one grid column; the table and both scrollbars
@@ -986,6 +1046,7 @@ class App(ttk.Frame):
             self.issue_table,
             self.stats_table,
             self.tool_table,
+            self.feed_outlier_table,
         ):
             self._bind_cell_tooltip(table)
 
@@ -1245,7 +1306,8 @@ class App(ttk.Frame):
             "aux_m05_before_end": self.aux_m05_before_end_var.get(),
             "aux_m08_before_cut": self.aux_m08_before_cut_var.get(),
             "aux_m09_before_end": self.aux_m09_before_end_var.get(),
-            "feed_outlier_iqr": self.feed_outlier_iqr_var.get(),
+            "feed_outlier_min_count": self.feed_outlier_min_count_var.get(),
+            "feed_outlier_ratio": self.feed_outlier_ratio_var.get(),
             "feed_outlier_low_ratio": self.feed_outlier_low_ratio_var.get(),
             "feed_outlier_high_ratio": self.feed_outlier_high_ratio_var.get(),
             "multiple_spindle": self.multiple_spindle_var.get(),
@@ -1387,7 +1449,7 @@ class App(ttk.Frame):
         ttk.Entry(limit_frame, textvariable=self.spindle_min_var, width=8).pack(side="left", padx=2)
         ttk.Label(limit_frame, text="~").pack(side="left", padx=4)
         ttk.Entry(limit_frame, textvariable=self.spindle_max_var, width=8).pack(side="left", padx=2)
-        self._settings_help_label(cell, "F/S 上下限", "F/S 上下限：F 为进给、S 为主轴转速。留空表示不检查对应方向；填写数值后，正文中的 F/S 值低于下限或高于上限时按错误上报，用于拦截误输。").pack(side="left", padx=(4, 0))
+        self._settings_help_label(cell, "F/S 上下限", "F/S 上下限：F 为进给、S 为主轴转速。默认 F 20~10000、S 500~12000；留空表示不检查对应方向。正文中的 F/S 值低于下限或高于上限时按错误上报（feed-range/spindle-range），用于拦截误输（如 F 多打一位）。").pack(side="left", padx=(4, 0))
 
         outlier_box = ttk.LabelFrame(rules, text="F 离群与 S 警告", padding=(8, 4))
         outlier_box.grid(row=2, column=0, sticky="ew", pady=(0, 6))
@@ -1396,15 +1458,15 @@ class App(ttk.Frame):
         cell = content_cell(outlier_box, 0)
         feed_outlier_frame = ttk.Frame(cell)
         feed_outlier_frame.pack(side="left")
-        ttk.Label(feed_outlier_frame, text="IQR×").pack(side="left")
-        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_iqr_var, width=5).pack(side="left", padx=2)
-        ttk.Label(feed_outlier_frame, text="低值×").pack(side="left", padx=(10, 0))
+        ttk.Label(feed_outlier_frame, text="最小参照数≥").pack(side="left")
+        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_min_count_var, width=5).pack(side="left", padx=2)
+        ttk.Label(feed_outlier_frame, text="相对倍率×").pack(side="left", padx=(10, 0))
+        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_ratio_var, width=5).pack(side="left", padx=2)
+        ttk.Label(feed_outlier_frame, text="低容差×").pack(side="left", padx=(10, 0))
         ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_low_ratio_var, width=5).pack(side="left", padx=2)
-        ttk.Label(feed_outlier_frame, text="高值×").pack(side="left", padx=(10, 0))
+        ttk.Label(feed_outlier_frame, text="高容差×").pack(side="left", padx=(10, 0))
         ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_high_ratio_var, width=5).pack(side="left", padx=2)
-        ttk.Label(feed_outlier_frame, text="抬刀Z≥").pack(side="left", padx=(10, 0))
-        ttk.Entry(feed_outlier_frame, textvariable=self.retract_z_threshold_var, width=5).pack(side="left", padx=2)
-        self._settings_help_label(cell, "F 离群校验", "F 离群校验：按工艺阶段（移动/进刀/切削）分组统计常见进给档位（出现 ≥2 次视为正常），仅对出现 1 次的孤立值判定——低于最低常见档位 × 低值比例或高于最高常见档位 × 高值倍数时报警告；IQR 倍数为组内无常见档位（F 值连续变化）时的回退判定标准；抬刀Z≥ 为抬刀高度阈值，正文 Z 值达到该值时归入移动/退刀阶段。").pack(side="left", padx=(4, 0))
+        self._settings_help_label(cell, "F 离群校验", "F 离群校验按程序自身结构建立 episode 和 peer group，不绑定固定合法 F 数值。每个显式 F 开始一个 episode，后续模态继承行只补充结构，不增加样本权重；同轴类别、G 指令模态、Z 方向、抬刀状态和动作角色相同的 episode 才互相参照。最小参照数控制形成稳定重复模式的门槛；相对倍率使用 log(F) 距离判断明显偏离；低/高容差是同结构参照的相对容差，不是全局包络。结构组少于 3 个 episode、没有重复参照或模式不稳定时只显示“证据不足”，不生成离群告警。APT 仅作上下文辅助，不能豁免同结构离群。").pack(side="left", padx=(4, 0))
 
         cell = content_cell(outlier_box, 1)
         ttk.Checkbutton(cell, text="多 S 值警告", variable=self.multiple_spindle_var).pack(side="left")
@@ -1520,7 +1582,8 @@ class App(ttk.Frame):
             "aux_m05_before_end": "1" if value.aux_m05_before_end_var.get() else "0",
             "aux_m08_before_cut": "1" if value.aux_m08_before_cut_var.get() else "0",
             "aux_m09_before_end": "1" if value.aux_m09_before_end_var.get() else "0",
-            "feed_outlier_iqr_factor": value.feed_outlier_iqr_var.get().strip(),
+            "feed_outlier_min_count": value.feed_outlier_min_count_var.get().strip(),
+            "feed_outlier_ratio": value.feed_outlier_ratio_var.get().strip(),
             "feed_outlier_low_ratio": value.feed_outlier_low_ratio_var.get().strip(),
             "feed_outlier_high_ratio": value.feed_outlier_high_ratio_var.get().strip(),
             "multiple_spindle_warn": "1" if value.multiple_spindle_var.get() else "0",
@@ -1575,7 +1638,8 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var.set(defaults["aux_m05_before_end"] == "1")
         self.aux_m08_before_cut_var.set(defaults["aux_m08_before_cut"] == "1")
         self.aux_m09_before_end_var.set(defaults["aux_m09_before_end"] == "1")
-        self.feed_outlier_iqr_var.set(defaults["feed_outlier_iqr_factor"])
+        self.feed_outlier_min_count_var.set(defaults["feed_outlier_min_count"])
+        self.feed_outlier_ratio_var.set(defaults["feed_outlier_ratio"])
         self.feed_outlier_low_ratio_var.set(defaults["feed_outlier_low_ratio"])
         self.feed_outlier_high_ratio_var.set(defaults["feed_outlier_high_ratio"])
         self.multiple_spindle_var.set(defaults["multiple_spindle_warn"] == "1")
@@ -1625,7 +1689,8 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var.set(snapshot.get("aux_m05_before_end", self.aux_m05_before_end_var.get()))
         self.aux_m08_before_cut_var.set(snapshot.get("aux_m08_before_cut", self.aux_m08_before_cut_var.get()))
         self.aux_m09_before_end_var.set(snapshot.get("aux_m09_before_end", self.aux_m09_before_end_var.get()))
-        self.feed_outlier_iqr_var.set(snapshot.get("feed_outlier_iqr", self.feed_outlier_iqr_var.get()))
+        self.feed_outlier_min_count_var.set(snapshot.get("feed_outlier_min_count", self.feed_outlier_min_count_var.get()))
+        self.feed_outlier_ratio_var.set(snapshot.get("feed_outlier_ratio", self.feed_outlier_ratio_var.get()))
         self.feed_outlier_low_ratio_var.set(snapshot.get("feed_outlier_low_ratio", self.feed_outlier_low_ratio_var.get()))
         self.feed_outlier_high_ratio_var.set(snapshot.get("feed_outlier_high_ratio", self.feed_outlier_high_ratio_var.get()))
         self.multiple_spindle_var.set(snapshot.get("multiple_spindle", self.multiple_spindle_var.get()))
@@ -1810,9 +1875,10 @@ class App(ttk.Frame):
             spindle_max=spindle_max,
             newline=self.newline_var.get(),
             aux_checks={name for name, enabled in aux_flags.items() if enabled},
-            feed_outlier_iqr_factor=parse_positive_default(self.feed_outlier_iqr_var.get(), 3.0),
-            feed_outlier_low_ratio=parse_positive_default(self.feed_outlier_low_ratio_var.get(), 0.1),
-            feed_outlier_high_ratio=parse_positive_default(self.feed_outlier_high_ratio_var.get(), 3.0),
+            feed_outlier_min_count=int(parse_positive_default(self.feed_outlier_min_count_var.get(), 3.0)),
+            feed_outlier_ratio=parse_positive_default(self.feed_outlier_ratio_var.get(), 2.0),
+            feed_outlier_low_ratio=parse_positive_default(self.feed_outlier_low_ratio_var.get(), 0.8),
+            feed_outlier_high_ratio=parse_positive_default(self.feed_outlier_high_ratio_var.get(), 1.2),
             multiple_spindle_warn=self.multiple_spindle_var.get(),
             ask_backup=self.ask_backup_var.get(),
             max_file_size=parse_non_negative_int(self.max_file_size_var.get()),
@@ -2091,6 +2157,7 @@ class App(ttk.Frame):
         self.add_msg_rows(f.original_text, "已有/")
         self.add_msg_rows(f.output_text, "处理后/")
         self._show_apt_trace(f)
+        self._show_feed_outlier(f)
         if f.kind != "mpf":
             self.current_program = None
             self.refresh_tool_table([])
@@ -2113,6 +2180,95 @@ class App(ttk.Frame):
     @staticmethod
     def _stat_value(value):
         return "无数据" if value is None else (f"{value:.3f}" if isinstance(value, float) else str(value))
+
+    def _show_feed_outlier(self, f):
+        """刷新 F episode/peer-group 证据区。"""
+        reason_labels = {
+            "episode-peer-outlier": "同结构参照明显偏离",
+            "peer-group-too-small": "结构组样本不足",
+            "no-repeated-reference": "没有重复参照",
+            "unstable-peer-mode": "结构组模式不稳定",
+            "rare-below-common": "兼容：低于程序内参照",
+            "rare-above-common": "兼容：高于程序内参照",
+            "envelope-out": "兼容：超出相对容差",
+            "non-gear-value": "兼容：非结构参照值",
+            "boundary-error": "超上下限",
+            "cut-high-gear": "切削用抬刀大档",
+            "move-low-gear": "移动用小档",
+        }
+        self.clear_table(self.feed_outlier_table)
+        data = getattr(f, "feed_outlier", None) if f.kind == "mpf" else None
+        if data is None:
+            self.feed_apt_feeds_var.set("APT 进给参考：-（无 F 离群检测数据）")
+            self.feed_common_var.set("结构参照组：-")
+            self.feed_envelope_var.set("检测结论：-")
+            return
+        if data.apt_feeds:
+            feeds = "、".join(f"{v:g}" for v in data.apt_feeds)
+            self.feed_apt_feeds_var.set(f"APT 进给参考：{feeds}（仅辅助上下文，不是合法值白名单）")
+        else:
+            self.feed_apt_feeds_var.set("APT 进给参考：无（仅按程序自身结构比较）")
+        common = data.common_feeds or []
+        groups = getattr(data, "peer_groups", {}) or {}
+        stable_groups = sum(1 for item in groups.values()
+                            if isinstance(item, dict) and item.get("mode_stable") and item.get("common_feeds"))
+        common_hint = "、".join(f"{v:g}" for v in common) if common else "无"
+        self.feed_common_var.set(
+            f"结构参照组：{len(groups)} 组，稳定重复参照 {stable_groups} 组；兼容汇总 F：{common_hint}"
+            f"（最小参照数 ≥{data.min_count}，不代表固定合法档位）")
+        outlier_count = len(data.outliers or [])
+        boundary_count = len(data.boundary_errors or [])
+        context_count = len(data.context_reviews or [])
+        evidence_count = len(getattr(data, "insufficient_evidence", []) or [])
+        self.feed_envelope_var.set(
+            f"检测结论：离群 {outlier_count}，边界错误 {boundary_count}，上下文复核 {context_count}，"
+            f"证据不足 {evidence_count}；倍率阈值 ×{data.ratio:g}，低/高容差 ×{getattr(data, 'low_ratio', 0.8):g}/×{getattr(data, 'high_ratio', 1.2):g}")
+        outlier_rows = []
+        for out in data.outliers:
+            row = dict(out)
+            row["status"] = "离群告警"
+            outlier_rows.append(row)
+        for item in data.boundary_errors:
+            row = dict(item)
+            row.setdefault("in_apt", False)
+            row["reason"] = "boundary-error"
+            row["status"] = "边界错误"
+            outlier_rows.append(row)
+        for item in data.context_reviews:
+            row = dict(item)
+            row.setdefault("in_apt", False)
+            row["status"] = "上下文复核"
+            outlier_rows.append(row)
+        for item in getattr(data, "insufficient_evidence", []) or []:
+            row = dict(item)
+            row.setdefault("in_apt", False)
+            row["status"] = "证据不足"
+            outlier_rows.append(row)
+        for out in outlier_rows:
+            value = out.get("value")
+            value_s = f"{value:g}" if isinstance(value, (int, float)) else str(value)
+            evidence = out.get("evidence") or {}
+            reference = evidence.get("reference_feed", out.get("reference_feed"))
+            reference_s = f"{reference:g}" if isinstance(reference, (int, float)) else (str(reference or "-"))
+            relative_ratio = evidence.get("relative_ratio", out.get("relative_ratio"))
+            ratio_s = f"×{relative_ratio:.3g}" if isinstance(relative_ratio, (int, float)) else "-"
+            confidence_labels = {"high": "高", "medium": "中", "low": "低"}
+            confidence = confidence_labels.get(out.get("confidence", ""), out.get("confidence", "-"))
+            self.feed_outlier_table.insert(
+                "", "end",
+                values=(
+                    out.get("line", ""),
+                    value_s,
+                    out.get("status", ""),
+                    reason_labels.get(out.get("reason", ""), out.get("reason", "")),
+                    out.get("peer_group", "-") or "-",
+                    reference_s,
+                    ratio_s,
+                    confidence,
+                    "在 APT 档位内" if out.get("in_apt") else "不在 APT 档位内",
+                    (out.get("text") or "").strip(),
+                ),
+            )
 
     def _insert_stats_rows(self, program, stats):
         for key in "FSXYZ":

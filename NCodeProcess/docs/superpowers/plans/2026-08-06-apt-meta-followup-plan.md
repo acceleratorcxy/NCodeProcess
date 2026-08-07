@@ -78,7 +78,7 @@ APT 是 CATIA 的规划数据源：它同时包含「后处理前」的加工意
 | 现有模块 | 现有逻辑 | APT 补强 | 落点 |
 |---|---|---|---|
 | M03 补写 / 主轴方向（`add_m03`、`spindle-direction`） | M04 存在即禁补 M03（保守） | `SPINDL` CLW/CCLW 权威方向：CLW 应配 M03、CCLW 应配 M04；方向不一致 error；正文同含 M03+M04 时给出「保留哪个、删除哪个」建议 | WP-A4 扩展 |
-| F 离群检测（`feed-outlier` 阶段分组） | Z 阈值启发式分移动/进刀/切削组 | `FEDRAT` 集合 = 权威常见档位；按 `$$ OPERATION NAME` 操作上下文分组优先、不可用回退启发式（D-A7） | WP-A4 + WP-A9 |
+| F 离群检测（`feed-outlier` 档位离群法） | 《F值异常检测方法》三层法：合法档位 13 个圆整值豁免 + 非标准档位值少见/远离/超包络报警 + 上下文复核 | `FEDRAT` 集合 = 参考白名单：层二不豁免离群（仅命中时不加「不在 APT 规划进给集合内」提示）、层三复核对 ±10% 匹配值豁免（D-A7 修订） | WP-A4 + WP-A9 |
 | S/F 上下限（`feed-range`/`spindle-range`） | 手工配置 min/max | 由 APT 集合生成建议上下限（×0.8/×1.2）进 `apt_summary` 与查看器展示，不自动改配置 | WP-A9 |
 | 辅助指令顺序 + 互斥 M（`aux-order`、`mutually-exclusive-m`） | 纯顺序规则、无意图 | `COOLNT` → M08/M09 期望（A4 已含）；`SPINDL` 方向让互斥检查给出明确取舍建议 | WP-A4 扩展 |
 | 刀具识别 / 刀号一致性（`extract_tools`、`tool-number-missing`） | CUTTER/TOOLNO 几何识别；正文 T 与头部 Tn 一致性 | `LOADTL` 权威装夹列表（A4 已含）；MPF Tn 几何参数与 APT TOOLNO/CUTTER 不一致（用户改过）时 warning | WP-A4 扩展 |
@@ -102,9 +102,9 @@ APT 是 CATIA 的规划数据源：它同时包含「后处理前」的加工意
 | WP-A3 | `build_plan` 挂载 + 报告字段 | 高 | D-A3 | `core.py`、`tests/test_core.py` | 最新 APT 的 meta/stats 进 `FilePlan` 与报告 `files[]`；`apt_summary` 全局摘要 —— ✅ 已处理（2026-08-06，含操作清单/刀具使用） |
 | WP-A4 | APT↔MPF 交叉校验 | 高 | D-A1 | `core.py`、`tests/test_core.py` | 方向不一致 error；加工参数不符（S/F 容差、刀具几何）与程序名冲突 warning；COOLNT、LOADTL、DATE 过期提示；`apt-*` kind 入报告 —— ✅ 已处理（2026-08-06，按用户确认级别） |
 | WP-A5 | 查看器「APT 信息」页签 | 中 | D-A3 | `viewer.py`、`tests/test_report_viewer.py` | 新页签展示 meta/toolpath；缺失回退；查看器 18 → 20+ 项 —— ✅ 已处理（2026-08-06，查看器 21 项全绿） |
-| WP-A9 | 校验意图化：操作级 F 档位 / 互斥 M 方向建议 / S·F 建议上下限 | 高 | D-A7 | `core.py`、`tests/test_core.py` | 操作级进给/主轴进报告；M03+M04 冲突给出 APT 方向建议；`apt_summary` 输出建议限值 |
-| WP-A10 | APT 生成时间参与头部 DATE 与重复裁决 | 中 | D-A8/D-A9 | `core.py`、`tests/test_core.py` | DATE 过期 warning；重复目标时提示 APT 生成时间与 mtime 排序不一致；不改变裁决 |
-| WP-A11 | 对比与总览增强：APT 规划差异面板 + 总览规划列 | 低 | D-A3 | `gui.py`、`viewer.py`、`tests/` | 程序对比窗口显示 APT 规划差异；全部程序信息增加操作数/Z 行程列 |
+| WP-A9 | 校验意图化：操作级 F 档位 / 互斥 M 方向建议 / S·F 建议上下限 | 高 | D-A7 | `core.py`、`tests/test_core.py` | ⛔ **原范围用户决定不实施（2026-08-06）**（APT 与 MPF 本身互为对照）；**修订版 F 离群 APT 档位增强 + 三层法重构已实施**：有配对 APT 时 `FEDRAT` 档位集合作为参考白名单——层二不豁免离群（仅命中时不加「不在 APT 规划进给集合内」提示）、层三复核对 ±10% 匹配值豁免，无 APT 完全回退；50 样例 0 误报、注入 F1/F10/F66/F450/F8888/F9000/F10000/F15000 全部检出；主工具 274 项全绿 |
+| WP-A10 | APT 生成时间参与头部 DATE 与重复裁决 | 中 | D-A8/D-A9 | `core.py`、`tests/test_core.py` | ⛔ **用户决定不实施（2026-08-06）**：重复裁决维持按 mtime；生成时间区间不入报告 |
+| WP-A11 | 对比与总览增强：APT 规划差异面板 + 总览规划列 | 低 | D-A3 | `gui.py`、`viewer.py`、`tests/` | ⛔ **用户决定不实施（2026-08-06）**：无此需求 |
 | WP-F1 | `apply_info` 后台重处理（收尾） | 高 | D-A5 | `gui.py`、`tests/test_gui.py` | 25 MPF 应用不再阻塞界面；测试同步化全绿 |
 | WP-F2 | 运行日志埋点补齐与截断去重（收尾） | 中 | D-A5 | `core.py`、`tests/test_core.py` | `process_mpf`/APT 异常 traceback 进 `runtime_log`；截断警告只出现一次 |
 | WP-A8 | 文档同步 | 贯穿 | 无 | 需求/报告规范/手册/审查/发布说明 | 新字段与 `apt-*` kind 入文档；基线更新 |
@@ -1071,6 +1071,8 @@ def apt_diff_lines(left_meta: Optional[AptMeta], right_meta: Optional[AptMeta]) 
 2. 建议顺序：WP-A1 → WP-A2 → WP-A3 → WP-A4 → WP-A5 → WP-F1 → WP-F2 → WP-A8。
 3. 每个 WP 启动前单独说明范围并确认；完成后全量测试 → 打包（测试类除外）→ 用户实测 → 确认后提交。
 4. 完成后的计划文档按仓库惯例归档至 `docs/archive/`（本地保留，git 移除跟踪）。
+
+> **执行结果（2026-08-06）**：WP-A1~A5 全部完成（A4 提交 `bc73390`、A5 提交 `9455008`、A3 提交 `0e89a8c`）；WP-F1/F2 已在第三轮收尾完成；**WP-A9/A10/A11 经用户确认均不实施**（APT 与 MPF 本身互为对照 / 维持按 mtime 裁决 / 无此需求）；WP-A8 文档同步完成。
 
 ---
 

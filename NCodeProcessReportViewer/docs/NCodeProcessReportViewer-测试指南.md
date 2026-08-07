@@ -11,7 +11,7 @@
 
 - **框架**：Python 标准库 `unittest`（无第三方依赖），Python 3.8（conda `Python 3.8 环境`）。
 - **目录**：`tests/`，模块 `tests/test_report_viewer.py`。
-- **当前基线**：**10 项全部通过**（2026-08-05 WP-C6 运行日志 2 项 + 报告第 12 节字段消费 1 项 + 悬停浮窗截断判定 1 项后为 10 项；以 `python -m unittest discover -s tests -v` 输出为准）。
+- **当前基线**：**22 项全部通过**（2026-08-06 F 离群检测明细展示后为 22 项；以 `python -m unittest discover -s tests -v` 输出为准）。
 - **运行命令**（cwd 为 `NCodeProcessReportViewer` 目录）：
 
 | 场景 | 命令 |

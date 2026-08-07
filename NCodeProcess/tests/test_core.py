@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _decode, _extract_apt_meta_cached, _extract_apt_toolpath_cached, add_initial_tool_change, add_m03, align_lines, apply_header, build_plan, calculate_stats, code_part, crosscheck_apt, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _base_motion_feature, _decode, _extract_apt_meta_cached, _extract_apt_toolpath_cached, add_initial_tool_change, add_m03, align_lines, analyze_program, apply_header, build_plan, calculate_stats, code_part, crosscheck_apt, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
@@ -358,13 +358,13 @@ class CoreTests(unittest.TestCase):
         root = self.make_dir()
         (root / "P.MPF").write_text(
             'MSG("PROGRAM:P")\nMSG("T1:DIA=10.,TOOL_TYPE=平底立铣刀")\n'
-            "N1G1X1F500\nN2G1X2F500\nN3G1X3F600\nN4G1X4F99999\nN5M30\n",
+            "N1G1X1F500\nN2G1X2F500\nN3G1X3F500\nN4G1X4F500\nN5G1X5F500\nN6G1X6F8000\nN7M30\n",
             encoding="utf-8")
         cfg = self._cfg()
         build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         events = runtime_log().snapshot()
         self.assertTrue(any(e["event"] == "tool_recognized" and "P.MPF" in e["message"] and "T1" in e["detail"] for e in events))
-        self.assertTrue(any(e["event"] == "feed_outlier" and "F99999" in e["message"] and "P.MPF" in e["message"] for e in events))
+        self.assertTrue(any(e["event"] == "feed_outlier" and "F8000" in e["message"] and "P.MPF" in e["message"] for e in events))
         self.assertTrue(any(e["event"] == "issues_found" and "P.MPF" in e["message"] and "feed-outlier" in e["detail"] for e in events))
 
     def test_semicolon_after_code_is_trailing_comment(self):
@@ -498,7 +498,7 @@ class CoreTests(unittest.TestCase):
     def test_separate_output_keeps_input(self):
         root = self.make_dir(); out = self.make_dir()
         src = root / "x_AG6D311A0101.MPF"
-        src.write_text('MSG("PROGRAM:AG6D311A0101")\nN1S100M03\nN2M30\n', encoding="utf-8")
+        src.write_text('MSG("PROGRAM:AG6D311A0101")\nN1S1000M03\nN2M30\n', encoding="utf-8")
         cfg = self._cfg()
         plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         report = process_plan(plan, str(out), cfg)
@@ -510,8 +510,8 @@ class CoreTests(unittest.TestCase):
         root = self.make_dir()
         old = root / "old_P.MPF"
         new = root / "new_P.MPF"
-        old.write_text("N1X1S100M03\nN2M30\n", encoding="utf-8")
-        new.write_text("N1X9S100M03\nN2M30\n", encoding="utf-8")
+        old.write_text("N1X1S1000M03\nN2M30\n", encoding="utf-8")
+        new.write_text("N1X9S1000M03\nN2M30\n", encoding="utf-8")
         os.utime(old, (1000, 1000))
         os.utime(new, (2000, 2000))
         cfg = self._cfg()
@@ -950,7 +950,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([Path(item.source).suffix.lower() for item in result.files], [".mpf"])
 
     def test_feed_and_spindle_validation_and_g00_stats(self):
-        text = "MSG(\"PROGRAM:P\")\nF2000\nF2500\nF1800\nF25\nS5000\nS6000\nG00 X1\nM30\n"
+        # 三层法：F1800 出现 4 次构成常用档位，F25 少见且与最近档位比值远超 2 → 离群警告。
+        text = "MSG(\"PROGRAM:P\")\nG1X1F1800\nG1X2F1800\nG1X3F1800\nG1X4F1800\nG1X5F25\nS5000\nS6000\nG00 X1\nM30\n"
         info = ProgramInfo("A", "B", "D", "V", "M", "S", "DATE")
         issues = validate_program(text, "P.MPF", "P", info, self._cfg())
         kinds = {issue.kind for issue in issues}
@@ -993,131 +994,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(conflicts[0].severity, "error")
 
-    def test_feed_outlier_high_and_low_detection(self):
-        def body(feed):
-            return "\n".join(f"N{i}G1X{i}F{feed}" for i in range(1, 6))
-
-        cases = (
-            (body(3000) + "\nN6G1X60F15000\nN7M30\n", 1),   # 高值检出
-            (body(20000) + "\nN6G1X60F25000\nN7M30\n", 0),  # 主体本身上万不误报
-            (body(300) + "\nN6G1X60F5\nN7M30\n", 1),        # 小进给程序低值检出
-            (body(300) + "\nN6G1X60F1500\nN7M30\n", 1),     # 小进给程序高值检出
-        )
-        for text, expected in cases:
-            with self.subTest(feed=text.split("F")[1].split("\n")[0]):
-                issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-                self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), expected)
-
-    def test_feed_outlier_ignores_high_frequency_second_mode(self):
-        # 样例多模态：抬刀档位 F5000 出现多次属正常，不因相对中位数偏高误报；
-        # 单次出现且超出常见档位范围的值才报。
-        body = [900] * 70 + [5000] * 10
-        lines = [f"N{i}G1X{i}F{v}" for i, v in enumerate(body, start=1)]
-        text = "\n".join(lines) + "\nN99G1X99F3500\nN100M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 3500 落在常见档位范围内
-
-        text = "\n".join(lines) + "\nN99G1X99F20000\nN100M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))  # 20000 超出常见档位 1.5 倍
-
-        text = "\n".join(lines) + "\nN99G1X99F20\nN100M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))  # 20 低于常见档位 0.03 倍
-
-    def test_feed_outlier_detects_low_value_in_cut_stage(self):
-        # 300~6000 场景：进刀 F300、切削 F900、移动 F5000 均高频属正常；
-        # 切削段孤立 F20 应检出（全体统计会因最低常见档位 300 而漏报）。
-        lines, idx = [], 1
-        for _ in range(20):
-            lines.append(f"N{idx}G1X1Y1Z-10F900")
-            idx += 1
-        for _ in range(10):
-            lines.append(f"N{idx}Z100F5000")
-            idx += 1
-        for _ in range(8):
-            lines.append(f"N{idx}G1Z-5F300")
-            idx += 1
-        text = "\n".join(lines) + f"\nN{idx}G1X1Y1Z-10F20\nN{idx+1}M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)
-        self.assertIn("F20", outliers[0].text)
-
-    def test_feed_outlier_low_ratio_configurable(self):
-        # 低值离群按主体中位数比例（默认 10%）动态判定，比例可在 Config 调整。
-        body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
-        text = body + "\nN6G1X60F50\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertEqual(len([i for i in issues if i.kind == "feed-outlier"]), 1)  # 50 < 3000×0.1
-        relaxed = self._cfg(feed_outlier_low_ratio=0.01)
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, relaxed)
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 50 > 3000×0.01
-
-    def test_feed_outlier_ratio_configurable(self):
-        body = "\n".join(f"N{i}G1X{i}F3000" for i in range(1, 6))
-        text = body + "\nN6G1X60F50\nN7M30\n"       # 50 < 3000×0.1
-        self.assertEqual(len([i for i in validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg()) if i.kind == "feed-outlier"]), 1)
-        relaxed = self._cfg(feed_outlier_low_ratio=0.01)
-        self.assertFalse(any(i.kind == "feed-outlier" for i in validate_program(text, "P.MPF", "P", DEFAULT_INFO, relaxed)))
-
-        text = body + "\nN6G1X60F15000\nN7M30\n"    # 15000 ≥ 3000×3
-        self.assertEqual(len([i for i in validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg()) if i.kind == "feed-outlier"]), 1)
-        raised = self._cfg(feed_outlier_high_ratio=6.0)
-        self.assertFalse(any(i.kind == "feed-outlier" for i in validate_program(text, "P.MPF", "P", DEFAULT_INFO, raised)))
-
-    def test_feed_outlier_uses_iqr_for_dispersed_distributions(self):
-        # IQR 箱线图法：分布集中时即使未达中位数 3 倍也检出；均匀分散时不再误报。
-        concentrated = "\n".join(f"N{i}G1X{i}F{1000 + i * 100}" for i in range(1, 6))  # 1100~1500
-        text = concentrated + "\nN6G1X60F3000\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)  # IQR 上界 1700，3000 为离群（中位数 3 倍比例法会漏报）
-
-        spread = "\n".join(f"N{i}G1X{i}F{i * 1000}" for i in range(1, 6))  # 1000~5000
-        text = spread + "\nN6G1X60F5500\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 均匀分布内不误报
-
-        text = concentrated + "\nN6G1X60F100\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)  # IQR 下界 900，100 为离群
-
-    def test_feed_outlier_iqr_factor_configurable(self):
-        # IQR 倍数（默认 1.5）可在 Config 调整，放大后不再误报。
-        concentrated = "\n".join(f"N{i}G1X{i}F{1000 + i * 100}" for i in range(1, 6))
-        text = concentrated + "\nN6G1X60F3000\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))
-        widened = self._cfg(feed_outlier_iqr_factor=10.0)
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, widened)
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))  # 上界 3400 > 3000
-
-    def test_feed_outlier_tolerates_wide_normal_swing_ranges(self):
-        # 用户真实数据：300~6000、800~8000、30~300 的正常波动不得误报；
-        # 只有明显超出波动范围的值才提示（Tukey 极端值标准 k=3 + 分位数兜底）。
-        def program(values):
-            lines = [f"N{i}G1X{i}F{value}" for i, value in enumerate(values, start=1)]
-            return "\n".join(lines) + "\nN99M30\n"
-
-        wide = list(range(300, 6001, 300))   # 300~6000
-        issues = validate_program(program(wide + [7000]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        issues = validate_program(program(wide + [20000]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))
-
-        mid = list(range(800, 8001, 800))    # 800~8000
-        issues = validate_program(program(mid + [9000]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        issues = validate_program(program(mid + [20000]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))
-
-        small = list(range(30, 301, 30))     # 30~300
-        issues = validate_program(program(small + [500]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        issues = validate_program(program(small + [900]), "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertTrue(any(issue.kind == "feed-outlier" for issue in issues))
 
     def test_multiple_spindle_warn_can_be_disabled(self):
         # WP-10：多 S 值警告默认开启，可在 Config 中关闭。
@@ -1243,7 +1119,7 @@ class CoreTests(unittest.TestCase):
 
     def test_custom_output_extension_applied(self):
         root = self.make_dir()
-        (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S100M03\nN2M30\n', encoding="utf-8")
+        (root / "x_P.MPF").write_text('MSG("PROGRAM:P")\nN1S1000M03\nN2M30\n', encoding="utf-8")
         cfg = Config(g00_level="allow", program_output_extension=".NC")
         plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         mpf = self._mpf(plan)
@@ -1323,10 +1199,10 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(any(i.kind == "spindle-range" and i.severity == "error" for i in above))
 
     def test_limits_none_do_not_report(self):
-        # 未配置上下限（None）时不产生范围类问题，锁定默认行为。
+        # 未配置上下限（None）时不产生范围类问题，锁定可选关闭行为。
         text = '%\nMSG("PROGRAM:P")\nN1G1X10F3S5000M03\nN2M30\n%\n'
         issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO,
-                                  self._cfg())
+                                  self._cfg(feed_min=None, feed_max=None, spindle_min=None, spindle_max=None))
         self.assertFalse(any(i.kind in ("feed-range", "spindle-range") for i in issues))
 
     def test_newline_policy_converts_and_preserves_source_style(self):
@@ -1549,16 +1425,318 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn(str((nested / "Q.MPF").relative_to(root)), sources)
         self.assertNotIn(str((data / "R.MPF").relative_to(root)), sources)
 
-    def test_retract_z_threshold_configurable(self):
-        # WP-C9：抬刀高度阈值可配置；默认 20，低于阈值的正 Z 归切削阶段。
-        body = "\n".join(f"N{i}G1X{i}Y{i}Z-10F1000" for i in range(1, 9))
-        text = body + "\nN9G1X1Y1Z12F8000\nN10M30\n"
-        # 默认阈值 20：Z12 归切削阶段，8000 为孤立高值 → 报警告。
+    def test_feed_outlier_high_value_flagged(self):
+        # 二层：F500 出现 6 次构成常用档位，F8000 少见且距离 >2 倍 → 离群警告。
+        body = "\n".join(f"N{i}G1X{i}F500" for i in range(1, 7))
+        text = body + "\nN7G1X7F8000\nN8M30\n"
         issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertTrue(any(i.kind == "feed-outlier" for i in issues))
-        # 阈值 10：Z12 归移动阶段，移动组仅 1 个样本（跳过）→ 不报。
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg(retract_z_threshold=10.0))
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)
+        self.assertEqual(outliers[0].severity, "warning")
+        self.assertEqual(outliers[0].line, 7)
+        self.assertIn("F8000", outliers[0].suggestion)
+
+    def test_feed_role_pool_flags_legal_gear_misuse(self):
+        # 角色分池：移动区的 F6000 不能让切削区误用 F100 因固定合法档位而漏报。
+        cut = "\n".join(f"N{i}G1X{i}Z-5F1800" for i in range(1, 6))
+        move = "\n".join((f"N{i}G1X{i}Z100F6000" if i == 6 else
+                            f"N{i}G1X{i}F6000") for i in range(6, 11))
+        text = cut + "\n" + move + "\nN11G1X11F100\nN12M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)
+        self.assertEqual(outliers[0].line, 11)
+        self.assertIn("F100", outliers[0].suggestion)
+
+    def test_feed_role_pool_keeps_roles_separate(self):
+        # 三类角色各自拥有常用档位时，跨角色的数值差异不应互相制造离群。
+        text = (
+            "N1G1Z100F6000\nN2G1Z110F6000\nN3G1Z100F6000\n"
+            "N4G1Z10F6000\nN5G1Z0F300\nN6G1Z-5F300\nN7G1Z-10F300\n"
+            "N8G1X1F1800\nN9G1X2F1800\nN10G1X3F1800\n"
+            "N11G1X4F1800\nN12G1X5F1800\nN13M30\n"
+        )
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
         self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
+        self.assertEqual(feed.stage_common_feeds["move"], [6000.0])
+        self.assertEqual(feed.stage_common_feeds["plunge"], [300.0])
+        self.assertEqual(feed.stage_common_feeds["cut"], [1800.0])
+
+    def test_feed_episode_peer_group_flags_repeated_structure_anomaly(self):
+        # 同一运动结构重复使用 F900，最后一次同结构切换为 F100，应形成高置信离群。
+        body = "\n".join(
+            f"N{i}G1X{i}Y{i}Z-5F900" for i in range(1, 5))
+        text = body + "\nN5G1X5Y5Z-5F100\nN6M30\n"
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
+        self.assertEqual([issue.line for issue in outliers], [5])
+        self.assertEqual(feed.outliers[0]["confidence"], "high")
+
+    def test_feed_episode_unique_structure_is_insufficient_evidence(self):
+        # 每个显式 F 都属于不同结构且只出现一次时，不得依靠数值大小强行判异常。
+        text = (
+            "N1G1X1F900\nN2G1Z-1F100\n"
+            "N3G2X2Y2I1J1F1500\nN4G0Z100F6000\nN5M30\n"
+        )
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+        self.assertEqual(len(feed.insufficient_evidence), 4)
+
+    def test_feed_insufficient_evidence_keeps_apt_match_flag(self):
+        # 证据不足不是离群，但仍必须保留 F 是否命中 APT 参考的事实。
+        text = "N1G1X1F300\nN2G1Z-1F100\nN3M30\n"
+        meta = AptMeta(feeds=[("300.0000", "MMPM")])
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg(), apt_meta=meta)
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+        apt_rows = [item for item in feed.insufficient_evidence if item["value"] == 300.0]
+        self.assertEqual(len(apt_rows), 1)
+        self.assertTrue(apt_rows[0]["in_apt"])
+
+    def test_feed_episode_modal_inheritance_counts_once(self):
+        # 一个显式 F 被后续 99 个运动行继承，仍只能形成一个 episode 样本。
+        text = "N1G1X1F450\n" + "\n".join(
+            f"N{i}X{i}" for i in range(2, 101)) + "\nN101M30\n"
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
+        self.assertEqual(
+            sum(group["sample_count"] for group in feed.peer_groups.values()), 1)
+
+    def test_feed_outlier_low_value_flagged(self):
+        # 二层：F1800 常用，F25 少见且明显偏低 → 离群警告（F25 ≥ 默认下限 20，不触发 feed-range）。
+        body = "\n".join(f"N{i}G1X{i}F1800" for i in range(1, 6))
+        text = body + "\nN6G1X6F25\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)
+        self.assertIn("F25", outliers[0].suggestion)
+        self.assertFalse(any(i.kind == "feed-range" for i in issues))
+
+    def test_feed_outlier_injected_values_at_default_limits(self):
+        # 用户注入验证值：F1/F10 低于默认下限 20 → feed-range 错误且同时离群警告；
+        # F9000/F10000 落在 20~10000 内 → 仅离群警告；F15000 超上限 → feed-range 错误。
+        common = "\n".join(f"N{i}G1X{i}F500" for i in range(1, 7))
+        info = DEFAULT_INFO
+        for raw, expected_range, expected_outlier in (
+            ("F1", True, True),
+            ("F10", True, True),
+            ("F9000", False, True),
+            ("F10000", False, True),
+            ("F15000", True, False),
+        ):
+            with self.subTest(feed=raw):
+                text = common + f"\nN7G1X7{raw}\nN8M30\n"
+                issues = validate_program(text, "P.MPF", "P", info, self._cfg())
+                self.assertEqual(any(i.kind == "feed-range" for i in issues), expected_range)
+                self.assertEqual(any(i.kind == "feed-outlier" for i in issues), expected_outlier)
+
+    def test_feed_outlier_rare_legal_gear_not_flagged(self):
+        # 二层：F2000/F2500 全库仅出现 2 次，但与 F1500 档位比值 <2 → 不误报（对应文档 8.2）。
+        body = (
+            "N1G1X1F900\nN2G1X2F900\nN3G1X3F900\nN4G1X4F900\nN5G1X5F1000\n"
+            "N6G1X6F1000\nN7G1X7F1500\nN8G1X8F1500\nN9G1X9F2000\nN10G1X10F2500\n"
+            "N11G1X11F1500\nN12G1X12F1500\nN13G1X13F1000\nN14G1X14F900\n"
+            "N15G1X15F900\nN16G1X16F900\nN17G1X17F900\nN18M30\n"
+        )
+        issues = validate_program(body, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
+
+    def test_feed_outlier_short_program_skips_layer_two(self):
+        # 文档 8.3：F 太少（无常用档位）跳过二层，只保留硬边界与上下文复核。
+        text = "N1G1X1F500\nN2G1X2F8000\nN3M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
+
+    def test_feed_outlier_modal_inheritance_does_not_create_peer_samples(self):
+        # 文档 8.5：无 F 的行继承上一行 F，模态继承计数计入常用档位统计。
+        text = "N1G1X1F300\nN2X2\nN3X3\nN4X4\nN5X5\nN6X6\nN7G1X7F9000\nN8M30\n"
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
+        self.assertEqual(
+            sum(group["sample_count"] for group in feed.peer_groups.values()), 2)
+
+    def test_feed_outlier_parameters_configurable(self):
+        info = DEFAULT_INFO
+        with self.subTest(mode="min-count"):
+            body = "\n".join(f"N{i}G1X{i}F500" for i in range(1, 3))
+            text = body + "\nN3G1X3F8000\nN4M30\n"
+            self.assertFalse(any(i.kind == "feed-outlier" for i in
+                                 validate_program(text, "P.MPF", "P", info, self._cfg())))
+            self.assertTrue(any(i.kind == "feed-outlier" for i in
+                                validate_program(text, "P.MPF", "P", info, self._cfg(feed_outlier_min_count=2))))
+        with self.subTest(mode="ratio"):
+            # F1050 近似合法档位 F1000（±10% 内）且落在包络 [240, 1080] 内，
+            # 默认比值 2 不报；收紧比值 1.1 后与最近常用档位 900 超距 → 报。
+            body = ("\n".join(f"N{i}G1X{i}F300" for i in range(1, 5))
+                    + "\n" + "\n".join(f"N{i}G1X{i}F900" for i in range(5, 9)))
+            text = body + "\nN9G1X9F1050\nN10M30\n"
+            self.assertFalse(any(i.kind == "feed-outlier" for i in
+                                 validate_program(text, "P.MPF", "P", info, self._cfg())))
+            self.assertFalse(any(i.kind == "feed-outlier" for i in
+                                 validate_program(text, "P.MPF", "P", info, self._cfg(feed_outlier_ratio=1.1))))
+        with self.subTest(mode="envelope"):
+            # F990 近似合法档位 F1000，默认包络 [720, 1080] 内不报；
+            # 收紧高包络系数 0.9 后（上限 810）超出包络 → 报。
+            body = "\n".join(f"N{i}G1X{i}F900" for i in range(1, 7))
+            text = body + "\nN7G1X7F990\nN8M30\n"
+            self.assertTrue(any(i.kind == "feed-outlier" for i in
+                                validate_program(text, "P.MPF", "P", info, self._cfg(feed_outlier_high_ratio=0.9))))
+            self.assertFalse(any(i.kind == "feed-outlier" for i in
+                                 validate_program(text, "P.MPF", "P", info, self._cfg())))
+
+    def test_feed_outlier_multimodal_group_is_insufficient_evidence(self):
+        # F450 介于合法档位 F300 与 F600 之间（超出 ±10% 档位近似范围），
+        # 即使落在常用档位包络 [240, 7200] 内也判非标准档位值（用户注入验证用例）。
+        body = (
+            "\n".join(f"N{i}G1X{i}F300" for i in range(1, 5))
+            + "\n" + "\n".join(f"N{i}G1X{i}F1800" for i in range(5, 9))
+            + "\n" + "\n".join(f"N{i}G1X{i}F3000" for i in range(9, 13))
+            + "\n" + "\n".join(f"N{i}G1X{i}F6000" for i in range(13, 17))
+        )
+        text = body + "\nN17G1X17F450\nN18M30\n"
+        _stats, issues, feed = analyze_program(
+            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
+        self.assertTrue(any(item["value"] == 450.0
+                            for item in feed.insufficient_evidence))
+        return
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)
+        self.assertIn("F450", outliers[0].suggestion)
+        self.assertIn("非标准档位值", outliers[0].suggestion)
+
+    def test_feed_outlier_non_gear_value_not_hidden_by_modal_inheritance(self):
+        # 注入的 F450 仅显式 1 次，后续 99 行无 F 行继承它——模态继承不能把它
+        # 洗成常见值，仍须检出（显式出现次数判定少见）。
+        body = "\n".join(f"N{i}G1X{i}F300" for i in range(1, 8))
+        text = body + "\nN8G1X8F450\n" + "\n".join(f"N{i}G1X{i}" for i in range(9, 108)) + "\nN108M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)
+        self.assertIn("F450", outliers[0].suggestion)
+
+    def test_feed_context_review_cut_high_gear(self):
+        # 角色分池：切削区 F5000 与常用 F900 相差超过角色阈值，直接报角色离群。
+        body = "\n".join(f"N{i}G1X{i}Y{i}Z-5F900" for i in range(1, 6))
+        text = body + "\nN6G1X6Y6Z-5F5000\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual(len(outliers), 1)
+        self.assertEqual(outliers[0].line, 6)
+        self.assertEqual(outliers[0].severity, "warning")
+
+    def test_feed_context_review_move_low_gear(self):
+        # 三层：F100 全程序仅 1 次（少见），快速移动 G00 行使用 F100 → 复核提示；
+        # 切削行用 F900 使 F100 保持"突然出现"语义。
+        body = "\n".join(f"N{i}G1X{i}Y{i}Z-5F900" for i in range(1, 6))
+        text = body + "\nN6G0X50Y50Z100F100\nN7M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        reviews = [i for i in issues if i.kind == "feed-context-review"]
+        self.assertTrue(reviews)
+        self.assertEqual(reviews[0].line, 6)
+        self.assertEqual(reviews[0].severity, "info")
+
+    def test_feed_context_review_move_low_gear_requires_retract_or_g00(self):
+        # 层四确认移动：仅行在抬刀平面（含模态 Z）或 G00 快速定位时才产生
+        # "移动用下刀小档"复核；Z 上升启发式移动（工件内慢速退刀）不触发。
+        cut = "\n".join(f"N{i}G1X{i}Y{i}Z-20F900" for i in range(1, 6))
+        info = DEFAULT_INFO
+        with self.subTest(mode="z-rise-not-at-retract-no-review"):
+            # N6 Z-20→Z-10（上升 10 归移动），但不在抬刀平面、非 G00 → 不复核。
+            text = cut + "\nN6G1X6Y6Z-10F300\nN7M30\n"
+            issues = validate_program(text, "P.MPF", "P", info, self._cfg())
+            self.assertFalse(any(i.kind == "feed-context-review" for i in issues))
+        with self.subTest(mode="at-retract-review"):
+            # N6 显式到抬刀平面（Z100）用少见 F300 → 确认移动 → 复核。
+            text = cut + "\nN6G1X6Y6Z100F300\nN7M30\n"
+            issues = validate_program(text, "P.MPF", "P", info, self._cfg())
+            reviews = [i for i in issues if i.kind == "feed-context-review"]
+            self.assertEqual(len(reviews), 1)
+            self.assertEqual(reviews[0].line, 6)
+        with self.subTest(mode="g00-low-z-review"):
+            # G00 快速定位在低 Z（非抬刀平面）用少见 F100 → G00 确认移动 → 复核。
+            text = cut + "\nN6G0X50Y50Z-15F100\nN7M30\n"
+            issues = validate_program(text, "P.MPF", "P", info, self._cfg())
+            reviews = [i for i in issues if i.kind == "feed-context-review"]
+            self.assertEqual(len(reviews), 1)
+            self.assertEqual(reviews[0].line, 6)
+
+    def test_feed_context_review_apt_planned_gear_suppressed_and_in_apt_flag(self):
+        # B0701 回归：APT 规划档位不能豁免角色内核心离群，但应抑制旧的上下文复核。
+        body = "\n".join(f"N{i}G1X{i}Y{i}Z-5F900" for i in range(1, 6))
+        text = body + "\nN6G1X6Y6Z-5F6000\nN7M30\n"
+        apt_meta = AptMeta(feeds=[("6000", "MMPM")])
+        _stats, issues, feed = analyze_program(text, "P.MPF", "P", DEFAULT_INFO,
+                                               self._cfg(), apt_meta=apt_meta)
+        self.assertTrue(any(i.kind == "feed-outlier" for i in issues))
+        self.assertFalse(any(i.kind == "feed-context-review" for i in issues))
+        self.assertEqual(feed.context_reviews, [])
+        _stats, issues, feed = analyze_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertTrue(any(i.kind == "feed-outlier" for i in issues))
+        self.assertFalse(any(i.kind == "feed-context-review" for i in issues))
+        self.assertEqual(feed.context_reviews, [])
+
+    def test_motion_feature_classification(self):
+        # 按用户标注对齐 98.9% 的 Z 运动分类（不依赖绝对 F 数值）。
+        # G00 / 抬刀平面 → move。
+        self.assertEqual(_base_motion_feature(0, None, None, None, True, False, None, 100.0), "move")
+        self.assertEqual(_base_motion_feature(0, None, None, None, False, True, None, 100.0), "move")
+        # 从抬刀平面下行（快速下刀）→ move。
+        self.assertEqual(_base_motion_feature(0, -50.0, -20.0, -10.0, False, False, 100.0, 100.0), "move")
+        # 单步大幅上升且后续不回跌 → move（退刀）。
+        self.assertEqual(_base_motion_feature(0, 120.0, 10.0, 120.0, False, False, None, 100.0), "move")
+        # 跳刀起点（d_in ≥1 且 d_out ≥5）→ move。
+        self.assertEqual(_base_motion_feature(0, 2.0, 3.0, 100.0, False, False, None, 100.0), "move")
+        # 振荡（方向变化 ≥3）：下行进入局部最低点 → cut（钻孔钻入）。
+        self.assertEqual(_base_motion_feature(4, -5.0, -2.0, 4.0, False, False, None, 100.0), "cut")
+        # 振荡：下行进入非最低 → move（啄钻接近）。
+        self.assertEqual(_base_motion_feature(4, -5.0, -2.0, -1.0, False, False, None, 100.0), "move")
+        # 单向下行 → plunge（进刀）。
+        self.assertEqual(_base_motion_feature(1, -50.0, -10.0, -5.0, False, False, None, 100.0), "plunge")
+        # Z 字形下刀（局部最低但非振荡）→ plunge。
+        self.assertEqual(_base_motion_feature(2, -3.0, -2.0, 3.0, False, False, None, 100.0), "plunge")
+        # 净上升且上升已进入本行 → move。
+        self.assertEqual(_base_motion_feature(1, 120.0, 5.0, 100.0, False, False, None, 100.0), "move")
+        # 退刀前最后一行（净上升但上升未进入本行）→ 非 move（cut，由 F 兜底处理）。
+        self.assertEqual(_base_motion_feature(1, 120.0, 0.5, 100.0, False, False, None, 100.0), "cut")
+        # 平稳 → cut。
+        self.assertEqual(_base_motion_feature(0, 0.0, 0.0, 0.0, False, False, None, 100.0), "cut")
+
+    def test_feed_context_review_f6000_z_rise_exactly_ten_not_flagged(self):
+        # 浮点边界回归：Z 上升恰好 10 的 F6000 行按趋势归移动，不再误判为
+        # 切削而触发"切削用抬刀大档"复核。
+        body = "\n".join(f"N{i}G1X{i}Y{i}Z-25F1800" for i in range(1, 6))
+        text = body + "\nN6G1X6Y6Z-15F6000\nN7G1X7Y7Z100\nN8M30\n"
+        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertFalse(any(i.kind == "feed-context-review" for i in issues))
+
+    def test_feed_outlier_data_exposed_in_analysis_and_report(self):
+        # 过程数据进入报告：analyze_program 返回常用档位/包络/离群明细；
+        # process_plan 产出的报告 files[] 同样携带 feed_outlier 结构。
+        body = "\n".join(f"N{i}G1X{i}F500" for i in range(1, 7))
+        text = 'MSG("PROGRAM:P")\n' + body + "\nN7G1X7F8000\nN8M30\n"
+        stats, issues, feed = analyze_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
+        self.assertEqual(feed.common_feeds, [500.0])
+        self.assertEqual(feed.envelope, [400.0, 600.0])
+        self.assertEqual(len(feed.outliers), 1)
+        self.assertEqual(feed.outliers[0]["value"], 8000.0)
+        self.assertTrue(any(i.kind == "feed-outlier" for i in issues))
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(text, encoding="utf-8")
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg)
+        file_item = next(item for item in report.files if item["file"] == "x_P.MPF")
+        data = file_item["feed_outlier"]
+        self.assertEqual(data["common_feeds"], [500.0])
+        self.assertEqual(data["envelope"], [400.0, 600.0])
+        self.assertEqual(data["outliers"][0]["value"], 8000.0)
 
 
 class RuntimeLogTests(unittest.TestCase):
@@ -1686,7 +1864,9 @@ class ReportMetadataTests(unittest.TestCase):
         self.assertEqual(report.scan_warnings, scan.warnings)
         self.assertEqual(report.archive_stamp, scan.archive_stamp)
         self.assertEqual(report.user_confirmations, ["已确认：执行目录处理"])
-        for key in ("encoding", "g00_level", "m03_position", "newline", "aux_checks", "feed_outlier_iqr_factor"):
+        for key in ("encoding", "g00_level", "m03_position", "newline", "aux_checks",
+                    "feed_outlier_min_count", "feed_outlier_ratio",
+                    "feed_outlier_low_ratio", "feed_outlier_high_ratio"):
             self.assertIn(key, report.config_snapshot)
 
     def test_config_snapshot_includes_wp_c1_c9_keys(self):

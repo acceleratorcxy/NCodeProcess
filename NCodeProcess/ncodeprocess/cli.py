@@ -102,9 +102,14 @@ def build_parser():
                            help="启用辅助指令顺序规则 " + name)
         group.add_argument("--no-aux-" + name, dest="aux_" + name, action="store_false",
                            help="禁用辅助指令顺序规则 " + name)
-    p.add_argument("--feed-outlier-iqr", type=float, default=None, help="F 离群 IQR 倍数（回退判定）")
-    p.add_argument("--feed-outlier-low", type=float, default=None, help="F 离群低值比例")
-    p.add_argument("--feed-outlier-high", type=float, default=None, help="F 离群高值倍数")
+    p.add_argument("--feed-outlier-min-count", type=int, default=None,
+                   help="同结构 F episode 形成重复参照的最小样本数（默认 3）")
+    p.add_argument("--feed-outlier-ratio", type=float, default=None,
+                   help="同结构 F 的相对离群倍率阈值，按 log(F) 距离计算（默认 2）")
+    p.add_argument("--feed-outlier-low", type=float, default=None,
+                   help="相对参照 F 的低侧容差系数，不是全局下限（默认 0.8）")
+    p.add_argument("--feed-outlier-high", type=float, default=None,
+                   help="相对参照 F 的高侧容差系数，不是全局上限（默认 1.2）")
     group = p.add_mutually_exclusive_group()
     group.add_argument("--multiple-spindle", dest="multiple_spindle", action="store_true", default=None,
                        help="启用多 S 值警告")
@@ -145,12 +150,14 @@ def _config_from_args(args) -> Config:
         spindle_min=args.spindle_min if args.spindle_min is not None else _pref_optional_float(prefs, "spindle_min"),
         spindle_max=args.spindle_max if args.spindle_max is not None else _pref_optional_float(prefs, "spindle_max"),
         aux_checks=aux_checks,
-        feed_outlier_iqr_factor=args.feed_outlier_iqr if args.feed_outlier_iqr is not None
-        else _pref_float(prefs, "feed_outlier_iqr_factor", 3.0),
+        feed_outlier_min_count=args.feed_outlier_min_count if args.feed_outlier_min_count is not None
+        else _pref_int(prefs, "feed_outlier_min_count", 3),
+        feed_outlier_ratio=args.feed_outlier_ratio if args.feed_outlier_ratio is not None
+        else _pref_float(prefs, "feed_outlier_ratio", 2.0),
         feed_outlier_low_ratio=args.feed_outlier_low if args.feed_outlier_low is not None
-        else _pref_float(prefs, "feed_outlier_low_ratio", 0.1),
+        else _pref_float(prefs, "feed_outlier_low_ratio", 0.8),
         feed_outlier_high_ratio=args.feed_outlier_high if args.feed_outlier_high is not None
-        else _pref_float(prefs, "feed_outlier_high_ratio", 3.0),
+        else _pref_float(prefs, "feed_outlier_high_ratio", 1.2),
         multiple_spindle_warn=args.multiple_spindle if args.multiple_spindle is not None
         else _pref_bool(prefs, "multiple_spindle_warn", True),
         max_file_size=args.max_file_size if args.max_file_size is not None else _pref_int(prefs, "max_file_size", 0),

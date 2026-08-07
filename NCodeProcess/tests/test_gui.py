@@ -5,13 +5,14 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+from tkinter import ttk
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import ncodeprocess.gui as gui
-from ncodeprocess.core import FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, ScanResult, ToolpathStats, calculate_stats, emit_event, reset_runtime_log, runtime_log
+from ncodeprocess.core import FIELD_ORDER, FeedOutlierData, FilePlan, ProcessReport, ProgramInfo, ScanResult, ToolpathStats, calculate_stats, emit_event, reset_runtime_log, runtime_log
 from ncodeprocess.gui import (
     App,
     centered_position,
@@ -1301,13 +1302,14 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             root.destroy()
 
     def test_settings_dialog_has_heuristic_threshold_controls(self):
-        # WP-10：校验规则页提供 F 离群 IQR 倍数与回退比例、多 S 警告开关。
+        # WP-10：校验规则页提供 F 离群档位参数（门槛/比值/包络）、多 S 警告开关。
         root, app = self._build_app(1286, 668)
         try:
             app.open_settings()
             rules = app.settings_pages[1]
             target_vars = (
-                str(app.feed_outlier_iqr_var),
+                str(app.feed_outlier_min_count_var),
+                str(app.feed_outlier_ratio_var),
                 str(app.feed_outlier_low_ratio_var),
                 str(app.feed_outlier_high_ratio_var),
             )
@@ -1316,7 +1318,7 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
                 if widget.winfo_class() == "TEntry"
                 and str(widget.cget("textvariable")) in target_vars
             ]
-            self.assertEqual(len(entries), 3)
+            self.assertEqual(len(entries), 4)
             checkbuttons = [
                 widget for widget in self._descendants(rules)
                 if widget.winfo_class() == "TCheckbutton" and widget.cget("text").startswith("多 S 值警告")
@@ -1329,23 +1331,27 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
         # WP-10：Config 读取 GUI 输入；留空或非法输入回退默认。
         root, app = self._build_app(1286, 668)
         try:
-            app.feed_outlier_iqr_var.set("2")
-            app.feed_outlier_low_ratio_var.set("0.05")
-            app.feed_outlier_high_ratio_var.set("5")
+            app.feed_outlier_min_count_var.set("4")
+            app.feed_outlier_ratio_var.set("1.5")
+            app.feed_outlier_low_ratio_var.set("0.7")
+            app.feed_outlier_high_ratio_var.set("1.4")
             app.multiple_spindle_var.set(False)
             config = app.config()
-            self.assertEqual(config.feed_outlier_iqr_factor, 2.0)
-            self.assertEqual(config.feed_outlier_low_ratio, 0.05)
-            self.assertEqual(config.feed_outlier_high_ratio, 5.0)
+            self.assertEqual(config.feed_outlier_min_count, 4)
+            self.assertEqual(config.feed_outlier_ratio, 1.5)
+            self.assertEqual(config.feed_outlier_low_ratio, 0.7)
+            self.assertEqual(config.feed_outlier_high_ratio, 1.4)
             self.assertFalse(config.multiple_spindle_warn)
 
-            app.feed_outlier_iqr_var.set("abc")
+            app.feed_outlier_min_count_var.set("abc")
+            app.feed_outlier_ratio_var.set("")
             app.feed_outlier_low_ratio_var.set("")
-            app.feed_outlier_high_ratio_var.set("abc")
+            app.feed_outlier_high_ratio_var.set("")
             config = app.config()
-            self.assertEqual(config.feed_outlier_iqr_factor, 3.0)
-            self.assertEqual(config.feed_outlier_low_ratio, 0.1)
-            self.assertEqual(config.feed_outlier_high_ratio, 3.0)
+            self.assertEqual(config.feed_outlier_min_count, 3)
+            self.assertEqual(config.feed_outlier_ratio, 2.0)
+            self.assertEqual(config.feed_outlier_low_ratio, 0.8)
+            self.assertEqual(config.feed_outlier_high_ratio, 1.2)
         finally:
             root.destroy()
 
@@ -1400,13 +1406,13 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             app.settings_registry_key = TEST_SETTINGS_KEY
             app.open_settings()
             app.feed_min_var.set("150")
-            app.feed_outlier_iqr_var.set("4")
+            app.feed_outlier_min_count_var.set("4")
             app.required_drawing_var.set(False)
             with patch.object(App, "scan"):
                 app._confirm_settings()
             loaded = load_all(TEST_SETTINGS_KEY)
             self.assertEqual(loaded.get("feed_min"), "150")
-            self.assertEqual(loaded.get("feed_outlier_iqr_factor"), "4")
+            self.assertEqual(loaded.get("feed_outlier_min_count"), "4")
             self.assertEqual(loaded.get("required_drawing"), "0")
             self.assertEqual(loaded.get("storage_backend"), "registry")
         finally:
@@ -1684,6 +1690,130 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
             app._apply_apt_retract_height()
             self.assertEqual(app.apt_retract_heights.get("P"), 150.0)
             self.assertEqual(app.apt_retract_count_var.get(), "0")
+        finally:
+            root.destroy()
+
+    def test_recognition_data_page_contains_trace_and_feed_outlier(self):
+        # WP-A9 修订：APT 轨迹与 F 离群检测明细合并到「识别数据」页签（参数统计之后），
+        # 不再占用参数统计/校验问题主区。
+        root, app = self._build_app(1286, 668)
+        try:
+            tabs = [app.detail_notebook.tab(i, "text") for i in range(app.detail_notebook.index("end"))]
+            self.assertEqual(tabs, ["解析信息", "校验问题", "参数统计", "识别数据", "修改差异"])
+            recog_index = tabs.index("识别数据")
+            recog_page = app.detail_notebook.nametowidget(app.detail_notebook.tabs()[recog_index])
+            # APT 轨迹与 F 离群明细控件父级链归属识别数据页签。
+            def is_inside(widget, ancestor):
+                current = widget.master
+                while current is not None and current is not ancestor:
+                    current = getattr(current, "master", None)
+                return current is ancestor
+
+            self.assertTrue(is_inside(app.apt_trace_frame, recog_page))
+            self.assertTrue(is_inside(app.feed_outlier_table, recog_page))
+            # 抬刀高度输入框旁应有匹配的确认按钮。
+            confirm_buttons = [
+                child for child in app.apt_retract_height_entry.master.winfo_children()
+                if isinstance(child, ttk.Button) and child.cget("text") == "确认"
+            ]
+            self.assertEqual(len(confirm_buttons), 1)
+            # F 离群明细按界面式填充：APT 档位/阶段行 + 离群明细表格。
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1X1F300\nN2G1X2F300\nN3G1X3F300\nN4G1X4F300\nN5G1X5F1500\nN6M30\n'
+            plan.feed_outlier = FeedOutlierData(
+                apt_feeds=[300.0],
+                common_feeds=[300.0],
+                envelope=[240.0, 360.0],
+                min_count=3,
+                ratio=2.0,
+                outliers=[{"line": 5, "value": 1500.0,
+                           "reason": "rare-above-common", "in_apt": False, "text": "N5G1X5F1500"}],
+            )
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            self.assertIn("APT 进给参考：300", app.feed_apt_feeds_var.get())
+            self.assertIn("结构参照组：0 组", app.feed_common_var.get())
+            self.assertIn("检测结论：离群 1", app.feed_envelope_var.get())
+            self.assertEqual(len(app.feed_outlier_table.get_children()), 1)
+        finally:
+            root.destroy()
+
+    def test_feed_outlier_view_shows_peer_evidence_and_insufficient_evidence(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1X1F300\nN2G1X2F300\nN3G1X3F300\nN4G1X4F1500\nN5G1X5F900\nN6M30\n'
+            plan.feed_outlier = FeedOutlierData(
+                apt_feeds=[300.0],
+                common_feeds=[300.0],
+                envelope=[240.0, 360.0],
+                min_count=3,
+                ratio=2.0,
+                peer_groups={
+                    "axis=xy|g=G01|z=0|retract=0|role=cut": {
+                        "sample_count": 4,
+                        "common_feeds": [300.0],
+                        "mode_stable": True,
+                    },
+                    "axis=z|g=G01|z=1|retract=0|role=plunge": {
+                        "sample_count": 1,
+                        "common_feeds": [],
+                        "mode_stable": False,
+                    },
+                },
+                insufficient_evidence=[{
+                    "line": 5,
+                    "value": 900.0,
+                    "peer_group": "axis=z|g=G01|z=1|retract=0|role=plunge",
+                    "sample_count": 1,
+                    "reason": "peer-group-too-small",
+                    "in_apt": True,
+                    "text": "N5G1X5F900",
+                }],
+                outliers=[{
+                    "line": 4,
+                    "value": 1500.0,
+                    "reason": "episode-peer-outlier",
+                    "in_apt": False,
+                    "peer_group": "axis=xy|g=G01|z=0|retract=0|role=cut",
+                    "sample_count": 4,
+                    "confidence": "high",
+                    "evidence": {
+                        "reference_feed": 300.0,
+                        "relative_ratio": 5.0,
+                    },
+                    "text": "N4G1X4F1500",
+                }],
+            )
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            self.assertIn("结构参照组", app.feed_common_var.get())
+            self.assertIn("证据不足", app.feed_envelope_var.get())
+            headings = [app.feed_outlier_table.heading(col, "text") for col in app.feed_outlier_table["columns"]]
+            self.assertIn("参照 F", headings)
+            self.assertIn("置信度", headings)
+            self.assertEqual(len(app.feed_outlier_table.get_children()), 2)
+            rows = [app.feed_outlier_table.item(item, "values") for item in app.feed_outlier_table.get_children()]
+            self.assertTrue(any("高" in str(row) for row in rows))
+            self.assertTrue(any("证据不足" in str(row) and "在 APT 档位内" in str(row) for row in rows))
+        finally:
+            root.destroy()
+
+    def test_settings_feed_help_uses_relative_peer_group_semantics(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            rules = app.settings_pages[1]
+            labels = [widget.cget("text") for widget in self._descendants(rules)
+                      if widget.winfo_class() == "TLabel"]
+            self.assertIn("最小参照数≥", labels)
+            self.assertIn("相对倍率×", labels)
+            self.assertIn("低容差×", labels)
+            self.assertIn("高容差×", labels)
         finally:
             root.destroy()
 

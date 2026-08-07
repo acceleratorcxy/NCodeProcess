@@ -83,6 +83,9 @@
 | `program_name_source` | 程序名来源 | string | 否（✅ 已实现，第 12 节） | `MSG` / `PPRINT` / `文件名` / `手动确认` | `MSG` |
 | `apt_meta` | APT 元数据 | object | 否（✅ 已实现，WP-A1） | 最新 APTSOURCE 解析的规划元数据：machine/pp_table/catia_version/generated_at/operate/operations/transform/spindles/feeds/coolant/tool_loads/program_name/operation_feeds/operation_spindles/tools（CUTTER/TOOLNO 刀具规格：number/dia/tool_coner/tool_type/tool_angle）；无 APT 时为空 | `{"machine": "3-axis Machine.1", "tools": [{"number": 1, "dia": "20.000", ...}]}` |
 | `toolpath_stats` | APT 轨迹统计 | object | 否（✅ 已实现，WP-A2） | 最新 APTSOURCE 的 GOTO 点数/XYZ 行程极值/圆弧数/抬刀次数/抬刀平面（抬刀次数可为手动修订值） | `{"goto_count": 24156, "min_x": -334.45, ...}` |
+| `feed_outlier` | F 离群检测明细 | object | 否（✅ 已实现，2026-08-06 三层法） | 检测过程数据：`apt_feeds`（APT 规划进给档位，无 APT 为空数组）、`common_feeds`（常用档位：出现次数 ≥ min_count 或 F 总次数 0.5% 的值，按模态生效行统计）、`envelope`（档位包络 `[最低常用档位×低包络系数, 最高常用档位×高包络系数]`）、`min_count`/`ratio`（本次生效门槛/比值）、`outliers`（离群明细：line/value/reason=`rare-below-common`/`rare-above-common`/`envelope-out`/`non-gear-value`/in_apt/text 原始行）、`boundary_errors`（超 F/S 上下限：line/value/reason=`out-of-range`/in_apt/text）、`context_reviews`（上下文复核：line/value/reason=`cut-high-gear`/`move-low-gear`/in_apt/text，仅全程序显式 ≤2 次、不在 APT 规划档位内、且移动复核为确认移动行（在抬刀平面或 G00）的值触发）；仅 MPF 且完成分析时有值，其余为 `null` | `{"apt_feeds": [300, 1800], "common_feeds": [300, 1800], "envelope": [240.0, 2160.0], "min_count": 3, "ratio": 2.0, "outliers": [{"line": 42, "value": 9000, "reason": "envelope-out", "in_apt": false, "text": "N42..."}]}` |
+
+> **2026-08-07 结构对照补充**：`feed_outlier` 当前以 episode/peer-group 为实际判定依据。兼容字段 `common_feeds`/`envelope` 不代表固定合法 F；新增 `peer_groups`、`insufficient_evidence`，离群明细增加 `peer_group`/`sample_count`/`confidence`/`evidence`。`insufficient_evidence` 的每条记录同样包含 `in_apt`，用于准确说明该 F 是否命中 APT 参考；证据不足只记录事实，不生成 `feed-outlier`。
 
 ## 6. 问题条目字段清单（`issues[]`）
 
@@ -112,8 +115,8 @@
 | `block-number` | warning | N 号未递增/重复 |
 | `G00` | error/warning | 发现 G00/G0 快速定位（级别可配置） |
 | `feed-zero` | error | F0 进给为零 |
-| `feed-range` | error | F 超出上下限 |
-| `spindle-range` | error | S 超出上下限 |
+| `feed-range` | error | F 低于 `feed_min`（默认 20）或高于 `feed_max`（默认 10000），留空不检查 |
+| `spindle-range` | error | S 低于 `spindle_min`（默认 500）或高于 `spindle_max`（默认 12000），留空不检查 |
 | `negative-parameter` | error | F/S 为负值 |
 | `unclosed-quote` | error | 引号未闭合 |
 | `control-character` | error | 行内存在异常控制字符 |
@@ -127,7 +130,8 @@
 | `tool-number-missing` | warning | 正文 T 调用无对应头部 Tn |
 | `auto-tool-change-skipped` | warning | 多刀程序不具备自动添加换刀指令条件，已禁用并跳过（WP-A2） |
 | `aux-order` | error/warning | 辅助指令顺序违规（M03/M05/M08/M09） |
-| `feed-outlier` | warning | F 离群（按工艺阶段分组检测） |
+| `feed-outlier` | warning | F 离群（《F值异常检测方法》三层法：合法档位 13 个圆整值豁免，非标准档位值少见且远离常用档位/超出档位包络/距合法档位 ±10% 外时报警；有配对 APT 时其 `FEDRAT` 档位集合作参考白名单——层二不豁免离群、仅命中时不追加「不在 APT 规划进给集合内」提示） |
+| `feed-context-review` | info | 上下文角色复核（切削区突现抬刀大档 5000/6000、快速移动用下刀小档 100/300；需该动作特征中 ≤2 次、全程序显式 ≤2 次且不在 APT 规划档位内才提示；移动复核仅针对在抬刀平面或 G00 的确认移动行；动作特征按相邻 Z 趋势判定；不阻止输出） |
 | `multiple-spindle-speeds` | warning | 程序含多个不同 S 值 |
 | `mutually-exclusive-m` | error | 同块互斥 M 指令（M03+M05、M03+M04、M08+M09；WP-A1 已接入 M03+M04） |
 | `apt-spindle-direction` | error | APT 规划主轴方向与正文不一致（CLW 应 M03 / CCLW 应 M04；双方向时给保留/删除建议，WP-A4） |

@@ -441,6 +441,58 @@ class ReportViewerLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_issues_page_shows_feed_outlier_detail(self):
+        # F episode/peer-group 明细：显示结构参照、相对证据和证据不足记录。
+        root, app = self._build_viewer(1500, 800)
+        try:
+            app.report_data = {"files": [
+                {"file": "P.MPF", "feed_outlier": {
+                    "apt_feeds": [300.0],
+                    "common_feeds": [300.0],
+                    "envelope": [240.0, 360.0],
+                    "min_count": 3,
+                    "ratio": 2.0,
+                    "low_ratio": 0.8,
+                    "high_ratio": 1.2,
+                    "peer_groups": {
+                        "axis=xy|g=G01|role=cut": {
+                            "sample_count": 4, "common_feeds": [300.0], "mode_stable": True,
+                        },
+                    },
+                    "outliers": [{"line": 6, "value": 1500.0, "reason": "episode-peer-outlier",
+                                  "in_apt": False, "peer_group": "axis=xy|g=G01|role=cut",
+                                  "confidence": "high", "evidence": {"reference_feed": 300.0, "relative_ratio": 5.0},
+                                  "text": "N6G1X60F1500"}],
+                    "insufficient_evidence": [{"line": 8, "value": 900.0,
+                                               "reason": "peer-group-too-small",
+                                               "peer_group": "axis=z|g=G01|role=plunge",
+                                               "sample_count": 1, "in_apt": True,
+                                               "text": "N8G1Z-2F900"}],
+                }},
+                {"file": "Q.MPF"},
+            ]}
+            app.file_items = app.report_data["files"]
+            app._populate_files()
+            app.file_table.selection_set("0")
+            app._on_file_selected()
+            content = app.feed_outlier_text.get("1.0", "end")
+            self.assertIn("APT 进给参考：300", content)
+            self.assertIn("结构参照组：1 组", content)
+            self.assertIn("证据不足 1", content)
+            self.assertIn("参照 F300", content)
+            self.assertIn("相对倍率 ×5", content)
+            self.assertIn("置信度 高", content)
+            self.assertIn("结构组样本不足", content)
+            self.assertIn("N8G1Z-2F900", content)
+            self.assertIn("N6G1X60F1500", content)
+            self.assertIn("不在 APT 档位内", content)
+            app.file_table.selection_set("1")
+            app._on_file_selected()
+            content = app.feed_outlier_text.get("1.0", "end")
+            self.assertIn("当前报告无 F 离群检测数据", content)
+        finally:
+            root.destroy()
+
     def test_cell_tooltip_truncation_detection(self):
         # 查看器悬停浮窗：超长单元格判定为截断（显示提示），短内容不提示。
         root, app = self._build_viewer(1290, 720)

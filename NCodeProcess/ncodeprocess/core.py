@@ -13,6 +13,7 @@ import traceback
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from math import log
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -32,6 +33,21 @@ LEGACY_DATA_DIR_NAMES = {"ncpostprocessdata"}
 REPORT_PREFIXES = ("ncodeprocess-report", "ncpostprocess-report")
 # 程序名允许字符默认正则（WP-D2 模块常量；用户可在设置中自定义，Config.allowed_name_pattern 优先生效）。
 DEFAULT_NAME_PATTERN = r"^[A-Za-z0-9_一-鿿-]+$"
+# 《F值异常检测方法》第 3 节档位表：一档 100/300（轴向切入/下刀）、
+# 四档 5000/6000（非切削移动/抬刀）。
+FEED_LOW_GEARS = (100.0, 300.0)
+FEED_HIGH_GEARS = (5000.0, 6000.0)
+# 仅作为角色内“近似档位”的软先验，不得绕过角色距离/包络/硬边界判定。
+# 这样可以容纳低频但真实存在的圆整档位，同时仍能检出合法档位错用。
+KNOWN_FEED_GEARS = (100.0, 300.0, 600.0, 900.0, 1000.0, 1500.0, 1800.0,
+                    2000.0, 2500.0, 3000.0, 3500.0, 5000.0, 6000.0)
+# 相邻 Z 趋势阈值：窗口（当前行及前后各 2 行有效 Z）总变化 ≥ 10 视为大幅上升
+# （退刀/移动）；≤ -1 视为下降（下刀/进刀）。
+FEED_TREND_RISE = 10.0
+FEED_TREND_DROP = 1.0
+# 振荡（啄钻/跳刀）识别：±4 行窗口内 Z 方向变化次数 ≥ 该值。
+# 按用户 280 条标注对齐全率最优（98.9%），取 3。
+FEED_OSC_MIN = 3
 MSG_RE = re.compile(r'^\s*MSG\s*\(\s*["\'](.*?)["\']\s*\)\s*;?\s*$', re.I)
 PPRINT_RE = re.compile(r"\bPPRINT\s+PROGNAME\s+([A-Za-z0-9_-]+)", re.I)
 NUM = r"[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[Ee][+-]?\d+)?"
@@ -94,11 +110,12 @@ class Config:
     required_fields: List[str] = field(default_factory=lambda: [key for key, _label, _required in FIELD_ORDER])
     # M03 补写位置策略：after-s（紧贴首个 S 数值后，默认）/ standalone（独立行）。
     m03_position: str = "after-s"
-    # F/S 数值上下限（None = 不检查）；越界按 error 上报。
-    feed_min: Optional[float] = None
-    feed_max: Optional[float] = None
-    spindle_min: Optional[float] = None
-    spindle_max: Optional[float] = None
+    # F/S 数值上下限（默认 20~10000 / 500~12000）；越界按 error 上报。
+    # 文档《F值异常检测方法》：F 硬边界默认 20~10000、S 默认 500~12000。
+    feed_min: Optional[float] = 20.0
+    feed_max: Optional[float] = 10000.0
+    spindle_min: Optional[float] = 500.0
+    spindle_max: Optional[float] = 12000.0
     # 换行策略：auto（跟随源文件）/ crlf / lf。
     newline: str = "auto"
     # 辅助指令顺序规则集合（默认空 = 全部关闭）：
@@ -107,16 +124,14 @@ class Config:
     #   m08-before-cut     M08 先于首次切削（warning）
     #   m09-before-end     M09 先于程序结束（warning，M09 未出现时不提示）
     aux_checks: set = field(default_factory=set)
-    # 启发式校验阈值（WP-10，仅本次运行生效，GUI 校验规则页可调）。
-    # F 离群按工艺阶段（移动/进刀/切削）分组检测：组内出现 ≥2 次的值构成常见
-    # 进给档位（多模态正常），仅检查出现 1 次的孤立值是否低于最低档 ×
-    # low_ratio（默认 0.1）或高于最高档 × high_ratio（默认 3 倍）；
-    # 组内无常见档位时回退 IQR 极端值标准（k=3）。
-    feed_outlier_iqr_factor: float = 3.0
-    # 低值口径：孤立值低于最低常见档位 × low_ratio；IQR 回退时低于 Q1 × low_ratio。
-    feed_outlier_low_ratio: float = 0.1
-    # 高值口径：孤立值高于最高常见档位 × high_ratio。
-    feed_outlier_high_ratio: float = 3.0
+    # F episode/peer-group 参数（GUI 校验规则页可调，持久化）：
+    #   min_count 是同结构 peer group 形成重复参照的最小样本门槛；
+    #   ratio 是 log(F) 相对距离的倍率阈值；
+    #   low/high_ratio 是同结构参照的相对容差，不代表全局合法 F 范围。
+    feed_outlier_min_count: int = 3
+    feed_outlier_ratio: float = 2.0
+    feed_outlier_low_ratio: float = 0.8
+    feed_outlier_high_ratio: float = 1.2
     # 程序包含多个不同 S 值时是否报 warning（多主轴转速切换）。
     multiple_spindle_warn: bool = True
     # 处理前是否询问备份（GUI 基本设置可开关，持久化）。
@@ -223,6 +238,49 @@ class Stats:
 
 
 @dataclass
+class FeedEpisode:
+    """One explicit F event and the movement structure until the next F."""
+    line: int
+    raw_value: str
+    value: float
+    raw_line: str
+    signature: str
+    feature: str
+    at_retract: bool = False
+
+
+@dataclass
+class FeedOutlierData:
+    """F 离群检测过程数据（episode/peer-group 结构对照法）。
+
+    - common_feeds/stage_common_feeds：兼容诊断汇总，不是固定合法 F 表
+    - peer_groups：按 episode 结构签名分组的程序内参照及样本计数
+    - insufficient_evidence：结构组不足、无重复参照或模式不稳定的记录
+    - envelope：兼容诊断字段，仅表示汇总参照的相对容差范围
+    - outliers：同结构 episode 相对离群明细，含 peer_group、sample_count、
+      confidence、evidence 等证据字段
+    - boundary_errors：硬边界（超 F/S 上下限，与 issues 中 feed-range 对应）
+    - context_reviews：上下文角色复核（切削区突现大档 / 快速移动用小档等）
+    """
+    apt_feeds: List[float] = field(default_factory=list)
+    common_feeds: List[float] = field(default_factory=list)
+    stage_common_feeds: Dict[str, List[float]] = field(default_factory=dict)
+    peer_groups: Dict[str, dict] = field(default_factory=dict)
+    insufficient_evidence: List[dict] = field(default_factory=list)
+    envelope: List[Optional[float]] = field(default_factory=lambda: [None, None])
+    min_count: int = 3
+    ratio: float = 2.0
+    low_ratio: float = 0.8
+    high_ratio: float = 1.2
+    outliers: List[dict] = field(default_factory=list)
+    boundary_errors: List[dict] = field(default_factory=list)
+    context_reviews: List[dict] = field(default_factory=list)
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass
 class FilePlan:
     source: str
     kind: str
@@ -250,6 +308,8 @@ class FilePlan:
     apt_toolpath: Optional[ToolpathStats] = None
     apt_source_path: Optional[str] = None
     apt_encoding: str = ""
+    # WP-A9 修订：F 离群检测过程数据（报告 files[].feed_outlier）。
+    feed_outlier: Optional[FeedOutlierData] = None
 
 
 @dataclass
@@ -1555,7 +1615,148 @@ def _new_stats() -> Stats:
     )
 
 
-def validate_program(text: str, filename: str, program: str, info: ProgramInfo, config: Config, stats: Optional[Stats] = None) -> List[Issue]:
+def _base_motion_feature(changes: int, net: Optional[float], d_in: Optional[float],
+                         d_out: Optional[float], g00: bool, at_retract: bool,
+                         prev1_z: Optional[float], move_level: float) -> str:
+    """按 Z 运动判定动作特征（不含绝对 F 数值，2026-08-07 用户标注 98.9% 对齐）。
+
+    判定顺序（±4 行窗口，方向变化次数 ≥ FEED_OSC_MIN 视为振荡/啄钻）：
+      1. G00 或在抬刀平面（含模态 Z）→ move；
+      2. 下降进入本行且前一位置在抬刀平面 → move（从抬刀平面快速下刀）；
+      3. 单步大幅上升（d_in ≥5）且后续不回跌 → move（退刀）；
+      4. 已上升（d_in ≥1）且下一行继续大幅上升（d_out ≥5）→ move（跳刀起点）；
+      5. 振荡上下文：下行进入 → 局部最低点（行后回升）cut（钻孔钻入）否则 move
+         （啄钻接近）；净上升 → move；否则 cut；
+      6. 单向下行（d_in ≤ -1）→ plunge（进刀/下刀，含 Z 字形下刀）；
+      7. 窗口净上升 ≥5 且上升已进入本行（d_in ≥1）→ move（净退刀）；
+      8. 其余（Z 平稳）→ cut。
+    """
+    if g00 or at_retract:
+        return "move"
+    if d_in is not None and d_in <= -1.0 and prev1_z is not None and prev1_z >= move_level:
+        return "move"
+    if d_in is not None and d_in >= 5.0 and (d_out is None or d_out >= 1.0):
+        return "move"
+    if d_in is not None and d_in >= 1.0 and d_out is not None and d_out >= 5.0:
+        return "move"
+    if changes >= FEED_OSC_MIN:
+        if d_in is not None and d_in <= -1.0:
+            return "cut" if (d_out is not None and d_out >= 1.0) else "move"
+        return "move" if (net is not None and net > 0) else "cut"
+    if d_in is not None and d_in <= -1.0:
+        return "plunge"
+    if net is not None and net + 1e-9 >= 5.0 and d_in is not None and d_in >= 1.0:
+        return "move"
+    return "cut"
+
+
+def _final_motion_feature(base: str, feed: Optional[float], plunge_feeds: set,
+                          move_feeds: set, net: Optional[float],
+                          d_in: Optional[float], has_motion: bool) -> str:
+    """基础运动分类 + 程序内相对 F 档兜底（F 数值不写死，只做相对关联）。
+
+    - 平稳 cut 且 F 属于程序内进刀档 → plunge（如 A0101 的 F300 平稳行）；
+    - 无运动的孤立 F 设定行且 F 属于程序内移动档 → move（如 F6000 设定行）；
+    - move 且 F 属于程序内进刀档、净上升但上升未进入本行（退刀前最后一行）
+      → plunge（如 F300 慢速离面行）。
+    """
+    if base == "cut" and feed is not None and feed in plunge_feeds:
+        return "plunge"
+    if base == "cut" and not has_motion and feed is not None and feed in move_feeds:
+        return "move"
+    if (base == "move" and feed is not None and feed in plunge_feeds
+            and net is not None and net + 1e-9 >= 5.0
+            and (d_in is None or d_in < 1.0)):
+        return "plunge"
+    return base
+
+
+def _feed_structure_signature(raw_line: str, feature: str, at_retract: bool,
+                              z_values: Sequence[Optional[float]]) -> str:
+    """Build a structure-only signature for one F episode.
+
+    The signature deliberately ignores all F values.  It captures only the
+    coordinate axes, motion family, Z trend, retract state and dominant role.
+    """
+    axes = set()
+    motions = set()
+    for value in z_values:
+        if value is not None:
+            axes.add("Z")
+    code = code_part(raw_line)
+    for parameter in ADDR_RE.finditer(code):
+        key = parameter.group(1).upper()
+        if key in "XY":
+            axes.add(key)
+    for match in MOTION_RE.finditer(code):
+        motion = int(match.group(1))
+        motions.add("rapid" if motion == 0 else "linear" if motion == 1 else "arc")
+    if not motions:
+        motions.add("unknown")
+    axis_label = "XYZ" if len(axes) == 3 else "XY" if axes == {"X", "Y"} else "Z" if axes == {"Z"} else "none"
+    if len(z_values) < 2:
+        z_direction = "stable"
+    else:
+        directions = {1 if b > a else -1 for a, b in zip(z_values, z_values[1:])
+                      if a is not None and b is not None and abs(b - a) > 1e-9}
+        z_direction = ("mixed" if len(directions) > 1 else
+                       "down" if directions == {-1} else
+                       "up" if directions == {1} else "stable")
+    motion_label = ("cycle" if "cycle" in motions else
+                    "arc" if "arc" in motions else
+                    "rapid" if "rapid" in motions and "linear" not in motions else
+                    "linear" if "linear" in motions else "unknown")
+    return "axes={}|motion={}|z={}|retract={}|role={}".format(
+        axis_label, motion_label, z_direction, int(bool(at_retract)), feature)
+
+
+def _feed_episode_signature(records: Sequence[tuple], start_index: int, end_index: int,
+                            feature: str, at_retract: bool,
+                            motion_trace: Sequence[tuple], z_vals: Sequence[Optional[float]]) -> str:
+    axes = set()
+    motions = set()
+    z_values = []
+    roles = Counter()
+    retract_count = 0
+    for rec in records[start_index:end_index]:
+        (_line, raw, g00, has_xy, z_value, _lfv, _lfraw, rec_retract,
+         has_motion, _mraw, _mval, tid, rec_feature, rec_motion) = rec
+        code = code_part(raw)
+        if has_xy:
+            axes.update(("X", "Y"))
+        if z_value is not None:
+            axes.add("Z")
+        effective_z = z_vals[tid] if 0 <= tid < len(z_vals) else z_value
+        if effective_z is not None:
+            z_values.append(effective_z)
+        if has_motion and rec_motion:
+            motions.add(rec_motion)
+        if re.search(r"(?<![A-Z])G(?:8[0-9]|76)(?!\d)", code, re.I):
+            motions.add("cycle")
+        if rec_feature and has_motion:
+            roles[rec_feature] += 1
+        if rec_retract:
+            retract_count += 1
+    axis_label = "XYZ" if len(axes) == 3 else "XY" if axes == {"X", "Y"} else "Z" if axes == {"Z"} else "none"
+    motion_label = ("cycle" if "cycle" in motions else
+                    "arc" if "arc" in motions else
+                    "rapid" if "rapid" in motions and "linear" not in motions else
+                    "linear" if "linear" in motions else "unknown")
+    directions = {1 if b > a else -1 for a, b in zip(z_values, z_values[1:])
+                  if a is not None and b is not None and abs(b - a) > 1e-9}
+    z_direction = ("mixed" if len(directions) > 1 else
+                   "down" if directions == {-1} else
+                   "up" if directions == {1} else "stable")
+    dominant_role = roles.most_common(1)[0][0] if roles else feature
+    retract = int(retract_count * 2 >= max(1, len(records[start_index:end_index])))
+    return "axes={}|motion={}|z={}|retract={}|role={}".format(
+        axis_label, motion_label, z_direction, retract, dominant_role)
+
+def validate_program(text: str, filename: str, program: str, info: ProgramInfo, config: Config,
+                     stats: Optional[Stats] = None,
+                     apt_meta: Optional[AptMeta] = None,
+                     retract_plane: Optional[float] = None,
+                     feed_outlier: Optional[FeedOutlierData] = None) -> List[Issue]:
     issues: List[Issue] = []
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     start = _header_end(lines)
@@ -1584,7 +1785,18 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             header_tool_numbers.add(int(header_match.group(1)))
     spindle_values: List[Tuple[int, str, float, str]] = []
     # WP-P1：F 离群阶段收集并入主遍历（原第二遍循环删除）。
-    stage_feeds: Dict[str, List[Tuple[int, str, float, str]]] = {"move": [], "plunge": [], "cut": []}
+    # WP-A9 修订：F 是模态指令——一个 F 档位生效期间的多行运动都使用该进给。
+    # 档位归属按数控加工一般逻辑：无 XY 且 Z 下降且 F 未达移动档位下限（慢速下刀）
+    # = 进刀档；Z ≥ 抬刀平面或快速接近（无 XY 且 F 达移动档位下限）= 移动档；
+    # 其余（Z 不变的平面/曲面切削）= 切削档。显式 F 行不足 3 个时改用模态行分布。
+    # 主遍历收集每行（模态 F 及其动作特征）与显式 F 行，遍历结束后先确定各
+    # F 档位归属，再按模态 F 分组统计分布，离群只检查显式 F 行。
+    row_feeds: List[Tuple[int, str, float, str, str, bool]] = []  # (行号, 模态F原文, 模态F值, 原始行, 动作特征, 是否在抬刀平面)
+    explicit_feeds: List[Tuple[int, str, float, str, str, bool]] = []  # (行号, F原文, F值, 原始行, 动作特征, 是否在抬刀平面)
+    # 主遍历先收集每行解析结果，动作特征在遍历结束后两遍判定（需全程序统计）。
+    row_records: List[Tuple[int, str, int, bool, Optional[float], List[float], List[str], bool, bool, str, Optional[float], int]] = []
+    modal_feed_raw = ""
+    modal_feed_value: Optional[float] = None
     current_z: Optional[float] = None
     first_cut: Optional[int] = None
     m03_pos: Optional[int] = None
@@ -1593,10 +1805,50 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     m08_pos: Optional[int] = None
     m09_pos: Optional[int] = None
     end_pos: Optional[int] = None
+    # 预扫描：记录每行有效 Z（含模态继承），供动作特征按"相邻 Z 趋势"判定
+    # （当前行及前后各 2 行，2026-08-07 用户建议）。Z 趋势比单行 z_delta 稳健：
+    # 行内无显式 Z、或恰好上升 10 的浮点边界都不会再误判。
+    z_trace: List[Tuple[int, Optional[float]]] = []
+    _pre_z: Optional[float] = None
+    for _i, _raw in enumerate(lines[start:], start=start + 1):
+        if not _raw.strip():
+            continue
+        _zv: Optional[float] = None
+        for _p in ADDR_RE.finditer(code_part(_raw)):
+            if _p.group(1).upper() == "Z":
+                try:
+                    _zv = float(_p.group(2))
+                except ValueError:
+                    pass
+                break
+        if _zv is not None:
+            _pre_z = _zv
+        z_trace.append((_i, _pre_z))
+    # 预扫描扩展：每行 ±4 行窗口的运动信号（方向变化次数/净变化/进入下行/进入上行）。
+    # 动作特征完全由这些 Z 运动信号判定，不依赖绝对 F 数值（用户标注对齐 98.9%）。
+    _z_vals = [z for _ln, z in z_trace]
+    motion_trace: List[Tuple[int, Optional[float], Optional[float], Optional[float]]] = []
+    for _ti in range(len(_z_vals)):
+        _dirs = []
+        for _k in range(-4, 4):
+            _a = _z_vals[_ti + _k] if 0 <= _ti + _k < len(_z_vals) else None
+            _b = _z_vals[_ti + _k + 1] if 0 <= _ti + _k + 1 < len(_z_vals) else None
+            if _a is not None and _b is not None and abs(_b - _a) > 1e-9:
+                _dirs.append(1 if _b > _a else -1)
+        _changes = sum(1 for _i in range(1, len(_dirs)) if _dirs[_i] != _dirs[_i - 1])
+        _win = _z_vals[max(0, _ti - 4): _ti + 5]
+        _vals = [z for z in _win if z is not None]
+        _net = (_vals[-1] - _vals[0]) if len(_vals) >= 2 else None
+        _cur = _z_vals[_ti]
+        _d_in = (_cur - _z_vals[_ti - 1]) if (_cur is not None and _ti >= 1 and _z_vals[_ti - 1] is not None) else None
+        _d_out = (_z_vals[_ti + 1] - _cur) if (_cur is not None and _ti + 1 < len(_z_vals) and _z_vals[_ti + 1] is not None) else None
+        motion_trace.append((_changes, _net, _d_in, _d_out))
+    trace_idx = 0
     for i, raw_line in enumerate(lines[start:], start=start + 1):
         line = raw_line.strip()
         if not line:
             continue
+        trace_idx += 1
         code = code_part(raw_line)
         # 只检查代码部分：括号注释与分号后注释内的引号不参与未闭合引号判定。
         if '"' in code and code.count('"') % 2:
@@ -1633,14 +1885,24 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                     pass
             elif parameter_key in "XY":
                 has_xy = True
+        if retract_plane is not None:
+            move_level = retract_plane
+        else:
+            move_level = config.retract_z_threshold
+        # 模态 Z：当前行无显式 Z 时沿用已生效的 Z 高度。
+        effective_z = z_value if z_value is not None else current_z
+        # 行是否处于抬刀平面（含模态 Z）：发生在抬刀高度上的一定是移动。
+        at_retract = effective_z is not None and effective_z >= move_level
+        line_feed_values = [
+            float(parameter.group(2))
+            for parameter in parameters if parameter.group(1).upper() == "F"
+        ]
+        line_feed_raws = [
+            parameter.group(2)
+            for parameter in parameters if parameter.group(1).upper() == "F"
+        ]
         if z_value is not None:
             current_z = z_value
-        if g00_matches or (current_z is not None and current_z >= config.retract_z_threshold):
-            stage = "move"
-        elif z_value is not None and not has_xy:
-            stage = "plunge"
-        else:
-            stage = "cut"
         for parameter in parameters:
             key = parameter.group(1).upper()
             raw_value = parameter.group(2)
@@ -1663,7 +1925,8 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
                 if config.feed_max is not None and value > config.feed_max:
                     issues.append(Issue(filename, i, raw_line, "feed-range", "error", f"F 值 {raw_value} 超过上限 {config.feed_max:g}"))
                 if value > 0:
-                    stage_feeds[stage].append((i, raw_value, value, raw_line))
+                    modal_feed_raw = raw_value
+                    modal_feed_value = value
             else:
                 spindle_values.append((i, raw_value, value, raw_line))
                 has_s = True
@@ -1706,6 +1969,57 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
         # Address tokens must have a numeric value unless special code is configured (not in MVP).
         for token in INVALID_ADDR_RE.finditer(code):
             issues.append(Issue(filename, i, raw_line, "invalid-address", "error", f"地址 {token.group(1)} 后缺少数值"))
+        # 收集本行解析结果，动作特征在遍历结束后按"Z 运动 + 程序内相对 F 档"
+        # 两遍判定（需要全程序统计，无法在线单遍完成）。
+        row_records.append((
+            i, raw_line, g00_matches, has_xy, z_value,
+            line_feed_values, line_feed_raws, at_retract,
+            bool(has_xy or z_value is not None or MOTION_ANY_RE.search(code)),
+            modal_feed_raw, modal_feed_value, trace_idx - 1,
+        ))
+    # WP-A9 修订（2026-08-07）：动作特征判定——
+    #   第一遍：按 Z 运动基础规则分类，收集程序内"进刀档"（下行 ≥5 次）与
+    #   "移动档"（move ≥5 次）的 F 值集合（程序内相对，不写死数值）；
+    #   第二遍：基础分类 + F 兜底（平稳行用进刀档→plunge、孤立设定行用移动档
+    #   →move、退刀前最后一行用进刀档→plunge），构建 row_feeds/explicit_feeds。
+    from collections import Counter as _Counter
+    _down_f = _Counter()
+    _stable_f = _Counter()
+    _move_f = _Counter()
+    classified_records = []
+    for _rec in row_records:
+        (_i, _raw, _g00, _hxy, _zv, _lfv, _lfraw, _atr, _hm, _mraw, _mval, _tid) = _rec
+        if not _lfv:
+            continue
+        _ch, _net, _din, _dout = motion_trace[_tid]
+        _prev1 = _z_vals[_tid - 1] if _tid >= 1 else None
+        _base = _base_motion_feature(_ch, _net, _din, _dout, bool(_g00), _atr, _prev1, move_level)
+        if _base == "plunge":
+            _down_f[_lfv[-1]] += 1
+        elif _base == "cut":
+            _stable_f[_lfv[-1]] += 1
+        elif _base == "move":
+            _move_f[_lfv[-1]] += 1
+    _plunge_feeds = {f for f, n in _down_f.items() if n >= 5}
+    _move_feeds = {f for f, n in _move_f.items() if n >= 5}
+    _modal_motion = "unknown"
+    for _rec in row_records:
+        (_i, _raw, _g00, _hxy, _zv, _lfv, _lfraw, _atr, _hm, _mraw, _mval, _tid) = _rec
+        _motion_matches = list(MOTION_RE.finditer(code_part(_raw)))
+        if _motion_matches:
+            _motion_code = int(_motion_matches[-1].group(1))
+            _modal_motion = ("rapid" if _motion_code == 0 else
+                             "linear" if _motion_code == 1 else "arc")
+        _ch, _net, _din, _dout = motion_trace[_tid]
+        _prev1 = _z_vals[_tid - 1] if _tid >= 1 else None
+        _base = _base_motion_feature(_ch, _net, _din, _dout, bool(_g00), _atr, _prev1, move_level)
+        _feat = _final_motion_feature(_base, _lfv[-1] if _lfv else None,
+                                      _plunge_feeds, _move_feeds, _net, _din, _hm)
+        classified_records.append(_rec + (_feat, _modal_motion))
+        if _lfv:
+            explicit_feeds.append((_i, _lfraw[-1], _lfv[-1], _raw, _feat, _atr))
+        if _mval is not None and _hm:
+            row_feeds.append((_i, _mraw or "", _mval, _raw, _feat, _atr))
     if config.require_end_marker and not has_end:
         issues.append(Issue(filename, len(lines), "", "end-marker", "error", "添加 %、M30 或 M02 结束标记"))
     if config.require_spindle_speed and not has_s:
@@ -1741,59 +2055,409 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
             issues.append(Issue(filename, m08_pos, lines[m08_pos - 1], "aux-order", "warning", "M08 出现在首次切削之后，首刀无冷却"))
         if "m09-before-end" in aux and m09_pos is not None and end_pos is not None and end_pos < m09_pos:
             issues.append(Issue(filename, m09_pos, lines[m09_pos - 1], "aux-order", "warning", "M09 出现在程序结束指令之后，冷却液未及时关闭"))
-    # F 离群：按工艺阶段（移动/进刀/切削）分组检测。NC 程序的 F 档位与阶段强相关
-    # （切削 900、抬刀 5000、进刀 300 等），把全部 F 混在一起统计会互相污染。
+    # F 离群：先按 F 档位归属（移动/进刀/切削）分组，再按模态 F 统计分布。
+    # NC 程序的 F 档位与动作强相关（切削 900、抬刀 5000、进刀 300 等），
+    # 档位归属依据数控加工一般逻辑：无 XY 且 Z 下降（下刀）→ 进刀档；
+    # Z ≥ 抬刀平面（退刀/定位）→ 移动档；其余（带 XY 的平面/曲面切削）→ 切削档。
     # 组内出现 ≥2 次的值构成“常见档位”，只检查组内出现 1 次的孤立值是否低于
     # 最低常见档位 × low_ratio 或高于最高常见档位 × high_ratio；
     # 组内无常见档位（F 值连续变化）时回退 IQR 极端值标准（k=3）。
-    # 阶段收集已在主遍历完成（WP-P1），此处仅做离群判定。
     stage_labels = {"move": "移动/退刀", "plunge": "进刀", "cut": "切削"}
+    # 《F值异常检测方法》三层法：
+    #   ① 硬边界：F0/负值/超上限（feed_max，默认 10000）→ error（feed-zero、
+    #      negative-parameter、feed-range 已在主遍历上报）；
+    #   ② 档位离群（核心）：F 是离散档位——出现次数 ≥ min_count 的值构成常用档位；
+    #      少见值（出现 ≤2 次）且与最近常用档位的对数距离 > ln2（比值 >2 或 <0.5）
+    #      → warning；落在档位包络 [0.8×min(常用), 1.2×max(常用)] 之外的值
+    #      无论次数都 warning；
+    #   ③ 上下文角色校验：切削区（带 XY 运动）突现抬刀大档（5000/6000）、
+    #      快速移动用小档（100/300）→ 复核提示（info，不阻止输出）。
+    # 出现次数统计含模态继承（无 F 的行沿用上一行 F，计入该档位次数）。
+    apt_feeds = [float(feed) for feed, _units in apt_meta.feeds] if apt_meta and apt_meta.feeds else []
 
-    def report_feed_outlier(line_no, raw_value, raw_line, suggestion):
+    def matches_apt_feed(value: float) -> bool:
+        return any(abs(value - feed) <= max(feed * 0.10, 1.0) for feed in apt_feeds)
+
+    def report_feed_outlier(line_no, raw_value, raw_line, suggestion, reason,
+                            peer_group="", sample_count=0, confidence="medium",
+                            evidence=None):
         issues.append(Issue(filename, line_no, raw_line, "feed-outlier", "warning", suggestion))
         emit_event("warning", "feed_outlier",
                    f"F 离群识别：{filename} 第 {line_no} 行 F{raw_value}",
                    detail=f"{raw_line.strip()}\n{suggestion}")
+        if feed_outlier is not None:
+            feed_outlier.outliers.append({
+                "line": line_no, "value": float(raw_value), "reason": reason,
+                "in_apt": matches_apt_feed(float(raw_value)), "text": raw_line,
+                "peer_group": peer_group, "sample_count": sample_count,
+                "confidence": confidence, "evidence": evidence or {},
+            })
 
-    for stage, items in stage_feeds.items():
-        if len(items) < 3:
+    # Event-level structural comparison.  Each explicit F starts one episode;
+    # inherited modal rows enrich its structure but never increase its weight.
+    record_indexes = {rec[0]: index for index, rec in enumerate(classified_records)}
+    episodes: List[FeedEpisode] = []
+    for index, (line_no, raw_value, value, raw_line, feature, at_retract) in enumerate(explicit_feeds):
+        start_index = record_indexes.get(line_no)
+        if start_index is None:
             continue
-        counts = Counter(item[2] for item in items)
-        frequent = sorted(value for value, count in counts.items() if count >= 2)
-        if frequent:
-            median_feed = frequent[len(frequent) // 2]
-            low_bound = frequent[0] * config.feed_outlier_low_ratio
-            high_bound = frequent[-1] * config.feed_outlier_high_ratio
-            for line_no, raw_value, value, raw_line in items:
-                if counts[value] > 1:
-                    continue
-                if value < low_bound:
-                    report_feed_outlier(line_no, raw_value, raw_line,
-                                        f"F{raw_value} 明显低于本程序{stage_labels[stage]}进给档位范围（约 {median_feed:g}），请确认")
-                elif value > high_bound:
-                    report_feed_outlier(line_no, raw_value, raw_line,
-                                        f"F{raw_value} 远高于本程序{stage_labels[stage]}进给档位范围（约 {median_feed:g}），请确认")
+        if index + 1 < len(explicit_feeds):
+            next_line = explicit_feeds[index + 1][0]
+            end_index = record_indexes.get(next_line, len(classified_records))
         else:
-            sorted_feeds = sorted(item[2] for item in items)
-            median_feed = sorted_feeds[len(sorted_feeds) // 2]
-            if median_feed <= 0:
+            end_index = len(classified_records)
+        signature = _feed_episode_signature(
+            classified_records, start_index, end_index, feature, at_retract,
+            motion_trace, _z_vals)
+        episodes.append(FeedEpisode(
+            line_no, raw_value, value, raw_line, signature, feature, at_retract))
+
+    episode_groups: Dict[str, List[FeedEpisode]] = {}
+    for episode in episodes:
+        episode_groups.setdefault(episode.signature, []).append(episode)
+
+    def coarse_signature(signature: str) -> str:
+        parts = [part for part in signature.split("|")
+                 if not part.startswith(("z=", "retract=", "shape=", "zscale="))]
+        return "|".join(parts)
+
+    coarse_counts: Dict[str, Counter] = {}
+    global_episode_counts = Counter()
+    for episode in episodes:
+        if episode.value > 0:
+            global_episode_counts[episode.value] += 1
+            coarse_counts.setdefault(coarse_signature(episode.signature), Counter())[episode.value] += 1
+
+    min_count = max(1, config.feed_outlier_min_count)
+    ratio = max(1.0, config.feed_outlier_ratio)
+    all_common = set()
+    stage_common: Dict[str, set] = {}
+    peer_group_data: Dict[str, dict] = {}
+    for signature, group in episode_groups.items():
+        counts = Counter(episode.value for episode in group if episode.value > 0)
+        common_values = sorted(value for value, count in counts.items() if count >= min_count)
+        mode_stable = len(common_values) == 1
+        all_common.update(common_values)
+        for episode in group:
+            if episode.value in common_values:
+                stage_common.setdefault(episode.feature, set()).add(episode.value)
+        peer_group_data[signature] = {
+            "sample_count": len(group),
+            "feed_counts": {str(value): count for value, count in sorted(counts.items())},
+            "common_feeds": common_values,
+            "mode_stable": mode_stable,
+            "lines": [episode.line for episode in group],
+        }
+
+    common_feeds = sorted(all_common)
+    stage_common_feeds = {
+        stage: sorted(values) for stage, values in sorted(stage_common.items())
+    }
+    if feed_outlier is not None:
+        feed_outlier.apt_feeds = apt_feeds
+        feed_outlier.min_count = min_count
+        feed_outlier.ratio = ratio
+        feed_outlier.low_ratio = config.feed_outlier_low_ratio
+        feed_outlier.high_ratio = config.feed_outlier_high_ratio
+        feed_outlier.common_feeds = common_feeds
+        feed_outlier.stage_common_feeds = stage_common_feeds
+        feed_outlier.peer_groups = peer_group_data
+        if common_feeds:
+            feed_outlier.envelope = [
+                common_feeds[0] * config.feed_outlier_low_ratio,
+                common_feeds[-1] * config.feed_outlier_high_ratio,
+            ]
+
+    for signature, group in episode_groups.items():
+        counts = Counter(episode.value for episode in group if episode.value > 0)
+        common_values = sorted(value for value, count in counts.items() if count >= min_count)
+        mode_stable = len(common_values) == 1
+        if len(group) < 3 or not common_values:
+            if feed_outlier is not None:
+                reason = "peer-group-too-small" if len(group) < 3 else "no-repeated-reference"
+                for episode in group:
+                    feed_outlier.insufficient_evidence.append({
+                        "line": episode.line, "value": episode.value,
+                        "peer_group": signature, "sample_count": len(group),
+                        "reason": reason, "in_apt": matches_apt_feed(episode.value),
+                        "text": episode.raw_line,
+                    })
+            continue
+        if not mode_stable:
+            if feed_outlier is not None:
+                for episode in group:
+                    if counts.get(episode.value, 0) < min_count:
+                        feed_outlier.insufficient_evidence.append({
+                            "line": episode.line, "value": episode.value,
+                            "peer_group": signature, "sample_count": len(group),
+                            "reason": "unstable-peer-mode",
+                            "in_apt": matches_apt_feed(episode.value),
+                            "text": episode.raw_line,
+                        })
+            continue
+        for episode in group:
+            value = episode.value
+            # Upper hard boundaries have already produced feed-range and must
+            # not be duplicated as statistical warnings.
+            if value <= 0 or (config.feed_max is not None and value > config.feed_max):
+                if feed_outlier is not None:
+                    feed_outlier.boundary_errors.append({
+                        "line": episode.line, "value": value,
+                        "reason": "out-of-range", "in_apt": matches_apt_feed(value),
+                        "text": episode.raw_line,
+                    })
                 continue
-            q1 = _quantile(sorted_feeds, 0.25)
-            q3 = _quantile(sorted_feeds, 0.75)
-            iqr = q3 - q1
-            if iqr > 0:
-                low_bound = max(q1 - config.feed_outlier_iqr_factor * iqr, q1 * config.feed_outlier_low_ratio)
-                high_bound = q3 + config.feed_outlier_iqr_factor * iqr
-            else:
-                low_bound = median_feed * config.feed_outlier_low_ratio
-                high_bound = median_feed * config.feed_outlier_high_ratio
-            for line_no, raw_value, value, raw_line in items:
-                if value < low_bound:
+            if counts.get(value, 0) >= min_count:
+                continue
+            if global_episode_counts.get(value, 0) >= 2:
+                continue
+            # A value repeatedly used by a related structural family is a
+            # valid in-program reference even when this narrow episode shape
+            # occurs only once (for example, the same cut feed at another Z
+            # level).  This prevents normal modal transitions from becoming
+            # outliers merely because the local shape is more specific.
+            if coarse_counts.get(coarse_signature(signature), Counter()).get(value, 0) >= min_count:
+                continue
+            reference = min(common_values, key=lambda item: abs(log(item) - log(value)))
+            relative_ratio = max(value / reference, reference / value)
+            far = relative_ratio > ratio
+            outside_reference_tolerance = (
+                value < reference * config.feed_outlier_low_ratio or
+                value > reference * config.feed_outlier_high_ratio)
+            if not far and (not mode_stable or not outside_reference_tolerance):
+                continue
+            confidence = "high" if counts[reference] >= 4 and counts.get(value, 0) == 1 and relative_ratio >= ratio else "medium"
+            direction = "低于" if value < reference else "高于"
+            evidence = {
+                "reference_feed": reference,
+                "reference_count": counts[reference],
+                "candidate_count": counts.get(value, 0),
+                "relative_ratio": relative_ratio,
+                "log_distance": abs(log(value) - log(reference)),
+                "in_apt": matches_apt_feed(value),
+            }
+            report_feed_outlier(
+                episode.line, episode.raw_value, episode.raw_line,
+                "F{} 在同结构动作中明显{}重复参照 F{}（{} 次，倍率 {:.3g}），请确认".format(
+                    episode.raw_value, direction, reference, counts[reference], relative_ratio),
+                "episode-peer-outlier", signature, len(group), confidence, evidence)
+
+    # Cross-role review is also learned from this program.  It is deliberately
+    # weaker than peer-group detection and never relies on fixed F numbers.
+    cut_references = stage_common_feeds.get("cut", [])
+    if cut_references:
+        for episode in episodes:
+            if episode.feature != "move" or episode.value <= 0:
+                continue
+            line_code = code_part(episode.raw_line)
+            confirmed_move = episode.at_retract or bool(G00_RE.search(line_code))
+            if not confirmed_move or matches_apt_feed(episode.value):
+                continue
+            reference = min(cut_references,
+                            key=lambda item: abs(log(item) - log(episode.value)))
+            relative_ratio = max(episode.value / reference, reference / episode.value)
+            if episode.value >= reference or relative_ratio <= ratio:
+                continue
+            issues.append(Issue(
+                filename, episode.line, episode.raw_line,
+                "feed-context-review", "info",
+                "移动/定位动作使用的 F{} 明显低于程序内重复切削参照 F{}，请人工复核".format(
+                    episode.raw_value, reference)))
+            if feed_outlier is not None:
+                feed_outlier.context_reviews.append({
+                    "line": episode.line, "value": episode.value,
+                    "reason": "move-below-cut-reference",
+                    "reference_feed": reference,
+                    "relative_ratio": relative_ratio,
+                    "in_apt": matches_apt_feed(episode.value),
+                    "text": episode.raw_line,
+                })
+
+    # Keep spindle validation in the active path; the legacy F block below is
+    # intentionally bypassed while report readers remain backward compatible.
+    if config.multiple_spindle_warn:
+        distinct_spindle_now: Dict[float, Tuple[int, str, str]] = {}
+        for line_no, raw_value, value, raw_line in spindle_values:
+            distinct_spindle_now.setdefault(value, (line_no, raw_value, raw_line))
+        if len(distinct_spindle_now) > 1:
+            values = ", ".join(raw for _line, raw, _text in distinct_spindle_now.values())
+            first = next(iter(distinct_spindle_now.values()))
+            issues.append(Issue(filename, first[0], first[2], "multiple-spindle-speeds", "warning",
+                                f"程序包含多个不同 S 值（{values}），请确认转速切换是否符合工艺要求"))
+    return issues
+
+    feed_counts = Counter(value for _l, _r, value, _t, _f, _a in row_feeds)
+    stage_feed_counts: Dict[str, Counter] = {}
+    for _l, _r, value, _t, _f, _a in row_feeds:
+        stage_feed_counts.setdefault(_f, Counter())[value] += 1
+    # 非标准档位值的"少见"按显式 F 出现次数统计：模态继承只放大合法档位频率，
+    # 不能把一次可疑写入（如注入 F450 后被后续长切削段继承）洗成常见值。
+    stage_explicit_counts: Dict[str, Counter] = {}
+    for _l, _r, value, _t, _f, _a in explicit_feeds:
+        stage_explicit_counts.setdefault(_f, Counter())[value] += 1
+    total_f = sum(feed_counts.values())
+    min_count = max(config.feed_outlier_min_count, int(total_f * 0.005)) if total_f else config.feed_outlier_min_count
+    stage_common_feeds: Dict[str, List[float]] = {}
+    for _stage, _counts in stage_feed_counts.items():
+        _total = sum(_counts.values())
+        _min_count = max(config.feed_outlier_min_count, int(_total * 0.005)) if _total else config.feed_outlier_min_count
+        stage_common_feeds[_stage] = sorted(
+            value for value, count in _counts.items() if count >= _min_count
+        )
+    common_feeds = sorted({value for values in stage_common_feeds.values() for value in values})
+    ratio = config.feed_outlier_ratio
+    if feed_outlier is not None:
+        feed_outlier.apt_feeds = apt_feeds
+        feed_outlier.min_count = min_count
+        feed_outlier.ratio = ratio
+        feed_outlier.common_feeds = common_feeds
+        feed_outlier.stage_common_feeds = stage_common_feeds
+        if common_feeds:
+            feed_outlier.envelope = [
+                common_feeds[0] * config.feed_outlier_low_ratio,
+                common_feeds[-1] * config.feed_outlier_high_ratio,
+            ]
+    # 上下文角色复核只针对该动作特征中少见的 F 值（≤2 次），避免常见档位
+    # 在移动/切削间合法复用（如 B1001 F300 大量用于移动）时刷屏提示。
+    context_counts = Counter((_f, value) for _l, _r, value, _t, _f, _a in row_feeds)
+
+    for line_no, raw_value, value, raw_line, feature, at_retract in explicit_feeds:
+        # 上下文复核只针对真正带运动（X/Y/Z 或运动 G 码）的行；孤立 F/S 设定行
+        # （如 N14F6000）不产生"切削用抬刀大档"类复核。
+        line_code = code_part(raw_line)
+        has_motion = any(parameter.group(1).upper() in "XYZ" for parameter in
+                         ADDR_RE.finditer(line_code)) or bool(MOTION_ANY_RE.search(line_code))
+        # 确认的移动行：行在抬刀平面（含模态 Z）或 G00 快速定位；层四"移动用
+        # 下刀小档"复核只针对这些确认移动的行，Z 上升/快速下刀/XY 高速平移等
+        # 启发式移动不产生复核（可能是工件内合法的慢速退刀/定位）。
+        confirmed_move = at_retract or bool(G00_RE.search(line_code))
+        role_common_feeds = stage_common_feeds.get(feature, [])
+        common_set = set(role_common_feeds)
+        role_explicit_count = stage_explicit_counts.get(feature, Counter()).get(value, 0)
+        if not common_set:
+            # 程序 F 太少，无统计意义：跳过第二层，只保留硬边界与上下文复核。
+            apt_planned = apt_feeds and matches_apt_feed(value)
+            rare_overall = role_explicit_count <= 2
+            if (has_motion and feature == "cut" and not at_retract
+                    and any(abs(value - g) < 1.0 for g in FEED_HIGH_GEARS)
+                    and not apt_planned and rare_overall):
+                issues.append(Issue(filename, line_no, raw_line, "feed-context-review", "info",
+                                    f"切削运动中使用抬刀/定位大档 F{raw_value}，请复核是否误输"))
+                if feed_outlier is not None:
+                    feed_outlier.context_reviews.append({
+                        "line": line_no, "value": value, "reason": "cut-high-gear",
+                        "in_apt": matches_apt_feed(value),
+                        "text": raw_line,
+                    })
+            elif (has_motion and feature == "move" and confirmed_move
+                    and any(abs(value - g) < 1.0 for g in FEED_LOW_GEARS)
+                    and not apt_planned and rare_overall):
+                issues.append(Issue(filename, line_no, raw_line, "feed-context-review", "info",
+                                    f"快速移动/定位中使用钻入/下刀小档 F{raw_value}，请复核是否误输"))
+                if feed_outlier is not None:
+                    feed_outlier.context_reviews.append({
+                        "line": line_no, "value": value, "reason": "move-low-gear",
+                        "in_apt": matches_apt_feed(value),
+                        "text": raw_line,
+                    })
+            continue
+        if value <= 0 or (config.feed_max is not None and value > config.feed_max):
+            if feed_outlier is not None:
+                feed_outlier.boundary_errors.append({
+                    "line": line_no, "value": value, "reason": "out-of-range",
+                    "in_apt": matches_apt_feed(value),
+                    "text": raw_line,
+                })
+            continue
+        rare = role_explicit_count <= 2
+        if rare:
+            reference_feeds = [gear for gear in role_common_feeds if gear != value]
+            if not reference_feeds:
+                continue
+            reference_set = set(reference_feeds)
+            nearest = min(reference_set, key=lambda v: abs(log(v) - log(value)))
+            far = value > nearest * ratio or value < nearest / ratio
+            ref_lo = reference_feeds[0] * config.feed_outlier_low_ratio
+            ref_hi = reference_feeds[-1] * config.feed_outlier_high_ratio
+            outside_reference_range = value < reference_feeds[0] or value > reference_feeds[-1]
+            outer_tolerated = (
+                outside_reference_range and not far and (
+                    (value > reference_feeds[-1] and config.feed_outlier_high_ratio >= 1.2)
+                    or (value < reference_feeds[0] and config.feed_outlier_low_ratio <= 0.8)
+                )
+            )
+            envelope_out = ((value < ref_lo or value > ref_hi) and not outer_tolerated)
+            if far:
+                if value < nearest:
+                    hint = "，且不在 APT 规划进给集合内" if apt_feeds and not matches_apt_feed(value) else ""
                     report_feed_outlier(line_no, raw_value, raw_line,
-                                        f"F{raw_value} 明显低于本程序{stage_labels[stage]}进给范围（约 {median_feed:g}），请确认")
-                elif value > high_bound:
+                                        f"F{raw_value} 为少见档位且明显低于常用档位（最近 {nearest:g}）{hint}，请确认",
+                                        "rare-below-common")
+                else:
+                    hint = "，且不在 APT 规划进给集合内" if apt_feeds and not matches_apt_feed(value) else ""
                     report_feed_outlier(line_no, raw_value, raw_line,
-                                        f"F{raw_value} 远高于本程序{stage_labels[stage]}进给范围（约 {median_feed:g}），请确认")
+                                        f"F{raw_value} 为少见档位且明显高于常用档位（最近 {nearest:g}）{hint}，请确认",
+                                        "rare-above-common")
+                continue
+            if envelope_out:
+                env_hint = ""
+                if value < ref_lo:
+                    env_hint = f"低于档位包络下限 {ref_lo:g}"
+                else:
+                    env_hint = f"高于档位包络上限 {ref_hi:g}"
+                hint = "，且不在 APT 规划进给集合内" if apt_feeds and not matches_apt_feed(value) else ""
+                report_feed_outlier(line_no, raw_value, raw_line,
+                                    f"F{raw_value} {env_hint}（当前{stage_labels.get(feature, feature)}角色常用档位 {role_common_feeds[0]:g}~{role_common_feeds[-1]:g}）{hint}，请确认",
+                                    "envelope-out")
+                continue
+            near_common = any(
+                max(value / gear, gear / value) <= 1.2
+                for gear in reference_set if value > 0 and gear > 0
+            )
+            near_known_gear = any(
+                abs(log(value) - log(gear)) <= log(1.1)
+                for gear in KNOWN_FEED_GEARS if value > 0 and gear > 0
+            )
+            # 若该值因模态继承行数很多而进入 common_set，但显式写入本身很少，
+            # 仍按显式事件检查，避免一次 F450 被后续长段继承后洗成常用档位。
+            modal_promoted = value in common_set
+            if (not near_common and not near_known_gear
+                    and (not outside_reference_range or modal_promoted)):
+                hint = "，且不在 APT 规划进给集合内" if apt_feeds and not matches_apt_feed(value) else ""
+                report_feed_outlier(
+                    line_no, raw_value, raw_line,
+                    f"F{raw_value} 为当前{stage_labels.get(feature, feature)}角色非标准档位值（最近 {nearest:g}）{hint}，请确认",
+                    "non-role-gear-value")
+                continue
+        # ③ 上下文角色复核（不阻止输出，仅提示人工确认）。
+        # APT 已规划该档位（权威白名单）或该值全程序常见（显式 >2 次）时，
+        # 不属于"突然出现"，不产生复核；复核明细带 in_apt 供界面一致展示。
+        apt_planned = bool(apt_feeds) and matches_apt_feed(value)
+        rare_overall = role_explicit_count <= 2
+        if (has_motion and feature == "cut" and not at_retract
+                and any(abs(value - g) < 1.0 for g in FEED_HIGH_GEARS)
+                and context_counts.get((feature, value), 0) <= 2
+                and not apt_planned and rare_overall):
+            issues.append(Issue(filename, line_no, raw_line, "feed-context-review", "info",
+                                f"切削运动中使用抬刀/定位大档 F{raw_value}，请复核是否误输"))
+            if feed_outlier is not None:
+                feed_outlier.context_reviews.append({
+                    "line": line_no, "value": value, "reason": "cut-high-gear",
+                    "in_apt": matches_apt_feed(value),
+                    "text": raw_line,
+                })
+        elif (has_motion and feature == "move" and confirmed_move
+                and any(abs(value - g) < 1.0 for g in FEED_LOW_GEARS)
+                and context_counts.get((feature, value), 0) <= 2
+                and not apt_planned and rare_overall):
+            issues.append(Issue(filename, line_no, raw_line, "feed-context-review", "info",
+                                f"快速移动/定位中使用钻入/下刀小档 F{raw_value}，请复核是否误输"))
+            if feed_outlier is not None:
+                feed_outlier.context_reviews.append({
+                    "line": line_no, "value": value, "reason": "move-low-gear",
+                    "in_apt": matches_apt_feed(value),
+                    "text": raw_line,
+                })
     distinct_spindle: Dict[float, Tuple[int, str, str]] = {}
     if config.multiple_spindle_warn:
         for line_no, raw_value, value, raw_line in spindle_values:
@@ -1805,11 +2469,16 @@ def validate_program(text: str, filename: str, program: str, info: ProgramInfo, 
     return issues
 
 
-def analyze_program(text: str, filename: str, program: str, info: ProgramInfo, config: Config) -> Tuple[Stats, List[Issue]]:
+def analyze_program(text: str, filename: str, program: str, info: ProgramInfo, config: Config,
+                    apt_meta: Optional[AptMeta] = None,
+                    retract_plane: Optional[float] = None) -> Tuple[Stats, List[Issue], FeedOutlierData]:
     """Calculate statistics and validation issues in one body traversal."""
     stats = _new_stats()
-    issues = validate_program(text, filename, program, info, config, stats=stats)
-    return stats, issues
+    feed_outlier = FeedOutlierData()
+    issues = validate_program(text, filename, program, info, config, stats=stats,
+                              apt_meta=apt_meta, retract_plane=retract_plane,
+                              feed_outlier=feed_outlier)
+    return stats, issues, feed_outlier
 
 
 def align_lines(left: str, right: str) -> List[Tuple[str, str, str, str]]:
@@ -1881,7 +2550,9 @@ def reprocess_file(f: FilePlan, info: ProgramInfo, config: Config, *, tools: Seq
         f.output_text, date_changed = update_header_date(f.output_text, apt_date or format_nc_date())
         if date_changed:
             f.changes.append("更新 DATE")
-    f.stats, validation_issues = analyze_program(f.output_text, f.source, f.program, effective, config)
+    f.stats, validation_issues, f.feed_outlier = analyze_program(
+        f.output_text, f.source, f.program, effective, config, apt_meta=f.apt_meta,
+        retract_plane=f.apt_toolpath.retract_plane if f.apt_toolpath else None)
     f.issues = header_issues + validation_issues
     # WP-A4：APT 规划 ↔ MPF 执行交叉校验。
     if f.apt_meta is not None:
@@ -2001,7 +2672,9 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None, config: Opt
                     if date_changed:
                         changes.append("更新 DATE")
                 f.output_text, f.changes = new, changes
-                f.stats, validation_issues = analyze_program(new, f.source, f.program, info, config)
+                f.stats, validation_issues, f.feed_outlier = analyze_program(
+                    new, f.source, f.program, info, config, apt_meta=f.apt_meta,
+                    retract_plane=f.apt_toolpath.retract_plane if f.apt_toolpath else None)
                 f.target = str(directory / (f.program + config.program_output_extension))
                 # 缓存本次生效的刀具信息，供 reprocess_file/应用所选回退，避免刷掉刀具。
                 f.parsed_tools = list(effective_info.tools)
@@ -2159,9 +2832,10 @@ def _config_snapshot(config: Config) -> dict:
         "newline": config.newline,
         "required_fields": list(config.required_fields),
         "aux_checks": sorted(config.aux_checks),
-        "feed_outlier_iqr_factor": config.feed_outlier_iqr_factor,
-        "feed_outlier_low_ratio": config.feed_outlier_low_ratio,
-        "feed_outlier_high_ratio": config.feed_outlier_high_ratio,
+    "feed_outlier_min_count": config.feed_outlier_min_count,
+    "feed_outlier_ratio": config.feed_outlier_ratio,
+    "feed_outlier_low_ratio": config.feed_outlier_low_ratio,
+    "feed_outlier_high_ratio": config.feed_outlier_high_ratio,
         "multiple_spindle_warn": config.multiple_spindle_warn,
         "require_end_marker": config.require_end_marker,
         "require_m06": config.require_m06,
@@ -2518,7 +3192,7 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
         diff = []
         if f.original_text is not None and f.output_text is not None and f.original_text != f.output_text:
             diff = list(difflib.unified_diff(f.original_text.splitlines(), f.output_text.splitlines(), fromfile=f.source + " (before)", tofile=(Path(f.target).name if f.target else f.source) + " (after)", lineterm=""))
-        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "target": f.target or "", "program_name_source": f.program_name_source or "", "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None, "apt_meta": f.apt_meta.to_dict() if f.apt_meta else None, "toolpath_stats": f.apt_toolpath.to_dict() if f.apt_toolpath else None}
+        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "target": f.target or "", "program_name_source": f.program_name_source or "", "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None, "apt_meta": f.apt_meta.to_dict() if f.apt_meta else None, "toolpath_stats": f.apt_toolpath.to_dict() if f.apt_toolpath else None, "feed_outlier": f.feed_outlier.to_dict() if f.feed_outlier else None}
         errors = [x for x in f.issues if x.severity == "error"]
         report.warnings += sum(x.severity == "warning" for x in f.issues)
         report.errors += len(errors)
