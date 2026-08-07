@@ -29,16 +29,19 @@ NCodeProcessData/
 # ── 本地贡献指南（仅本地维护，不入库不跟踪） ─────────────
 AGENTS.md
 
-# ── 已归档历史文档（本地保留，不入库不跟踪） ────────────
-NCodeProcess/docs/archive/
-
-# ── 打包测试流程文档（仅本地维护，不入库不跟踪） ────────
-NCodeProcess/docs/NCodeProcess-更改测试打包提交流程.md
+# ── 内部项目文档（含真机目录/构建参数，不对外发布） ──────
+NCodeProcess/docs/更改记录.md
+NCodeProcess/docs/项目更改测试发布流程.md
+NCodeProcessReportViewer/docs/更改记录.md
+NCodeProcessReportViewer/docs/项目更改测试发布流程.md
 
 # ── 样例数据与测试部署目录（不入库） ────────────────────
 NCodeProcess/样例文件/
 NCodeProcess/测试/
 NCodeProcessReportViewer/样例文件/
+
+# ── F 检测/抽样验证产物（仅本地校准，不入库） ───────────
+F*.txt
 
 # ── 临时文件 ────────────────────────────────────────────
 _smoke/

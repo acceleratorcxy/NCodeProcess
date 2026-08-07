@@ -6,13 +6,10 @@
 
 ## 项目文档
 
-- [需求文档](docs/NCodeProcessReportViewer-需求文档.md)（含实施状态总览）
-- [用户手册](docs/NCodeProcessReportViewer-用户手册.md)（另有 Word/PDF 版）
-- [发布说明](docs/NCodeProcessReportViewer-发布说明.md)
-- [审查与待办](docs/NCodeProcessReportViewer-审查与待办.md)
-- [程序理解与操作记录](docs/NCodeProcessReportViewer-程序理解与操作记录.md)
-- [测试指南](docs/NCodeProcessReportViewer-测试指南.md)
-- [发布安全说明](docs/NCodeProcessReportViewer-发布安全说明.md)
+- [技术文档](docs/技术文档.md)：定位、架构、报告兼容、界面映射、限制与待办（公开）。
+- [用户手册](docs/用户手册.md)：部署、查看、筛选、导出和故障处理（公开）。
+- `docs/更改记录.md`：完整历史、实测结果与决策记录（仅本机，不上传 GitHub）。
+- `docs/项目更改测试发布流程.md`：真实环境测试、打包、验收和发布步骤（仅本机，不上传 GitHub）。
 
 ## 使用方法
 
@@ -27,7 +24,7 @@
 - 处理成功、失败、跳过、移动、删除、警告和错误数量。
 - 处理结果与校验问题柱状图。
 - 每个程序的 F、S、X、Y、Z 出现次数、最小值、最大值及 G00 数量。
-- 校验问题的文件、行号、级别、原始内容和处理建议；支持按级别筛选（全部/error/warning）并导出问题 CSV（UTF-8 BOM）；页面下方展示 F 离群检测明细（各工艺阶段档位/判定范围与离群行，含原始文本）。
+- 校验问题的文件、行号、级别、原始内容和处理建议；支持按级别筛选（全部/error/warning）并导出问题 CSV（UTF-8 BOM）；页面下方展示 F episode 阶段参照、精确/兼容结构组、覆盖率、离群/硬边界/组级证据明细及 APT 匹配状态。
 - 文件修改说明及红绿色高亮差异。
 - 本次处理的事件时间线（运行日志），可按事件类型筛选；日志完整内嵌报告，不再生成磁盘日志文件。
 - APT 规划信息：全部文件显示全局摘要（机床/转速/刀具/操作/刀具使用/轨迹汇总），选中文件显示该程序 APT 的规划详情（含操作级进给与主轴、XYZ 行程、抬刀次数）。
