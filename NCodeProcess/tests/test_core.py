@@ -563,12 +563,41 @@ class CoreTests(unittest.TestCase):
         cfg = Config(g00_level="allow", auto_tool_change=True)
         plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
         out = self._mpf(plan).output_text
-        lines = out.splitlines()
-        body_index = next(i for i, line in enumerate(lines) if line.startswith("T1M6"))
-        self.assertTrue(lines[body_index - 1].startswith('MSG("T1:'))
-        self.assertEqual(out.count("T1M6"), 1)
+        # 已有换刀指令行 T5M06：在原行修正为 T1M06，不删除也不重新插入。
+        self.assertIn("N1T1M06;", out)
+        self.assertEqual(out.count("T1M06"), 1)
         self.assertIn("N3T1;", out)
         self.assertNotIn("T5", out)
+
+    def test_existing_correct_tool_change_is_unchanged(self):
+        # 已有正确的 TnM6：勾选自动添加换刀指令也不修改程序。
+        text = 'MSG("PROGRAM:P")\nN1T1M06;\nN2S100M03;\nN3M30;\n'
+        tools = [ToolInfo(1, "10")]
+        out, changed, note = add_initial_tool_change(text, tools, self._cfg(auto_tool_change=True))
+        self.assertFalse(changed)
+        self.assertEqual(out, text)
+        self.assertIn("未修改", note)
+
+    def test_existing_wrong_tool_change_fixed_in_place(self):
+        # 已有 TnM6 但刀具号不对：在原行把 T 号修正，不删除不重新插入。
+        text = 'MSG("PROGRAM:P")\nN1T5M06;\nN2S100M03;\nN3M30;\n'
+        tools = [ToolInfo(1, "10")]
+        out, changed, note = add_initial_tool_change(text, tools, self._cfg(auto_tool_change=True))
+        self.assertTrue(changed)
+        self.assertIn("N1T1M06;", out)
+        self.assertNotIn("T5", out)
+        self.assertEqual(out.count("T1M06"), 1)
+        self.assertIn("修正", note)
+
+    def test_existing_tool_call_without_m6_gets_m6_in_place(self):
+        # 已有 Tn 但缺 M6：在原行补 M6，不删除不重新插入。
+        text = 'MSG("PROGRAM:P")\nN1T1\nN2S100M03\nN3M30\n'
+        tools = [ToolInfo(1, "10")]
+        out, changed, note = add_initial_tool_change(text, tools, self._cfg(auto_tool_change=True))
+        self.assertTrue(changed)
+        self.assertIn("N1T1M6", out)
+        self.assertNotIn("\nT1M6", "\n" + out)
+        self.assertIn("T1M6", note)
 
     def test_initial_tool_change_ignores_comment_tool_refs(self):
         text = "%\nN2T2M06\n(T2 备用)\nN4G1X10\nM30\n"

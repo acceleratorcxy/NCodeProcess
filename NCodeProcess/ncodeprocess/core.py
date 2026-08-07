@@ -1444,12 +1444,18 @@ def _find_body_start(text: str) -> int:
 
 
 def add_initial_tool_change(text: str, tools: Sequence[ToolInfo], config: Config) -> Tuple[str, bool, str]:
-    """Insert a canonical first-tool change immediately after the MSG header.
+    """Insert or correct the initial tool change for single-tool programs.
 
-    The option is intentionally disabled by default.  When enabled, the
-    lowest configured tool number is used as the program's initial tool. Any
-    existing T-number references are corrected, and standalone tool-change
-    rows are consolidated into one ``TnM6`` row at the beginning of the body.
+    The option is intentionally disabled by default.  When enabled:
+
+    - If the program already contains a correct standalone ``TnM6`` (T number
+      matches and M6 is present), the whole program is left untouched.
+    - If a standalone tool-change row exists but is wrong (T number mismatch
+      or missing M6), it is corrected in place - the row is not deleted and a
+      new row is not prepended.  Other T references in the body are corrected
+      to keep the program consistent.
+    - Only when no standalone tool-change row exists is a canonical ``TnM6``
+      row inserted at the beginning of the body.
     """
     if not config.auto_tool_change or not tools:
         return text, False, ""
@@ -1477,31 +1483,62 @@ def add_initial_tool_change(text: str, tools: Sequence[ToolInfo], config: Config
     if len(referenced) > 1:
         return (
             text, False,
-            "程序引用多把刀具（" + "、".join("T" + str(number) for number in sorted(referenced)) +
+            "程序引用多把刀具（" + "、".join("T" + str(num) for num in sorted(referenced)) +
             "），不具备自动添加换刀指令条件，已跳过生成，请人工确认换刀流程",
         )
 
-    corrected = []
-    for line in body:
-        if STANDALONE_CHANGE_RE.match(line):
-            continue
-        # 只替换真实代码部分的 T 号：括号注释（如 (T2 备用)）与分号后注释
-        # （HASS 的 ;T99 备用）中的 T 号一律保持原样。
+    def fix_t_refs(line: str) -> str:
+        """Replace T numbers in the code part only; comments stay untouched."""
         code_segment, semicolon_sep, semicolon_tail = line.partition(";")
         segments = re.split(r"(\(.*?\))", code_segment)
         replaced = "".join(
             segment if segment.startswith("(") else TOOL_REF_RE.sub("T" + str(number), segment)
             for segment in segments
         )
-        corrected.append(replaced + (semicolon_sep + semicolon_tail if semicolon_sep else ""))
+        return replaced + (semicolon_sep + semicolon_tail if semicolon_sep else "")
 
-    semicolon = any(line.rstrip().endswith(";") for line in corrected[:30] if line.strip())
-    command = "T{}M6{}".format(number, ";" if semicolon else "")
-    result_lines = header + [command] + corrected
+    standalone_tn_re = re.compile(r"^\s*(?:N\d+\s*)?T\d+\s*;?\s*$", re.I)
+    change_index = None
+    change_has_m6 = False
+    for idx, line in enumerate(body):
+        if STANDALONE_CHANGE_RE.match(line):
+            change_index, change_has_m6 = idx, True
+            break
+        if standalone_tn_re.match(line):
+            change_index, change_has_m6 = idx, False
+            break
+
+    if change_index is None:
+        # No standalone tool-change row: insert a canonical row at the top of
+        # the body and correct every T reference for consistency.
+        corrected = []
+        for line in body:
+            if STANDALONE_CHANGE_RE.match(line):
+                continue
+            corrected.append(fix_t_refs(line))
+        semicolon = any(line.rstrip().endswith(";") for line in corrected[:30] if line.strip())
+        command = "T{}M6{}".format(number, ";" if semicolon else "")
+        result_lines = header + [command] + corrected
+        if had_trailing:
+            result_lines.append("")
+        result = newline.join(result_lines)
+        return result, result != text, "在程序正文首行添加换刀指令 " + command
+
+    # A standalone tool-change row exists: correct it in place.
+    fixed = fix_t_refs(body[change_index])
+    if not change_has_m6:
+        fixed = re.sub(
+            r"(?<![A-Z])T\d+(?!\d)", "T%dM6" % number, fixed, count=1, flags=re.I)
+    if fixed == body[change_index]:
+        # Already correct: leave the whole program untouched.
+        return text, False, "程序已有正确换刀指令 T%dM6，未修改" % number
+    corrected = [fix_t_refs(line) if idx != change_index else fixed
+                 for idx, line in enumerate(body)]
+    result_lines = header + corrected
     if had_trailing:
         result_lines.append("")
     result = newline.join(result_lines)
-    return result, result != text, "在程序正文首行添加/更新换刀指令 " + command
+    return result, result != text, "修正换刀指令为 T%dM6（在原行修改，未删除重加）" % number
 
 
 def add_m03(text: str, config: Config) -> Tuple[str, bool, str]:
