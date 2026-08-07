@@ -2836,7 +2836,9 @@ class App(ttk.Frame):
         for gutter, numbers in ((left_gutter, left_numbers), (right_gutter, right_numbers)):
             gutter.configure(state="normal")
             gutter.delete("1.0", "end")
-            gutter.insert("1.0", "\n".join(numbers))
+            # 尾部补换行，使行号栏总行数与内容栏一致（内容栏每行都带 \n，
+            # 含末尾空行），避免分数滚动时行号与内容错位一行。
+            gutter.insert("1.0", "\n".join(numbers) + "\n")
             gutter.configure(state="disabled")
 
         def close():

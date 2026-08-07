@@ -524,8 +524,8 @@ class LayoutWidgetTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertEqual(app.program_compare_left.tag_cget("changed", "background"), "#ffd6d6")
             self.assertEqual(app.program_compare_left.tag_cget("added", "background"), "#ffd6d6")
             self.assertEqual(app.program_compare_left.tag_cget("equal", "background"), "#d9f2d9")
-            self.assertEqual(app.program_compare_left_gutter.get("1.0", "end-1c"), "1\n2\n3")
-            self.assertEqual(app.program_compare_right_gutter.get("1.0", "end-1c"), "1\n2\n3")
+            self.assertEqual(app.program_compare_left_gutter.get("1.0", "end-1c").rstrip("\n"), "1\n2\n3")
+            self.assertEqual(app.program_compare_right_gutter.get("1.0", "end-1c").rstrip("\n"), "1\n2\n3")
 
             # Three selected: compare is disabled again.
             plans.append(FilePlan("c_R.MPF", "mpf", "R", "R.MPF", "keep"))
@@ -553,8 +553,8 @@ class LayoutWidgetTests(unittest.TestCase, LayoutWidgetMixin):
             app.populate_file_tables()
             app.keep_table.selection_set(("0", "1"))
             app.compare_selected_programs()
-            self.assertEqual(app.program_compare_left_gutter.get("1.0", "end-1c"), "1\n2")
-            self.assertEqual(app.program_compare_right_gutter.get("1.0", "end-1c"), "1\n2\n3")
+            self.assertEqual(app.program_compare_left_gutter.get("1.0", "end-1c").rstrip("\n"), "1\n2")
+            self.assertEqual(app.program_compare_right_gutter.get("1.0", "end-1c").rstrip("\n"), "1\n2\n3")
         finally:
             root.destroy()
 
