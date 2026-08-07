@@ -18,9 +18,11 @@ from .core import (
     Config,
     DEFAULT_NAME_PATTERN,
     FIELD_ORDER,
+    Issue,
     ProgramInfo,
     ToolInfo,
     align_lines,
+    analyze_plan_file,
     build_plan,
     calculate_stats,
     emit_event,
@@ -214,6 +216,18 @@ def choose_ui_font_family(available_families):
     return "TkDefaultFont"
 
 
+def fixed_treeview_map(style, option):
+    """Work around the Tk 8.6.9 style.map bug that overrides tag colors.
+
+    Filtering out the (!disabled, !selected) mapping entries lets
+    tag_configure(foreground/background) render again.  Reference:
+    https://core.tcl.tk/tk/info/509cafafae
+    """
+    return [elm for elm in style.map("Treeview", query_opt=option)
+            if elm[:2] != ("!disabled", "!selected")]
+
+
+
 def font_layout_profile(measure):
     """Create deterministic table dimensions from a Treeview font measure."""
     scale = max(1.0, min(1.5, float(measure("程序名")) / 36.0))
@@ -235,7 +249,7 @@ def font_layout_profile(measure):
         max(minimum, number_width),
         stretch,
     )
-    validation_width = max(round(82 * scale), measure("999 错 / 999 警") + 20)
+    validation_width = max(round(82 * scale), measure("E999W999I999") + 20)
     return FontLayoutProfile(keep_specs, tuple(tool_specs), validation_width)
 
 
@@ -327,8 +341,9 @@ def _display_with_gap(value):
 def folder_drawing_choices(directory: Path):
     choices = []
     current = directory.resolve()
+    level_labels = ("当前", "上一级", "上二级", "上三级")
     for level in range(4):
-        label = ("当前目录" if level == 0 else "上" + str(level) + "层") + "：" + current.name
+        label = level_labels[level] + "文件夹名：" + current.name
         choices.append((label, current.name))
         current = current.parent
     return choices
@@ -432,6 +447,7 @@ class App(ttk.Frame):
         self._process_progress = None
         self._process_progress_lock = threading.Lock()
         self._scan_running = False
+        self._scan_progress = (0, 0)
         self.report = None
         self.info_vars = {}
         self.info_defaults = {key: "" for key in ("bianzhi", "shenhe", "drawing", "version", "date")}
@@ -440,6 +456,9 @@ class App(ttk.Frame):
         self.program_tools = {}
         # WP-A2：按程序名记忆的手动抬刀高度（本次运行内有效，重新扫描后保留）。
         self.apt_retract_heights = {}
+        # 识别数据页抬刀高度输入框的自动填充基准值：失焦时值未变则不提交，
+        # 避免“切页即误设抬刀高度”的假象（仅回车/确认按钮真正提交）。
+        self._apt_retract_baseline = ""
         self.current_program = None
         self.detail_notebook = None
         self.stats_page = None
@@ -751,11 +770,12 @@ class App(ttk.Frame):
         self.required_part_var = tk.BooleanVar(value=loaded.get("required_part", "1") == "1")
         # M03 补写位置策略（持久化）：after-s / standalone。
         self.m03_position_var = tk.StringVar(value=loaded.get("m03_position", "after-s"))
-        # F/S 上下限（持久化）：留空 = 不检查。
-        self.feed_min_var = tk.StringVar(value=loaded.get("feed_min", ""))
-        self.feed_max_var = tk.StringVar(value=loaded.get("feed_max", ""))
-        self.spindle_min_var = tk.StringVar(value=loaded.get("spindle_min", ""))
-        self.spindle_max_var = tk.StringVar(value=loaded.get("spindle_max", ""))
+        # F/S 上下限（持久化）：缺失或空白值一律回退默认（20/10000/500/12000），
+        # 避免旧版本保存的空值把输入框显示成空白；留空确认后下次仍回默认。
+        self.feed_min_var = tk.StringVar(value=loaded.get("feed_min") or "20")
+        self.feed_max_var = tk.StringVar(value=loaded.get("feed_max") or "10000")
+        self.spindle_min_var = tk.StringVar(value=loaded.get("spindle_min") or "500")
+        self.spindle_max_var = tk.StringVar(value=loaded.get("spindle_max") or "12000")
         # 换行策略（持久化）：auto / crlf / lf。
         self.newline_var = tk.StringVar(value=loaded.get("newline", "auto"))
         # 辅助指令顺序规则（持久化）：默认全部启用。
@@ -763,12 +783,6 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var = tk.BooleanVar(value=loaded.get("aux_m05_before_end", "1") == "1")
         self.aux_m08_before_cut_var = tk.BooleanVar(value=loaded.get("aux_m08_before_cut", "1") == "1")
         self.aux_m09_before_end_var = tk.BooleanVar(value=loaded.get("aux_m09_before_end", "1") == "1")
-        # F episode/peer-group 参数（持久化）：
-        #   最小重复参照数、同结构相对倍率、相对低/高容差。
-        self.feed_outlier_min_count_var = tk.StringVar(value=loaded.get("feed_outlier_min_count", "3"))
-        self.feed_outlier_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_ratio", "2"))
-        self.feed_outlier_low_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_low_ratio", "0.8"))
-        self.feed_outlier_high_ratio_var = tk.StringVar(value=loaded.get("feed_outlier_high_ratio", "1.2"))
         self.multiple_spindle_var = tk.BooleanVar(value=loaded.get("multiple_spindle_warn", "1") == "1")
         # WP-C1：文件大小/数量上限（持久化，留空 = 不限制）。
         self.max_file_size_var = tk.StringVar(value=loaded.get("max_file_size", ""))
@@ -825,10 +839,14 @@ class App(ttk.Frame):
         self.all_stats_button.grid(row=0, column=0, padx=3, sticky="w")
         self.status = tk.StringVar(value="正在扫描……")
         ttk.Label(actions, textvariable=self.status).grid(row=0, column=1, padx=12, sticky="w")
+        self.scan_progress = ttk.Progressbar(actions, orient="horizontal", mode="determinate",
+                                             maximum=100, length=120)
+        self.scan_progress.grid(row=0, column=2, padx=3, sticky="w")
+        self.scan_progress.grid_remove()
         self.export_button = ttk.Button(actions, text="导出报告", command=self.export_report, state="disabled")
-        self.export_button.grid(row=0, column=2, padx=3, sticky="e")
+        self.export_button.grid(row=0, column=3, padx=3, sticky="e")
         self.process_button = ttk.Button(actions, text="确认并执行处理", command=self.process, state="disabled")
-        self.process_button.grid(row=0, column=3, padx=3, sticky="e")
+        self.process_button.grid(row=0, column=4, padx=3, sticky="e")
 
         content = ttk.Frame(self)
         content.pack(fill="both", expand=True)
@@ -925,49 +943,87 @@ class App(ttk.Frame):
         _bind_recog_wheel(recog_frame)
         recog_canvas.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=4)
         recog_scroll.pack(side="right", fill="y", pady=4)
+        # APT 轨迹面板：外框与标题字体保持原生 LabelFrame，仅内部背景与 F 概况区一致。
         apt_frame = ttk.LabelFrame(recog_frame, text="APT 轨迹（来源：最新 APTSOURCE）")
         apt_frame.pack(fill="x", pady=(0, 4))
         self.apt_trace_frame = apt_frame
+        apt_body = tk.Frame(apt_frame, bg="#eef2f7")
+        apt_body.pack(fill="both", expand=True)
         self.apt_retract_count_var = tk.StringVar(value="-")
         self.apt_xyz_var = tk.StringVar(value="-")
-        xyz_row = ttk.Frame(apt_frame)
+        xyz_row = tk.Frame(apt_body, bg="#eef2f7")
         xyz_row.pack(fill="x", padx=6, pady=(2, 0))
-        ttk.Label(xyz_row, text="XYZ 行程：", foreground="#57606a").pack(side="left")
-        ttk.Label(xyz_row, textvariable=self.apt_xyz_var, anchor="w").pack(side="left")
-        height_row = ttk.Frame(apt_frame)
+        tk.Label(xyz_row, text="XYZ 行程：", fg="#57606a", bg="#eef2f7").pack(side="left")
+        tk.Label(xyz_row, textvariable=self.apt_xyz_var, bg="#eef2f7", anchor="w").pack(side="left")
+        height_row = tk.Frame(apt_body, bg="#eef2f7")
         height_row.pack(fill="x", padx=6, pady=(0, 2))
-        ttk.Label(height_row, text="抬刀高度：").pack(side="left")
+        tk.Label(height_row, text="抬刀高度：", bg="#eef2f7").pack(side="left")
         self.apt_retract_height_var = tk.StringVar(value="")
         self.apt_retract_height_entry = ttk.Entry(height_row, textvariable=self.apt_retract_height_var, width=12)
         self.apt_retract_height_entry.pack(side="left")
         ttk.Button(height_row, text="确认", width=6, command=self._apply_apt_retract_height).pack(side="left", padx=(4, 8))
         self.apt_retract_height_entry.bind("<Return>", self._apply_apt_retract_height)
-        self.apt_retract_height_entry.bind("<FocusOut>", self._apply_apt_retract_height)
+        self.apt_retract_height_entry.bind(
+            "<FocusOut>", lambda event: self._apply_apt_retract_height(event, from_focus_out=True))
         self.apt_retract_auto_var = tk.StringVar(value="自动识别：-")
-        ttk.Label(height_row, textvariable=self.apt_retract_auto_var, foreground="#57606a").pack(side="left", padx=(0, 10))
-        ttk.Label(height_row, text="抬刀次数：").pack(side="left")
-        ttk.Label(height_row, textvariable=self.apt_retract_count_var).pack(side="left")
+        tk.Label(height_row, textvariable=self.apt_retract_auto_var, fg="#57606a",
+                 bg="#eef2f7").pack(side="left", padx=(0, 10))
+        tk.Label(height_row, text="抬刀次数：", bg="#eef2f7").pack(side="left")
+        tk.Label(height_row, textvariable=self.apt_retract_count_var, bg="#eef2f7").pack(side="left")
         self.apt_trace_hint_var = tk.StringVar(value="（回车生效并同步报告/全部程序信息）")
-        ttk.Label(height_row, textvariable=self.apt_trace_hint_var, foreground="#57606a").pack(side="left", padx=(10, 0))
-        feed_frame = ttk.LabelFrame(recog_frame, text="F 离群检测明细")
+        tk.Label(height_row, textvariable=self.apt_trace_hint_var, fg="#57606a",
+                 bg="#eef2f7").pack(side="left", padx=(10, 0))
+        feed_frame = ttk.LabelFrame(recog_frame, text="F 离群检测")
         feed_frame.pack(fill="x", pady=(2, 0))
-        self.feed_apt_feeds_var = tk.StringVar(value="APT 规划档位：-")
-        ttk.Label(feed_frame, textvariable=self.feed_apt_feeds_var).pack(anchor="w", padx=6, pady=(2, 0))
-        self.feed_common_var = tk.StringVar(value="结构参照组：-")
-        ttk.Label(feed_frame, textvariable=self.feed_common_var).pack(anchor="w", padx=6, pady=(1, 0))
-        self.feed_envelope_var = tk.StringVar(value="检测结论：-")
-        ttk.Label(feed_frame, textvariable=self.feed_envelope_var).pack(anchor="w", padx=6, pady=(1, 0))
-        outlier_row = ttk.Frame(feed_frame)
-        outlier_row.pack(fill="x", padx=6, pady=(3, 0))
-        ttk.Label(outlier_row, text="检测证据明细：", foreground="#57606a").pack(side="left")
+        # 概况区：两列网格（字段名右对齐 + 值左对齐），浅色面板让列结构清晰。
+        overview = tk.Frame(feed_frame, bg="#eef2f7")
+        overview.pack(fill="x", padx=8, pady=(4, 0))
+        overview.columnconfigure(0, minsize=72)
+        overview.columnconfigure(1, weight=1)
+        self.feed_common_var = tk.StringVar(value="抬刀平面 -")
+        self.feed_apt_feeds_var = tk.StringVar(value="-")
+        self.feed_envelope_var = tk.StringVar(value="-")
+        overview_fields = (
+            ("分段统计", self.feed_common_var),
+            ("APT 参考", self.feed_apt_feeds_var),
+            ("检测结论", self.feed_envelope_var),
+        )
+        for index, (field_text, _variable) in enumerate(overview_fields):
+            tk.Label(overview, text=field_text, fg="#57606a", bg="#eef2f7", anchor="e").grid(
+                row=index, column=0, sticky="e", padx=(0, 10), pady=3)
+        tk.Label(overview, textvariable=self.feed_common_var, bg="#eef2f7", anchor="w").grid(
+            row=0, column=1, sticky="w", pady=3)
+        tk.Label(overview, textvariable=self.feed_apt_feeds_var, bg="#eef2f7", anchor="w").grid(
+            row=1, column=1, sticky="w", pady=3)
+        self.feed_envelope_label = tk.Label(overview, textvariable=self.feed_envelope_var,
+                                             bg="#eef2f7", anchor="w")
+        self.feed_envelope_label.grid(row=2, column=1, sticky="w", pady=3)
+        # 证据明细：行/F 值/结论/原因/段/次数/最小差距/参照值/APT 参考/原始行。
+        ttk.Label(feed_frame, text="检测证据明细", foreground="#57606a").pack(anchor="w", padx=8, pady=(6, 0))
         self.feed_outlier_table = self._table(
             feed_frame,
-            ("line", "value", "status", "reason", "peer_group", "reference", "ratio", "confidence", "in_apt", "text"),
-            ("行", "F 值", "结论", "原因", "结构组", "参照 F", "相对倍率", "置信度", "APT 参考", "原始行"),
-            (45, 65, 65, 125, 190, 70, 75, 65, 80, 280),
+            ("line", "value", "status", "reason", "segment", "count", "gap", "reference", "in_apt", "text"),
+            ("行", "F 值", "结论", "原因", "段", "次数", "最小差距", "参照值", "APT 参考", "原始行"),
+            (45, 60, 70, 125, 40, 45, 70, 150, 80, 260),
             height=3,
         )
-        self.feed_outlier_table.pack(fill="x", padx=6, pady=(2, 4))
+        self.feed_outlier_table.pack(fill="x", padx=8, pady=(2, 2))
+        self.feed_outlier_table.tag_configure("warning", foreground="#c0392b")
+        self.feed_outlier_table.tag_configure("review", foreground="#b9770e")
+        self.feed_outlier_table.tag_configure("boundary", foreground="#7d3c98")
+        # 单段分布表（无参照、退化为人工判定时展示），含 F 最小值/最大值。
+        self.feed_dist_frame = ttk.LabelFrame(feed_frame, text="单段分布表（无参照，人工判定）")
+        self.feed_dist_range_var = tk.StringVar(value="F 范围：-")
+        ttk.Label(self.feed_dist_frame, textvariable=self.feed_dist_range_var,
+                  foreground="#57606a").pack(anchor="w", padx=6, pady=(2, 0))
+        self.feed_distribution_table = self._table(
+            self.feed_dist_frame,
+            ("value", "count", "first_line", "note"),
+            ("F 值", "次数", "首次行号", "备注"),
+            (70, 60, 80, 320),
+            height=3,
+        )
+        self.feed_distribution_table.pack(fill="x", padx=6, pady=(2, 4))
         # 子控件全部创建后递归绑定滚轮（识别数据页内容区整体可滚动）。
         _bind_recog_wheel(recog_frame)
         diff_frame = ttk.Frame(notebook)
@@ -1072,6 +1128,13 @@ class App(ttk.Frame):
         for the validation column. This allows only the validation cell to be
         rendered red/bold while the program metadata remains normal.
         """
+        # Tk 8.6.9 style.map bug: 应用官方补丁让 tag_configure 颜色恢复生效。
+        style = ttk.Style(self.master)
+        style.map(
+            "Treeview",
+            foreground=fixed_treeview_map(style, "foreground"),
+            background=fixed_treeview_map(style, "background"),
+        )
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(0, weight=1)
@@ -1092,9 +1155,11 @@ class App(ttk.Frame):
                 column, width=minimum, minwidth=minimum, stretch=stretch, anchor="w"
             )
         issue.heading("issues", text="校验")
-        issue.column("issues", width=self.validation_column_width, minwidth=self.validation_column_width, stretch=False, anchor="w")
+        issue.column("issues", width=self.validation_column_width, minwidth=self.validation_column_width, stretch=False, anchor="center")
         issue.tag_configure("validation-error", foreground="#c62828", font=(self.ui_font_family, 9, "bold"))
-        issue.tag_configure("validation-warning", foreground="#c62828", font=(self.ui_font_family, 9, "bold"))
+        issue.tag_configure("validation-warning", foreground="#b54708", font=(self.ui_font_family, 9, "bold"))
+        issue.tag_configure("validation-info", foreground="#1565c0")
+        issue.tag_configure("validation-none", foreground="#57606a")
         ybar = ttk.Scrollbar(frame, orient="vertical")
         xbar = ttk.Scrollbar(frame, orient="horizontal", command=main.xview)
         def move_y(*args):
@@ -1148,6 +1213,7 @@ class App(ttk.Frame):
         main._keep_frame = frame
         issue._keep_frame = frame
         return main, issue
+
 
     def _bind_cell_tooltip(self, tree):
         """Show a floating hint with the full cell content after a hover delay.
@@ -1306,10 +1372,6 @@ class App(ttk.Frame):
             "aux_m05_before_end": self.aux_m05_before_end_var.get(),
             "aux_m08_before_cut": self.aux_m08_before_cut_var.get(),
             "aux_m09_before_end": self.aux_m09_before_end_var.get(),
-            "feed_outlier_min_count": self.feed_outlier_min_count_var.get(),
-            "feed_outlier_ratio": self.feed_outlier_ratio_var.get(),
-            "feed_outlier_low_ratio": self.feed_outlier_low_ratio_var.get(),
-            "feed_outlier_high_ratio": self.feed_outlier_high_ratio_var.get(),
             "multiple_spindle": self.multiple_spindle_var.get(),
             "max_file_size": self.max_file_size_var.get(),
             "max_files": self.max_files_var.get(),
@@ -1336,7 +1398,7 @@ class App(ttk.Frame):
         def content_cell(page, row):
             """返回第 row 行的内容容器（col1）：控件 + ? 说明紧邻，行尾放按钮。"""
             cell = ttk.Frame(page)
-            cell.grid(row=row, column=1, sticky="w", pady=3)
+            cell.grid(row=row, column=1, sticky="ew", pady=3)
             return cell
 
         # ── 基本设置：文件处理 / 文件类型 / 目录与存储 ──
@@ -1353,7 +1415,7 @@ class App(ttk.Frame):
         cell = content_cell(file_box, 1)
         ttk.Entry(cell, textvariable=self.allowed_name_pattern_var, width=24).pack(side="left")
         self._settings_help_label(cell, "程序名允许字符", "程序名允许字符：用于校验提取到的程序名（正则表达式）。默认允许中文、英文、数字、下划线和连字符；与默认规则不一致时提示手动确认。").pack(side="left", padx=(4, 0))
-        ttk.Button(cell, text="恢复默认", command=lambda: self.allowed_name_pattern_var.set(DEFAULT_NAME_PATTERN)).pack(side="left", padx=(12, 0))
+        ttk.Button(cell, text="恢复默认", command=lambda: self.allowed_name_pattern_var.set(DEFAULT_NAME_PATTERN)).pack(side="right", padx=(12, 0))
 
         ttk.Label(file_box, text="单文件大小上限（字节）").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
         cell = content_cell(file_box, 2)
@@ -1372,7 +1434,7 @@ class App(ttk.Frame):
         cell = content_cell(type_box, 0)
         ttk.Entry(cell, textvariable=self.delete_extensions_var, width=24).pack(side="left")
         self._settings_help_label(cell, "待删除扩展名", "待删除扩展名：逗号分隔的扩展名列表（如 .log,.moaptindexes），大小写不敏感。扫描到的这些扩展名文件将在执行目录处理时清理；留空表示不清理任何中间文件。").pack(side="left", padx=(4, 0))
-        ttk.Button(cell, text="恢复默认", command=lambda: self.delete_extensions_var.set(".log, .moaptindexes")).pack(side="left", padx=(12, 0))
+        ttk.Button(cell, text="恢复默认", command=lambda: self.delete_extensions_var.set(".log, .moaptindexes")).pack(side="right", padx=(12, 0))
 
         ttk.Label(type_box, text="主程序扩展名").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
         cell = content_cell(type_box, 1)
@@ -1450,23 +1512,15 @@ class App(ttk.Frame):
         ttk.Label(limit_frame, text="~").pack(side="left", padx=4)
         ttk.Entry(limit_frame, textvariable=self.spindle_max_var, width=8).pack(side="left", padx=2)
         self._settings_help_label(cell, "F/S 上下限", "F/S 上下限：F 为进给、S 为主轴转速。默认 F 20~10000、S 500~12000；留空表示不检查对应方向。正文中的 F/S 值低于下限或高于上限时按错误上报（feed-range/spindle-range），用于拦截误输（如 F 多打一位）。").pack(side="left", padx=(4, 0))
+        ttk.Button(cell, text="恢复默认", command=self._reset_feed_limits).pack(side="right", padx=(12, 0))
 
         outlier_box = ttk.LabelFrame(rules, text="F 离群与 S 警告", padding=(8, 4))
         outlier_box.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         outlier_box.columnconfigure(1, weight=1)
         ttk.Label(outlier_box, text="F 离群校验").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
         cell = content_cell(outlier_box, 0)
-        feed_outlier_frame = ttk.Frame(cell)
-        feed_outlier_frame.pack(side="left")
-        ttk.Label(feed_outlier_frame, text="最小参照数≥").pack(side="left")
-        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_min_count_var, width=5).pack(side="left", padx=2)
-        ttk.Label(feed_outlier_frame, text="相对倍率×").pack(side="left", padx=(10, 0))
-        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_ratio_var, width=5).pack(side="left", padx=2)
-        ttk.Label(feed_outlier_frame, text="低容差×").pack(side="left", padx=(10, 0))
-        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_low_ratio_var, width=5).pack(side="left", padx=2)
-        ttk.Label(feed_outlier_frame, text="高容差×").pack(side="left", padx=(10, 0))
-        ttk.Entry(feed_outlier_frame, textvariable=self.feed_outlier_high_ratio_var, width=5).pack(side="left", padx=2)
-        self._settings_help_label(cell, "F 离群校验", "F 离群校验按程序自身结构建立 episode 和 peer group，不绑定固定合法 F 数值。每个显式 F 开始一个 episode，后续模态继承行只补充结构，不增加样本权重；同轴类别、G 指令模态、Z 方向、抬刀状态和动作角色相同的 episode 才互相参照。最小参照数控制形成稳定重复模式的门槛；相对倍率使用 log(F) 距离判断明显偏离；低/高容差是同结构参照的相对容差，不是全局包络。结构组少于 3 个 episode、没有重复参照或模式不稳定时只显示“证据不足”，不生成离群告警。APT 仅作上下文辅助，不能豁免同结构离群。").pack(side="left", padx=(4, 0))
+        ttk.Label(cell, text="抬刀平面分段对比，容差固定 30%（罕见 ≤2 次 + 与其他段差距）").pack(side="left")
+        self._settings_help_label(cell, "F 离群校验", "F 离群校验采用抬刀平面分段对比：程序以抬刀平面（最大 Z 簇）切分为多个“来回”段，每段统计运动行的有效 F（含模态继承）。全程序出现 ≤2 次的 F 值若与其他段所有 F 的相对差距都超过 30%，输出提示——差距 >60% 为警告，30%~60% 为复核；所有出现行均为纯 Z 运动（有 Z、无 X/Y）的轴向切入值按规则豁免，不绑定任何具体 F 数值。容差为固定参数，不随刀具尺寸放大。硬边界（F0、负值、上下限）独立校验，APT 档位仅作辅助上下文。").pack(side="left", padx=(4, 0))
 
         cell = content_cell(outlier_box, 1)
         ttk.Checkbutton(cell, text="多 S 值警告", variable=self.multiple_spindle_var).pack(side="left")
@@ -1582,10 +1636,6 @@ class App(ttk.Frame):
             "aux_m05_before_end": "1" if value.aux_m05_before_end_var.get() else "0",
             "aux_m08_before_cut": "1" if value.aux_m08_before_cut_var.get() else "0",
             "aux_m09_before_end": "1" if value.aux_m09_before_end_var.get() else "0",
-            "feed_outlier_min_count": value.feed_outlier_min_count_var.get().strip(),
-            "feed_outlier_ratio": value.feed_outlier_ratio_var.get().strip(),
-            "feed_outlier_low_ratio": value.feed_outlier_low_ratio_var.get().strip(),
-            "feed_outlier_high_ratio": value.feed_outlier_high_ratio_var.get().strip(),
             "multiple_spindle_warn": "1" if value.multiple_spindle_var.get() else "0",
             "max_file_size": value.max_file_size_var.get().strip(),
             "max_files": value.max_files_var.get().strip(),
@@ -1638,10 +1688,6 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var.set(defaults["aux_m05_before_end"] == "1")
         self.aux_m08_before_cut_var.set(defaults["aux_m08_before_cut"] == "1")
         self.aux_m09_before_end_var.set(defaults["aux_m09_before_end"] == "1")
-        self.feed_outlier_min_count_var.set(defaults["feed_outlier_min_count"])
-        self.feed_outlier_ratio_var.set(defaults["feed_outlier_ratio"])
-        self.feed_outlier_low_ratio_var.set(defaults["feed_outlier_low_ratio"])
-        self.feed_outlier_high_ratio_var.set(defaults["feed_outlier_high_ratio"])
         self.multiple_spindle_var.set(defaults["multiple_spindle_warn"] == "1")
         self.max_file_size_var.set(defaults["max_file_size"])
         self.max_files_var.set(defaults["max_files"])
@@ -1653,6 +1699,13 @@ class App(ttk.Frame):
         self.info_vars["shenhe"].set("")
         self.info_defaults["bianzhi"] = ""
         self.info_defaults["shenhe"] = ""
+
+    def _reset_feed_limits(self):
+        """恢复 F/S 上下限默认值（F 20~10000、S 500~12000）。"""
+        self.feed_min_var.set("20")
+        self.feed_max_var.set("10000")
+        self.spindle_min_var.set("500")
+        self.spindle_max_var.set("12000")
 
     def _restore_default_settings(self):
         """恢复全部默认值：保存位置切回注册表，并清空另外两处可能残留的配置（含编制/审核）。"""
@@ -1689,10 +1742,6 @@ class App(ttk.Frame):
         self.aux_m05_before_end_var.set(snapshot.get("aux_m05_before_end", self.aux_m05_before_end_var.get()))
         self.aux_m08_before_cut_var.set(snapshot.get("aux_m08_before_cut", self.aux_m08_before_cut_var.get()))
         self.aux_m09_before_end_var.set(snapshot.get("aux_m09_before_end", self.aux_m09_before_end_var.get()))
-        self.feed_outlier_min_count_var.set(snapshot.get("feed_outlier_min_count", self.feed_outlier_min_count_var.get()))
-        self.feed_outlier_ratio_var.set(snapshot.get("feed_outlier_ratio", self.feed_outlier_ratio_var.get()))
-        self.feed_outlier_low_ratio_var.set(snapshot.get("feed_outlier_low_ratio", self.feed_outlier_low_ratio_var.get()))
-        self.feed_outlier_high_ratio_var.set(snapshot.get("feed_outlier_high_ratio", self.feed_outlier_high_ratio_var.get()))
         self.multiple_spindle_var.set(snapshot.get("multiple_spindle", self.multiple_spindle_var.get()))
         self.max_file_size_var.set(snapshot.get("max_file_size", self.max_file_size_var.get()))
         self.max_files_var.set(snapshot.get("max_files", self.max_files_var.get()))
@@ -1759,8 +1808,9 @@ class App(ttk.Frame):
                 except (IndexError, TypeError, ValueError):
                     continue
         self.show_selected()
-        # WP-P3：末尾保留一次轻量扫描，刷新图号候选等目录级全局数据（扫描本身在后台线程执行）。
-        self.scan()
+        # WP-P3：全部应用只做内存级重处理并刷新预览，不重新扫描目录——
+        # 文件列表、图号候选（文件夹名/APT 头部）与配对关系不会因应用头部信息而改变，
+        # 避免触发两阶段重扫带来的“分析中…”闪烁与按钮短暂禁用。
 
     def _show_overwrite_help(self):
         messagebox.showinfo(
@@ -1875,10 +1925,6 @@ class App(ttk.Frame):
             spindle_max=spindle_max,
             newline=self.newline_var.get(),
             aux_checks={name for name, enabled in aux_flags.items() if enabled},
-            feed_outlier_min_count=int(parse_positive_default(self.feed_outlier_min_count_var.get(), 3.0)),
-            feed_outlier_ratio=parse_positive_default(self.feed_outlier_ratio_var.get(), 2.0),
-            feed_outlier_low_ratio=parse_positive_default(self.feed_outlier_low_ratio_var.get(), 0.8),
-            feed_outlier_high_ratio=parse_positive_default(self.feed_outlier_high_ratio_var.get(), 1.2),
             multiple_spindle_warn=self.multiple_spindle_var.get(),
             ask_backup=self.ask_backup_var.get(),
             max_file_size=parse_non_negative_int(self.max_file_size_var.get()),
@@ -1890,6 +1936,14 @@ class App(ttk.Frame):
         return ProgramInfo(self.applied_info.bianzhi, self.applied_info.shenhe, self.applied_info.drawing_number, self.applied_info.part_version, "", "SIE840D", self.applied_info.date)
 
     def scan(self, *, overwrite_fields=None):
+        """Two-phase scan: light plan first, deep analysis in the background.
+
+        Phase 1 builds the plan synchronously (file list/actions/duplicates,
+        no per-file analysis) so the file tables appear immediately.  Phase 2
+        runs analyze_plan_file per MPF on a worker thread and refreshes the
+        detail panel/progress as each file completes; the apply/process
+        buttons stay disabled until the whole directory is analyzed.
+        """
         self._scan_running = True
         self.apply_all_button.configure(state="disabled")
         self.apply_selected_button.configure(state="disabled")
@@ -1906,20 +1960,99 @@ class App(ttk.Frame):
             # 预览模式：始终按表单值覆盖可编辑字段生成预览（显示修改效果）。
             config.overwrite_fields = overwrite_fields
         info = self.info()
-        def work():
-            try:
-                result = build_plan(scan_directory(str(self.workdir), config), info, config, self.program_tools)
-            except Exception:
-                self._safe_after(0, lambda: self._finish_scan_error(generation))
-                return
+        try:
+            # Phase 1: lightweight plan.  APTSOURCE actions, duplicate
+            # resolution and drawing candidates are ready; per-file analysis
+            # is deferred to keep the file list responsive.
+            result = build_plan(scan_directory(str(self.workdir), config), info, config,
+                                self.program_tools, analyze=False)
+        except Exception:
+            self._finish_scan_error(generation)
+            return
+        self.scan_result = result
+        self._scan_progress = (0, sum(f.kind == "mpf" for f in result.files))
+        self.populate_file_tables()
+        self.scan_progress.configure(maximum=max(1, self._scan_progress[1]), value=0)
+        self.scan_progress.grid()
+        self.status.set(f"已列出 {len(result.files)} 个文件，正在后台分析……")
+
+        def analyze_background():
+            context = result.analyze_context
+            directory = context["directory"]
+            latest_apt = context["latest_apt"]
+            auto_tools = context["auto_tools"]
+            feed_reference = context["feed_reference"]
+            tool_overrides = context["tool_overrides"]
+            mpf_items = [item for item in result.files
+                         if item.kind == "mpf" and item.program and item.original_text is not None]
+            # 优先分析当前选中文件，其余按列表顺序后台补齐。
+            selection = self.keep_table.selection()
+            if selection:
+                try:
+                    selected_index = int(selection[0])
+                    selected_plan = result.files[selected_index]
+                    if selected_plan in mpf_items:
+                        mpf_items.remove(selected_plan)
+                        mpf_items.insert(0, selected_plan)
+                except (IndexError, TypeError, ValueError):
+                    pass
+            done = 0
+            total = len(mpf_items)
+            for item in mpf_items:
+                try:
+                    analyze_plan_file(item, directory, info, config, latest_apt,
+                                      auto_tools, feed_reference, tool_overrides,
+                                      context["mpf_sources"])
+                except Exception:
+                    item.issues.append(Issue(item.source, 1, "", "processing", "error",
+                                             "后台分析失败"))
+                done += 1
+                self._safe_after(0, lambda done=done, item=item: self._refresh_analyzed_file(item, done, generation))
             self._safe_after(0, lambda: self.finish_scan(result, generation))
-        threading.Thread(target=work, daemon=True).start()
+
+        threading.Thread(target=analyze_background, daemon=True).start()
+
+    def _refresh_analyzed_file(self, item, done, generation):
+        """Main-thread refresh after one file finishes background analysis."""
+        if generation != self._scan_generation:
+            return
+        self._scan_progress = (done, self._scan_progress[1] if self._scan_progress else done)
+        self.scan_progress.configure(value=done)
+        selected = self.selected_plan()
+        if selected is item:
+            self.show_selected()
+        if item.kind == "mpf":
+            errors = sum(i.severity == "error" for i in item.issues)
+            warnings = sum(i.severity == "warning" for i in item.issues)
+            infos = sum(i.severity == "info" for i in item.issues)
+            issue_text = f"E{errors} W{warnings} I{infos}"
+            tag = ("validation-error" if errors
+                   else ("validation-warning" if warnings
+                         else ("validation-info" if infos
+                               else "validation-none")))
+            row_id = None
+            for index, plan_file in enumerate(self.scan_result.files):
+                if plan_file is item:
+                    row_id = str(index)
+                    break
+            if row_id and self.keep_table.exists(row_id):
+                self.keep_table.item(row_id,
+                                     values=(item.action, item.program or "待确认",
+                                             _display_with_gap(item.source),
+                                             _display_with_gap(Path(item.target).name if item.target else "")))
+                self.keep_issue_table.item(row_id,
+                                           values=(issue_text,), tags=(tag,) if tag else ())
+        self.status.set(f"正在后台分析……（{done}/{self._scan_progress[1]}）{item.source}")
+
 
     def _finish_scan_error(self, generation):
         """扫描线程异常时恢复界面状态，避免应用按钮永久禁用。"""
         if generation is not None and generation != self._scan_generation:
             return
         self._scan_running = False
+        self._scan_progress = (0, 0)
+        self.scan_progress.configure(value=0)
+        self.scan_progress.grid_remove()
         self.apply_all_button.configure(state="normal")
         self.apply_selected_button.configure(state="normal")
         self.status.set("扫描失败，请重试。")
@@ -2005,6 +2138,9 @@ class App(ttk.Frame):
         self.process_button.configure(state="normal" if result.files else "disabled")
         self.all_stats_button.configure(state="normal" if mpfs else "disabled")
         self._scan_running = False
+        self._scan_progress = (0, 0)
+        self.scan_progress.configure(value=0)
+        self.scan_progress.grid_remove()
         self.apply_all_button.configure(state="normal")
         self.apply_selected_button.configure(state="normal")
 
@@ -2082,13 +2218,22 @@ class App(ttk.Frame):
             range(len(self.scan_result.files)),
             key=lambda index: (not (self.scan_result.files[index].kind == "mpf" and self.scan_result.files[index].program is None), index),
         )
+        self._keep_order = order
         for idx in order:
             f = self.scan_result.files[idx]
             errors = sum(i.severity == "error" for i in f.issues)
             warnings = sum(i.severity == "warning" for i in f.issues)
+            infos = sum(i.severity == "info" for i in f.issues)
             if f.kind == "mpf":
-                issue_text = f"{errors} 错 / {warnings} 警"
-                tag = "validation-error" if errors else ("validation-warning" if warnings else "")
+                if f.output_text is None:
+                    issue_text = "分析中…"
+                    tag = ""
+                else:
+                    issue_text = f"E{errors} W{warnings} I{infos}"
+                    tag = ("validation-error" if errors
+                           else ("validation-warning" if warnings
+                                 else ("validation-info" if infos
+                                       else "validation-none")))
                 self.keep_table.insert("", "end", iid=str(idx), values=(
                     f.action,
                     f.program or "待确认",
@@ -2103,6 +2248,7 @@ class App(ttk.Frame):
             else:
                 reason = "按规则清理 LOG/MOAPTIndexes"
                 self.delete_table.insert("", "end", iid=str(idx), values=(f.kind, f.action, f.source, reason))
+
 
     def display_target(self, target):
         if not target:
@@ -2182,111 +2328,104 @@ class App(ttk.Frame):
         return "无数据" if value is None else (f"{value:.3f}" if isinstance(value, float) else str(value))
 
     def _show_feed_outlier(self, f):
-        """刷新 F episode/peer-group 证据区。"""
-        reason_labels = {
-            "episode-peer-outlier": "同结构参照明显偏离",
-            "compatible-peer-outlier": "兼容结构参照偏离",
-            "peer-group-too-small": "结构组样本不足",
-            "no-repeated-reference": "没有重复参照",
-            "unstable-peer-mode": "结构组模式不稳定",
-            "rare-below-common": "兼容：低于程序内参照",
-            "rare-above-common": "兼容：高于程序内参照",
-            "envelope-out": "兼容：超出相对容差",
-            "non-gear-value": "兼容：非结构参照值",
-            "boundary-error": "超上下限",
-            "cut-high-gear": "切削用抬刀大档",
-            "move-low-gear": "移动用小档",
-        }
+        """刷新 F 离群检测证据区：概况 / 证据明细（含段号与参照值）/ 单段分布表。"""
         self.clear_table(self.feed_outlier_table)
+        self.clear_table(self.feed_distribution_table)
+        self.feed_dist_frame.pack_forget()
         data = getattr(f, "feed_outlier", None) if f.kind == "mpf" else None
-        if data is None:
-            self.feed_apt_feeds_var.set("APT 进给参考：-（无 F 离群检测数据）")
-            self.feed_common_var.set("结构参照组：-")
-            self.feed_envelope_var.set("检测结论：-")
+        if data is None or data.safe_plane is None:
+            self.feed_common_var.set("抬刀平面 -")
+            self.feed_apt_feeds_var.set("无检测数据")
+            self.feed_envelope_var.set("-")
             return
+        segments = data.segments or []
+        if len(segments) <= 1:
+            if data.reference_count:
+                mode = f"｜跨程序参照 {data.reference_count} 个常见档位"
+            else:
+                mode = "｜单段分布表兜底（人工判定）"
+        else:
+            mode = "｜段间对比"
+        self.feed_common_var.set(
+            f"抬刀平面 {data.safe_plane:g}｜{len(segments)} 段｜容差 {data.tolerance:.0%}{mode}")
         if data.apt_feeds:
             feeds = "、".join(f"{v:g}" for v in data.apt_feeds)
-            self.feed_apt_feeds_var.set(f"APT 进给参考：{feeds}（仅辅助上下文，不是合法值白名单）")
+            self.feed_apt_feeds_var.set(f"{feeds}（仅辅助上下文，非合法值白名单）")
         else:
-            self.feed_apt_feeds_var.set("APT 进给参考：无（仅按程序自身结构比较）")
-        common = data.common_feeds or []
-        groups = getattr(data, "peer_groups", {}) or {}
-        compatible_groups = getattr(data, "compatible_peer_groups", {}) or {}
-        stable_groups = sum(1 for item in groups.values()
-                            if isinstance(item, dict) and item.get("mode_stable") and item.get("common_feeds"))
-        common_hint = "、".join(f"{v:g}" for v in common) if common else "无"
-        phase_counts = {}
-        for episode in getattr(data, "episodes", []) or []:
-            role = episode.get("phase_role") if isinstance(episode, dict) else None
-            if role:
-                phase_counts[role] = phase_counts.get(role, 0) + 1
-        phase_hint = "、".join(
-            f"{role} {count}" for role, count in sorted(phase_counts.items())
-        ) if phase_counts else "无"
-        self.feed_common_var.set(
-            f"结构参照组：{len(groups)} 组，稳定重复参照 {stable_groups} 组；"
-            f"兼容父组 {len(compatible_groups)} 组；阶段：{phase_hint}；兼容汇总 F：{common_hint}"
-            f"（最小参照数 ≥{data.min_count}，不代表固定合法档位）")
-        outlier_count = len(data.outliers or [])
-        boundary_count = len(data.boundary_errors or [])
-        context_count = len(data.context_reviews or [])
-        evidence_count = len(getattr(data, "insufficient_evidence", []) or [])
-        coverage = getattr(data, "coverage", {}) or {}
+            self.feed_apt_feeds_var.set("无（仅按程序自身结构比较）")
+        outliers = data.outliers or []
+        boundary_errors = data.boundary_errors or []
+        distribution = data.distribution or []
+        warning = sum(1 for item in outliers if item.get("level") == "warning")
+        review = sum(1 for item in outliers if item.get("level") == "review")
         self.feed_envelope_var.set(
-            f"检测结论：离群 {outlier_count}，边界错误 {boundary_count}，上下文复核 {context_count}，"
-            f"证据不足 {evidence_count}；覆盖 {coverage.get('compared_episodes', 0)}/"
-            f"{coverage.get('total_episodes', 0)}，未比较 {coverage.get('uncompared_episodes', 0)}；"
-            f"倍率阈值 ×{data.ratio:g}，低/高容差 ×{getattr(data, 'low_ratio', 0.8):g}/×{getattr(data, 'high_ratio', 1.2):g}")
-        outlier_rows = []
-        for out in data.outliers:
-            row = dict(out)
-            row["status"] = "离群告警"
-            outlier_rows.append(row)
-        for item in data.boundary_errors:
-            row = dict(item)
-            row.setdefault("in_apt", False)
-            row["reason"] = "boundary-error"
-            row["status"] = "边界错误"
-            outlier_rows.append(row)
-        for item in data.context_reviews:
-            row = dict(item)
-            row.setdefault("in_apt", False)
-            row["status"] = "上下文复核"
-            outlier_rows.append(row)
-        for item in getattr(data, "insufficient_evidence", []) or []:
-            row = dict(item)
-            row.setdefault("in_apt", bool(row.get("in_apt_values")))
-            if not row.get("line") and row.get("episode_lines"):
-                row["line"] = "、".join(str(value) for value in row["episode_lines"])
-            if row.get("value") is None and row.get("feed_counts"):
-                row["value"] = "、".join(str(value) for value in sorted(row["feed_counts"]))
-            row["status"] = "证据不足"
-            outlier_rows.append(row)
-        for out in outlier_rows:
-            value = out.get("value")
+            f"警告 {warning}｜复核 {review}｜边界错误 {len(boundary_errors)}")
+        if self.feed_envelope_label is not None:
+            if warning:
+                self.feed_envelope_label.configure(foreground="#c0392b")
+            elif review:
+                self.feed_envelope_label.configure(foreground="#b9770e")
+            else:
+                self.feed_envelope_label.configure(foreground="SystemWindowText")
+        reason_labels = {
+            "segment-gap": "与其他段差距过大",
+            "cross-program-gap": "与同目录程序差距过大",
+            "boundary-error": "超上下限",
+        }
+        level_labels = {"warning": "离群告警", "review": "复核提示"}
+        rows = []
+        for item in outliers:
+            tag = item.get("level", "")
+            rows.append((item, level_labels.get(tag, tag), tag))
+        for item in boundary_errors:
+            rows.append((item, "边界错误", "boundary"))
+        has_apt = bool(data.apt_feeds)
+        for item, status, tag in rows:
+            value = item.get("value")
             value_s = f"{value:g}" if isinstance(value, (int, float)) else str(value)
-            evidence = out.get("evidence") or {}
-            reference = evidence.get("reference_feed", out.get("reference_feed"))
-            reference_s = f"{reference:g}" if isinstance(reference, (int, float)) else (str(reference or "-"))
-            relative_ratio = evidence.get("relative_ratio", out.get("relative_ratio"))
-            ratio_s = f"×{relative_ratio:.3g}" if isinstance(relative_ratio, (int, float)) else "-"
-            confidence_labels = {"high": "高", "medium": "中", "low": "低"}
-            confidence = confidence_labels.get(out.get("confidence", ""), out.get("confidence", "-"))
+            gap = item.get("gap")
+            gap_s = f"{gap:.1%}" if isinstance(gap, (int, float)) else "-"
+            reference = item.get("other_segment_feeds") or []
+            if reference:
+                reference_s = "、".join(f"{v:g}" for v in reference[:6])
+                if len(reference) > 6:
+                    reference_s += "…"
+            else:
+                reference_s = "-"
+            apt_note = (
+                "在 APT 档位内" if item.get("in_apt")
+                else ("不在 APT 档位内" if has_apt else "无 APT 参考"))
             self.feed_outlier_table.insert(
-                "", "end",
+                "", "end", tags=(tag,) if tag else (),
                 values=(
-                    out.get("line", ""),
+                    item.get("line", ""),
                     value_s,
-                    out.get("status", ""),
-                    reason_labels.get(out.get("reason", ""), out.get("reason", "")),
-                    out.get("peer_group", "-") or "-",
+                    status,
+                    reason_labels.get(item.get("reason", ""), item.get("reason", "")),
+                    item.get("segment_index", "-"),
+                    item.get("count", "-"),
+                    gap_s,
                     reference_s,
-                    ratio_s,
-                    confidence,
-                    "在 APT 档位内" if out.get("in_apt") else "不在 APT 档位内",
-                    (out.get("text") or "").strip(),
+                    apt_note,
+                    (item.get("text") or "").strip(),
                 ),
             )
+        if distribution:
+            values = [row["value"] for row in distribution]
+            if values:
+                self.feed_dist_range_var.set(
+                    f"F 范围：{min(values):g} ~ {max(values):g}（最小值 / 最大值；单次值需人工确认）")
+            for row in distribution:
+                self.feed_distribution_table.insert(
+                    "", "end",
+                    values=(
+                        f"{row['value']:g}",
+                        row.get("count", 0),
+                        row.get("first_line", ""),
+                        row.get("note") or "",
+                    ),
+                )
+            self.feed_dist_frame.pack(fill="x", padx=0, pady=(4, 0))
 
     def _insert_stats_rows(self, program, stats):
         for key in "FSXYZ":
@@ -2337,16 +2476,22 @@ class App(ttk.Frame):
         else:
             self.apt_retract_height_var.set(f"{fmt(auto_plane) if auto_plane is not None else ''}")
             count = toolpath.retract_count
+        # 记录本次自动填充/恢复的值：此后失焦未改动时不再当作人工输入提交。
+        self._apt_retract_baseline = self.apt_retract_height_var.get()
         self.apt_retract_count_var.set(str(count))
         self.apt_trace_hint_var.set("")
 
-    def _apply_apt_retract_height(self, _event=None):
+    def _apply_apt_retract_height(self, _event=None, *, from_focus_out=False):
         """提交抬刀高度修订：合法则按程序记忆并重算次数；非法回退自动值。"""
         f = self.selected_plan()
         if not f or not f.apt_toolpath:
             return
         program = f.program or ""
         raw = self.apt_retract_height_var.get().strip()
+        if from_focus_out and raw == self._apt_retract_baseline:
+            # 用户没有改动输入框（自动填充值原样失焦，例如切换页签/选择）：
+            # 不视为人工提交，避免误报“已设置抬刀高度”。
+            return
         try:
             height = float(raw)
             if height <= 0:

@@ -12,11 +12,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import ncodeprocess.gui as gui
-from ncodeprocess.core import FIELD_ORDER, FeedOutlierData, FilePlan, ProcessReport, ProgramInfo, ScanResult, ToolpathStats, calculate_stats, emit_event, reset_runtime_log, runtime_log
+from ncodeprocess.core import FIELD_ORDER, FeedOutlierData, FilePlan, Issue, ProcessReport, ProgramInfo, ScanResult, ToolpathStats, calculate_stats, emit_event, reset_runtime_log, runtime_log
 from ncodeprocess.gui import (
     App,
     centered_position,
     compact_diff_rows,
+    folder_drawing_choices,
     merge_drawing_choices,
     needs_detailed_confirmation,
 )
@@ -139,6 +140,14 @@ class DiffViewTests(unittest.TestCase):
         self.assertEqual(len(choices), 1)
         self.assertEqual(choices[0], ("MPF提取：D001", "D001"))
 
+    def test_folder_drawing_choices_labels_are_folder_names(self):
+        choices = folder_drawing_choices(Path("C:/a/b/c/d"))
+        self.assertEqual(choices[0][0], "当前文件夹名：d")
+        self.assertEqual(choices[1][0], "上一级文件夹名：c")
+        self.assertEqual(choices[2][0], "上二级文件夹名：b")
+        self.assertEqual(choices[3][0], "上三级文件夹名：a")
+        self.assertEqual([value for _label, value in choices], ["d", "c", "b", "a"])
+
 
 class ProcessingConfirmationTests(unittest.TestCase):
     def test_short_details_use_native_confirmation(self):
@@ -255,7 +264,7 @@ class FontAwareLayoutMetricTests(unittest.TestCase):
         )
         widths = {
             "程序名": 45,
-            "999 错 / 999 警": 105,
+            "E999W999I999": 105,
             "刀具号": 48,
         }
         profile = gui.font_layout_profile(lambda text: widths.get(text, 40))
@@ -305,7 +314,7 @@ class FontAwareLayoutMetricTests(unittest.TestCase):
 
         self.assertEqual(
             baseline.validation_width,
-            max(82, baseline_measure("999 错 / 999 警") + 20),
+            max(82, baseline_measure("E999W999I999") + 20),
         )
         self.assertEqual(baseline_tool["number"][1], max(base_tool["number"][1], 60))
         self.assertEqual(baseline_tool["number"][2], max(base_tool["number"][1], 60))
@@ -444,7 +453,7 @@ class LayoutWidgetTests(unittest.TestCase, LayoutWidgetMixin):
 
             self.assertIn("M03", plan.output_text)
             self.assertFalse(any(i.kind == "spindle-start" for i in plan.issues))
-            self.assertEqual(app.keep_issue_table.item("0", "values")[0], "0 错 / 0 警")
+            self.assertEqual(app.keep_issue_table.item("0", "values")[0], "E0 W0 I0")
             # The row stays selected after the table rebuild and the detail
             # views are refreshed for the re-reviewed program.
             self.assertEqual(app.keep_table.selection(), ("0",))
@@ -684,7 +693,7 @@ class LayoutWidgetTests(unittest.TestCase, LayoutWidgetMixin):
             root.destroy()
 
     def test_runtime_font_profile_is_applied_to_tables(self):
-        widths = {"程序名": 45, "999 错 / 999 警": 105, "刀具号": 48}
+        widths = {"程序名": 45, "E999W999I999": 105, "刀具号": 48}
         profile = gui.font_layout_profile(lambda text: widths.get(text, 40))
         with patch("ncodeprocess.gui.font_layout_profile", return_value=profile):
             root, app = self._build_app(1600, 900)
@@ -1134,6 +1143,50 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
+    def test_settings_feed_limits_blank_stored_value_falls_back_to_default(self):
+        # 旧版本会把空 F/S 值保存进注册表；空白值应回退显示默认（20/10000/500/12000）。
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            with patch.object(App, "scan", lambda _self: None):
+                save_all({"feed_min": "", "feed_max": "", "spindle_min": "", "spindle_max": ""},
+                         TEST_SETTINGS_KEY)
+                app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
+            self.assertEqual(app.feed_min_var.get(), "20")
+            self.assertEqual(app.feed_max_var.get(), "10000")
+            self.assertEqual(app.spindle_min_var.get(), "500")
+            self.assertEqual(app.spindle_max_var.get(), "12000")
+        finally:
+            clear_all(TEST_SETTINGS_KEY)
+            root.destroy()
+
+    def test_feed_limits_restore_button_resets_values(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.feed_min_var.set("1")
+            app.feed_max_var.set("99999")
+            app.spindle_min_var.set("2")
+            app.spindle_max_var.set("88888")
+            app._reset_feed_limits()
+            self.assertEqual(app.feed_min_var.get(), "20")
+            self.assertEqual(app.feed_max_var.get(), "10000")
+            self.assertEqual(app.spindle_min_var.get(), "500")
+            self.assertEqual(app.spindle_max_var.get(), "12000")
+        finally:
+            root.destroy()
+
+    def test_settings_dialog_has_feed_limits_restore_button(self):
+        # 两个基本设置分区 + F/S 上下限 + 底部恢复全部 = 4 个“恢复默认”按钮。
+        root, app = self._build_app(1286, 668)
+        try:
+            app.open_settings()
+            win = app.settings_window
+            buttons = [button for button in self._collect_buttons(win)
+                       if button.cget("text") == "恢复默认"]
+            self.assertEqual(len(buttons), 4)
+        finally:
+            root.destroy()
+
     def test_restore_defaults_resets_and_persists(self):
         root, app = self._build_app(1286, 668)
         try:
@@ -1211,8 +1264,10 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
         try:
             self.assertEqual(app.m03_position_var.get(), "after-s")
             self.assertEqual(app.newline_var.get(), "auto")
-            for name in ("feed_min_var", "feed_max_var", "spindle_min_var", "spindle_max_var"):
-                self.assertEqual(getattr(app, name).get(), "")
+            self.assertEqual(app.feed_min_var.get(), "20")
+            self.assertEqual(app.feed_max_var.get(), "10000")
+            self.assertEqual(app.spindle_min_var.get(), "500")
+            self.assertEqual(app.spindle_max_var.get(), "12000")
 
             app.m03_position_var.set("standalone")
             app.newline_var.set("lf")
@@ -1221,9 +1276,9 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertEqual(config.m03_position, "standalone")
             self.assertEqual(config.newline, "lf")
             self.assertEqual(config.feed_min, 100.0)
-            self.assertIsNone(config.feed_max)
-            self.assertIsNone(config.spindle_min)
-            self.assertIsNone(config.spindle_max)
+            self.assertEqual(config.feed_max, 10000.0)
+            self.assertEqual(config.spindle_min, 500.0)
+            self.assertEqual(config.spindle_max, 12000.0)
         finally:
             root.destroy()
 
@@ -1301,24 +1356,15 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
         finally:
             root.destroy()
 
-    def test_settings_dialog_has_heuristic_threshold_controls(self):
-        # WP-10：校验规则页提供 F 离群档位参数（门槛/比值/包络）、多 S 警告开关。
+    def test_settings_dialog_has_feed_segment_label_and_spindle_warn(self):
+        # 决策稿：校验规则页展示 F 分段对比固定说明 + 多 S 警告开关。
         root, app = self._build_app(1286, 668)
         try:
             app.open_settings()
             rules = app.settings_pages[1]
-            target_vars = (
-                str(app.feed_outlier_min_count_var),
-                str(app.feed_outlier_ratio_var),
-                str(app.feed_outlier_low_ratio_var),
-                str(app.feed_outlier_high_ratio_var),
-            )
-            entries = [
-                widget for widget in self._descendants(rules)
-                if widget.winfo_class() == "TEntry"
-                and str(widget.cget("textvariable")) in target_vars
-            ]
-            self.assertEqual(len(entries), 4)
+            labels = [widget.cget("text") for widget in self._descendants(rules)
+                      if widget.winfo_class() == "TLabel"]
+            self.assertTrue(any("抬刀平面分段对比" in text for text in labels))
             checkbuttons = [
                 widget for widget in self._descendants(rules)
                 if widget.winfo_class() == "TCheckbutton" and widget.cget("text").startswith("多 S 值警告")
@@ -1326,35 +1372,19 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertEqual(len(checkbuttons), 1)
         finally:
             root.destroy()
-
-    def test_config_reads_heuristic_thresholds(self):
-        # WP-10：Config 读取 GUI 输入；留空或非法输入回退默认。
+    def test_config_keeps_spindle_warn_and_drops_old_feed_params(self):
+        # 决策稿：Config 不再暴露 feed_outlier_* 四个旧参数，多 S 警告开关仍生效。
         root, app = self._build_app(1286, 668)
         try:
-            app.feed_outlier_min_count_var.set("4")
-            app.feed_outlier_ratio_var.set("1.5")
-            app.feed_outlier_low_ratio_var.set("0.7")
-            app.feed_outlier_high_ratio_var.set("1.4")
             app.multiple_spindle_var.set(False)
             config = app.config()
-            self.assertEqual(config.feed_outlier_min_count, 4)
-            self.assertEqual(config.feed_outlier_ratio, 1.5)
-            self.assertEqual(config.feed_outlier_low_ratio, 0.7)
-            self.assertEqual(config.feed_outlier_high_ratio, 1.4)
             self.assertFalse(config.multiple_spindle_warn)
-
-            app.feed_outlier_min_count_var.set("abc")
-            app.feed_outlier_ratio_var.set("")
-            app.feed_outlier_low_ratio_var.set("")
-            app.feed_outlier_high_ratio_var.set("")
-            config = app.config()
-            self.assertEqual(config.feed_outlier_min_count, 3)
-            self.assertEqual(config.feed_outlier_ratio, 2.0)
-            self.assertEqual(config.feed_outlier_low_ratio, 0.8)
-            self.assertEqual(config.feed_outlier_high_ratio, 1.2)
+            self.assertFalse(hasattr(config, "feed_outlier_min_count"))
+            self.assertFalse(hasattr(config, "feed_outlier_ratio"))
+            self.assertFalse(hasattr(config, "feed_outlier_low_ratio"))
+            self.assertFalse(hasattr(config, "feed_outlier_high_ratio"))
         finally:
             root.destroy()
-
     def test_settings_dialog_has_storage_backend_control_and_export_button(self):
         # WP-11：基本设置页提供配置保存位置下拉与导出设置按钮。
         root, app = self._build_app(1286, 668)
@@ -1400,25 +1430,22 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
                 clear_all(TEST_SETTINGS_KEY)
 
     def test_confirm_settings_saves_batch2_values(self):
-        # WP-11：确定保存后，Batch 2 + WP-10 设置写入选定后端。
+        # WP-11：确定保存后，Batch 2 设置写入选定后端。
         root, app = self._build_app(1286, 668)
         try:
             app.settings_registry_key = TEST_SETTINGS_KEY
             app.open_settings()
             app.feed_min_var.set("150")
-            app.feed_outlier_min_count_var.set("4")
             app.required_drawing_var.set(False)
             with patch.object(App, "scan"):
                 app._confirm_settings()
             loaded = load_all(TEST_SETTINGS_KEY)
             self.assertEqual(loaded.get("feed_min"), "150")
-            self.assertEqual(loaded.get("feed_outlier_min_count"), "4")
             self.assertEqual(loaded.get("required_drawing"), "0")
             self.assertEqual(loaded.get("storage_backend"), "registry")
         finally:
             clear_all(TEST_SETTINGS_KEY)
             root.destroy()
-
     def test_single_instance_mutex_name_is_stable_and_path_specific(self):
         # WP-12：同一路径生成相同互斥体名，不同路径互不相同。
         first = gui.single_instance_mutex_name(r"C:\dir\NCodeProcess.exe")
@@ -1535,6 +1562,32 @@ class ReportExportTests(unittest.TestCase):
 
 
 class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
+    def test_progressive_scan_lists_files_then_analyzes_in_background(self):
+        # 两阶段扫描：轻量计划立即列表，后台逐文件分析补齐深度结果并启用按钮。
+        root, app = self._build_app(1286, 668)
+        try:
+            workdir = Path(tempfile.mkdtemp(prefix="ncodeprocess-gui-scan-"))
+            (workdir / "x_P.MPF").write_text(
+                'MSG("PROGRAM:P")\nN1G1Z100F6000\nN2G1Z5F300\nN3G1X1Y1F1800\nN4G1Z100F6000\n',
+                encoding="utf-8")
+            app.workdir = workdir
+            with patch("ncodeprocess.gui.threading.Thread", _sync_thread(threading.Thread)):
+                app.scan()
+                # 同步线程下轻量计划已就绪：文件表立即可见。
+                self.assertIsNotNone(app.scan_result)
+                self.assertEqual(len(app.scan_result.files), 1)
+                self.assertEqual(len(app.keep_table.get_children()), 1)
+                root.update()   # 刷新 after(0) 回调（逐文件 + finish_scan）
+            mpf = app.scan_result.files[0]
+            self.assertIsNotNone(mpf.output_text)
+            self.assertIsNotNone(mpf.feed_outlier)
+            self.assertFalse(app._scan_running)
+            self.assertEqual(str(app.process_button.cget("state")), "normal")
+            self.assertEqual(str(app.apply_all_button.cget("state")), "normal")
+            self.assertEqual(app.scan_progress.winfo_ismapped(), 0)
+        finally:
+            root.destroy()
+
     def test_finish_scan_ignores_stale_generation(self):
         root, app = self._build_app(1286, 668)
         try:
@@ -1587,6 +1640,43 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
         finally:
             root.destroy()
 
+    def test_validation_column_tag_colors_by_severity(self):
+        # 校验列颜色规则：有 Error 红、仅 Warning 橙、仅 info 蓝、无问题灰。
+        root, app = self._build_app(1286, 668)
+        try:
+            def make_plan(name, issues):
+                plan = FilePlan(name + ".MPF", "mpf", name, name + ".MPF", "keep")
+                plan.original_text = 'MSG("PROGRAM:' + name + '")\nN1M30\n'
+                plan.output_text = plan.original_text
+                plan.stats = None
+                plan.issues = issues
+                return plan
+            plans = [
+                make_plan("A", [Issue("A.MPF", 1, "", "k", "error", "e")]),
+                make_plan("B", [Issue("B.MPF", 1, "", "k", "warning", "w")]),
+                make_plan("C", [Issue("C.MPF", 1, "", "k", "info", "i")]),
+                make_plan("D", []),
+            ]
+            app.scan_result = ScanResult("tmp", plans)
+            app.populate_file_tables()
+            expected = [
+                ("E1 W0 I0", "validation-error"),
+                ("E0 W1 I0", "validation-warning"),
+                ("E0 W0 I1", "validation-info"),
+                ("E0 W0 I0", "validation-none"),
+            ]
+            for iid in app.keep_issue_table.get_children():
+                values = app.keep_issue_table.item(iid, "values")
+                tags = app.keep_issue_table.item(iid, "tags")
+                self.assertIn(values[0], [item[0] for item in expected])
+                self.assertEqual(tags, (dict(expected)[values[0]],))
+            self.assertEqual(
+                str(app.keep_issue_table.tag_configure("validation-info", "foreground")), "#1565c0")
+            self.assertEqual(
+                str(app.keep_issue_table.tag_configure("validation-none", "foreground")), "#57606a")
+        finally:
+            root.destroy()
+
     def test_apply_info_does_not_rescan_whole_directory(self):
         # WP-P3：全部应用改为内存局部重处理并立即刷新预览，不再依赖整目录重扫。
         root, app = self._build_app(1286, 668)
@@ -1603,7 +1693,7 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
                 root.update()   # 同步桩下 after(0) 回调在此刷新预览
             # 内存重处理立即生效（预览刷新），不依赖整目录重扫。
             self.assertIn('MSG("DRAWING NUMBER:NEW_D")', plan.output_text or "")
-            self.assertLessEqual(scan_mock.call_count, 1)
+            scan_mock.assert_not_called()
         finally:
             root.destroy()
 
@@ -1694,15 +1784,13 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
             root.destroy()
 
     def test_recognition_data_page_contains_trace_and_feed_outlier(self):
-        # WP-A9 修订：APT 轨迹与 F 离群检测明细合并到「识别数据」页签（参数统计之后），
-        # 不再占用参数统计/校验问题主区。
+        # APT 轨迹与 F 离群检测明细合并到「识别数据」页签（参数统计之后）。
         root, app = self._build_app(1286, 668)
         try:
             tabs = [app.detail_notebook.tab(i, "text") for i in range(app.detail_notebook.index("end"))]
             self.assertEqual(tabs, ["解析信息", "校验问题", "参数统计", "识别数据", "修改差异"])
             recog_index = tabs.index("识别数据")
             recog_page = app.detail_notebook.nametowidget(app.detail_notebook.tabs()[recog_index])
-            # APT 轨迹与 F 离群明细控件父级链归属识别数据页签。
             def is_inside(widget, ancestor):
                 current = widget.master
                 while current is not None and current is not ancestor:
@@ -1711,128 +1799,212 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
 
             self.assertTrue(is_inside(app.apt_trace_frame, recog_page))
             self.assertTrue(is_inside(app.feed_outlier_table, recog_page))
-            # 抬刀高度输入框旁应有匹配的确认按钮。
             confirm_buttons = [
                 child for child in app.apt_retract_height_entry.master.winfo_children()
                 if isinstance(child, ttk.Button) and child.cget("text") == "确认"
             ]
             self.assertEqual(len(confirm_buttons), 1)
-            # F 离群明细按界面式填充：APT 档位/阶段行 + 离群明细表格。
+            # F 离群明细按界面式填充：APT 参考/分段统计 + 离群明细表格。
             plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
             plan.original_text = 'MSG("PROGRAM:P")\nN1G1X1F300\nN2G1X2F300\nN3G1X3F300\nN4G1X4F300\nN5G1X5F1500\nN6M30\n'
             plan.feed_outlier = FeedOutlierData(
+                safe_plane=100.0,
+                segments=[{"index": 1, "first_line": 1, "last_line": 6,
+                           "feed_counts": {"300": 4, "1500": 1}, "feeds": [300.0, 1500.0]}],
+                outliers=[{"line": 5, "value": 1500.0, "raw_value": "1500",
+                           "text": "N5G1X5F1500", "count": 1, "level": "warning",
+                           "reason": "segment-gap", "gap": 0.8, "axial_only": False,
+                           "in_apt": False, "segment_index": 1,
+                           "other_segment_feeds": [300.0]}],
                 apt_feeds=[300.0],
-                common_feeds=[300.0],
-                envelope=[240.0, 360.0],
-                min_count=3,
-                ratio=2.0,
-                outliers=[{"line": 5, "value": 1500.0,
-                           "reason": "rare-above-common", "in_apt": False, "text": "N5G1X5F1500"}],
             )
             app.scan_result = ScanResult("tmp", [plan])
             app.populate_file_tables()
             app.keep_table.selection_set("0")
             app.show_selected()
-            self.assertIn("APT 进给参考：300", app.feed_apt_feeds_var.get())
-            self.assertIn("结构参照组：0 组", app.feed_common_var.get())
-            self.assertIn("检测结论：离群 1", app.feed_envelope_var.get())
+            self.assertIn("300", app.feed_apt_feeds_var.get())
+            self.assertIn("抬刀平面 100", app.feed_common_var.get())
+            self.assertIn("警告 1", app.feed_envelope_var.get())
             self.assertEqual(len(app.feed_outlier_table.get_children()), 1)
         finally:
             root.destroy()
 
-    def test_feed_outlier_view_shows_peer_evidence_and_insufficient_evidence(self):
+    def test_retract_height_focus_out_without_edit_does_not_commit(self):
+        # 识别数据页自动填入抬刀高度后，切页失焦不应误报“已设置”（无用户输入不得提交）。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'
+            plan.apt_toolpath = ToolpathStats(goto_count=3, min_x=0.0, max_x=0.0,
+                                              min_y=0.0, max_y=0.0, min_z=0.0, max_z=100.0,
+                                              arc_count=0, retract_count=1, retract_plane=100.0)
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            # 自动填充值仍停留在输入框：失焦事件不得提交高度或改写状态栏。
+            self.assertEqual(app.apt_retract_height_var.get(), "100.000")
+            app.apt_retract_height_entry.event_generate("<FocusOut>")
+            root.update()
+            self.assertNotIn("P", app.apt_retract_heights)
+            self.assertNotIn("已设置 P", app.status.get())
+            self.assertEqual(app.apt_retract_heights.get("P"), None)
+            # 用户真正修改后回车/确认按钮才提交（值已变化，不再命中失焦守卫）。
+            app.apt_retract_height_var.set("150")
+            app._apply_apt_retract_height(from_focus_out=True)
+            self.assertEqual(app.apt_retract_heights.get("P"), 150.0)
+        finally:
+            root.destroy()
+
+    def test_feed_outlier_view_shows_segment_warning_review_and_boundary(self):
         root, app = self._build_app(1286, 668)
         try:
             plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
             plan.original_text = 'MSG("PROGRAM:P")\nN1G1X1F300\nN2G1X2F300\nN3G1X3F300\nN4G1X4F1500\nN5G1X5F900\nN6M30\n'
             plan.feed_outlier = FeedOutlierData(
-                apt_feeds=[300.0],
-                common_feeds=[300.0],
-                envelope=[240.0, 360.0],
-                min_count=3,
-                ratio=2.0,
-                peer_groups={
-                    "axis=xy|g=G01|z=0|retract=0|role=cut": {
-                        "sample_count": 4,
-                        "common_feeds": [300.0],
-                        "mode_stable": True,
-                    },
-                    "axis=z|g=G01|z=1|retract=0|role=plunge": {
-                        "sample_count": 1,
-                        "common_feeds": [],
-                        "mode_stable": False,
-                    },
-                },
-                compatible_peer_groups={
-                    "axes=transition|motion=linear|z=up|retract=0|role=retreat-near": {
-                        "sample_count": 2,
-                        "common_feeds": [],
-                        "mode_stable": False,
-                    },
-                },
-                episodes=[
-                    {"phase_role": "cut"},
-                    {"phase_role": "retreat-near"},
-                    {"phase_role": "retreat-clear"},
-                    {"phase_role": "move-out"},
+                safe_plane=100.0,
+                segments=[
+                    {"index": 1, "first_line": 1, "last_line": 3,
+                     "feed_counts": {"300": 3}, "feeds": [300.0]},
+                    {"index": 2, "first_line": 4, "last_line": 6,
+                     "feed_counts": {"1500": 1, "900": 1}, "feeds": [900.0, 1500.0]},
                 ],
-                coverage={"total_episodes": 4, "compared_episodes": 3, "uncompared_episodes": 1},
-                insufficient_evidence=[{
-                    "episode_lines": [5],
-                    "feed_counts": {"900.0": 1},
-                    "peer_group": "axis=z|g=G01|z=1|retract=0|role=plunge",
-                    "sample_count": 1,
-                    "reason": "peer-group-too-small",
-                    "in_apt_values": [900.0],
-                    "text": "N5G1X5F900",
-                }],
-                outliers=[{
-                    "line": 4,
-                    "value": 1500.0,
-                    "reason": "episode-peer-outlier",
-                    "in_apt": False,
-                    "peer_group": "axis=xy|g=G01|z=0|retract=0|role=cut",
-                    "sample_count": 4,
-                    "confidence": "high",
-                    "evidence": {
-                        "reference_feed": 300.0,
-                        "relative_ratio": 5.0,
-                    },
-                    "text": "N4G1X4F1500",
-                }],
+                outliers=[
+                    {"line": 4, "value": 1500.0, "raw_value": "1500",
+                     "text": "N4G1X4F1500", "count": 1, "level": "warning",
+                     "reason": "segment-gap", "gap": 0.8, "axial_only": False,
+                     "in_apt": False, "segment_index": 2,
+                     "other_segment_feeds": [300.0]},
+                    {"line": 5, "value": 900.0, "raw_value": "900",
+                     "text": "N5G1X5F900", "count": 1, "level": "review",
+                     "reason": "segment-gap", "gap": 0.667, "axial_only": False,
+                     "in_apt": True, "segment_index": 2,
+                     "other_segment_feeds": [300.0, 1500.0]},
+                ],
+                boundary_errors=[{"line": 6, "value": 20000.0, "reason": "out-of-range",
+                                  "in_apt": False, "text": "N6G1X6F20000"}],
+                apt_feeds=[900.0],
             )
             app.scan_result = ScanResult("tmp", [plan])
             app.populate_file_tables()
             app.keep_table.selection_set("0")
             app.show_selected()
-            self.assertIn("结构参照组", app.feed_common_var.get())
-            self.assertIn("retreat-near", app.feed_common_var.get())
-            self.assertIn("证据不足", app.feed_envelope_var.get())
-            self.assertIn("覆盖 3/4", app.feed_envelope_var.get())
+            self.assertIn("抬刀平面 100", app.feed_common_var.get())
+            self.assertIn("警告 1｜复核 1｜边界错误 1", app.feed_envelope_var.get())
             headings = [app.feed_outlier_table.heading(col, "text") for col in app.feed_outlier_table["columns"]]
-            self.assertIn("参照 F", headings)
-            self.assertIn("置信度", headings)
-            self.assertEqual(len(app.feed_outlier_table.get_children()), 2)
+            self.assertIn("最小差距", headings)
+            self.assertIn("参照值", headings)
+            self.assertEqual(len(app.feed_outlier_table.get_children()), 3)
             rows = [app.feed_outlier_table.item(item, "values") for item in app.feed_outlier_table.get_children()]
-            self.assertTrue(any("高" in str(row) for row in rows))
-            self.assertTrue(any("证据不足" in str(row) and "在 APT 档位内" in str(row) for row in rows))
+            self.assertTrue(any("离群告警" in str(row) and "不在 APT 档位内" in str(row) for row in rows))
+            self.assertTrue(any("复核提示" in str(row) and "在 APT 档位内" in str(row) for row in rows))
+            self.assertTrue(any("边界错误" in str(row) for row in rows))
         finally:
             root.destroy()
 
-    def test_settings_feed_help_uses_relative_peer_group_semantics(self):
+    def test_feed_outlier_view_without_apt_shows_no_apt_reference(self):
+        # 无配对 APT（apt_feeds 为空）时，APT 参考列显示“无 APT 参考”，不写“不在 APT 档位内”。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1Z100F3000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\nN5G1X3Y3F1800\nN6G1Z100F3000\nN7G1Z5F300\nN8G1X4Y4F66\nN9G1Z100F3000\n'
+            plan.feed_outlier = FeedOutlierData(
+                safe_plane=100.0,
+                segments=[{"index": 1, "first_line": 1, "last_line": 6,
+                           "feed_counts": {"300": 1, "1800": 3, "3000": 2},
+                           "feeds": [300.0, 1800.0, 3000.0]},
+                          {"index": 2, "first_line": 7, "last_line": 9,
+                           "feed_counts": {"300": 1, "66": 1, "3000": 1},
+                           "feeds": [66.0, 300.0, 3000.0]}],
+                outliers=[{"line": 8, "value": 66.0, "raw_value": "66",
+                           "text": "N8G1X4Y4F66", "count": 1, "level": "warning",
+                           "reason": "segment-gap", "gap": 0.9, "axial_only": False,
+                           "in_apt": False, "segment_index": 2,
+                           "other_segment_feeds": [300.0, 1800.0, 3000.0]}],
+                apt_feeds=[],
+            )
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            rows = [app.feed_outlier_table.item(item, "values")
+                    for item in app.feed_outlier_table.get_children()]
+            self.assertTrue(any("无 APT 参考" in str(row) for row in rows))
+            self.assertFalse(any("不在 APT 档位内" in str(row) for row in rows))
+        finally:
+            root.destroy()
+
+    def test_feed_distribution_shows_range_and_rows(self):
+        # 单段分布表（人工判定）：显示 F 最小值/最大值与明细行。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1X1F300\nN2G1X2F300\nN3G1X3F6000\nN4M30\n'
+            plan.feed_outlier = FeedOutlierData(
+                safe_plane=100.0,
+                segments=[{"index": 1, "first_line": 1, "last_line": 4,
+                           "feed_counts": {"300": 2, "6000": 1}, "feeds": [300.0, 6000.0]}],
+                distribution=[
+                    {"value": 300.0, "count": 2, "first_line": 1, "note": ""},
+                    {"value": 6000.0, "count": 1, "first_line": 3,
+                     "note": "仅出现一次，请人工确认"},
+                ],
+            )
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            self.assertIn("F 范围：300 ~ 6000", app.feed_dist_range_var.get())
+            rows = [app.feed_distribution_table.item(item, "values")
+                    for item in app.feed_distribution_table.get_children()]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(any("仅出现一次" in str(row) for row in rows))
+        finally:
+            root.destroy()
+
+    def test_feed_outlier_evidence_shows_reference_feeds(self):
+        # 证据明细表展示参照值（其它段 F / 跨程序常见档位），供人工核对最小差距来源。
+        root, app = self._build_app(1286, 668)
+        try:
+            plan = FilePlan("P.MPF", "mpf", "P", "P.MPF", "keep")
+            plan.original_text = 'MSG("PROGRAM:P")\nN1G1Z100F3000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\nN5G1X3Y3F1800\nN6G1Z100F3000\nN7G1Z5F300\nN8G1X4Y4F66\nN9G1Z100F3000\n'
+            plan.feed_outlier = FeedOutlierData(
+                safe_plane=100.0,
+                segments=[{"index": 1, "first_line": 1, "last_line": 6,
+                           "feed_counts": {"300": 1, "1800": 3, "3000": 2},
+                           "feeds": [300.0, 1800.0, 3000.0]},
+                          {"index": 2, "first_line": 7, "last_line": 9,
+                           "feed_counts": {"300": 1, "66": 1, "3000": 1},
+                           "feeds": [66.0, 300.0, 3000.0]}],
+                outliers=[{"line": 8, "value": 66.0, "raw_value": "66",
+                           "text": "N8G1X4Y4F66", "count": 1, "level": "warning",
+                           "reason": "segment-gap", "gap": 0.9, "axial_only": False,
+                           "in_apt": False, "segment_index": 2,
+                           "other_segment_feeds": [300.0, 1800.0, 3000.0]}],
+                apt_feeds=[],
+            )
+            app.scan_result = ScanResult("tmp", [plan])
+            app.populate_file_tables()
+            app.keep_table.selection_set("0")
+            app.show_selected()
+            rows = [app.feed_outlier_table.item(item, "values")
+                    for item in app.feed_outlier_table.get_children()]
+            self.assertTrue(any("300、1800、3000" in str(row) for row in rows))
+            self.assertTrue(any("66" in str(row) for row in rows))
+        finally:
+            root.destroy()
+    def test_settings_feed_section_uses_segment_comparison_semantics(self):
         root, app = self._build_app(1286, 668)
         try:
             app.open_settings()
             rules = app.settings_pages[1]
             labels = [widget.cget("text") for widget in self._descendants(rules)
                       if widget.winfo_class() == "TLabel"]
-            self.assertIn("最小参照数≥", labels)
-            self.assertIn("相对倍率×", labels)
-            self.assertIn("低容差×", labels)
-            self.assertIn("高容差×", labels)
+            self.assertTrue(any("抬刀平面分段对比" in text for text in labels))
+            self.assertFalse(any(text.startswith("最小参照数") for text in labels))
+            self.assertFalse(any(text.startswith("相对倍率") for text in labels))
         finally:
             root.destroy()
-
     def test_settings_window_is_centered(self):
         root, app = self._build_app(1286, 668)
         try:

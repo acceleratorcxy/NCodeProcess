@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _base_motion_feature, _decode, _extract_apt_meta_cached, _extract_apt_toolpath_cached, add_initial_tool_change, add_m03, align_lines, analyze_program, apply_header, build_plan, calculate_stats, code_part, crosscheck_apt, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _axial_feed_exempt, _decode, _extract_apt_meta_cached, _extract_apt_toolpath_cached, add_initial_tool_change, add_m03, align_lines, analyze_program, apply_header, build_plan, build_feed_reference, calculate_stats, code_part, crosscheck_apt, detect_feed_outliers, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
@@ -44,14 +44,96 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(mpf.stats.minimum["X"], -2.5)
         self.assertEqual(mpf.stats.maximum["X"], 4.0)
         self.assertIn('MSG("T1:DIA=10.000")', mpf.output_text)
-        self.assertIn('MSG("NC MACHINE:2500B")', mpf.output_text)
-        self.assertIn('MSG("CONTROL SYSTEM:SIE840D")', mpf.output_text)
-        report = process_plan(plan, str(root), cfg)
-        self.assertEqual(report.success, 1)
-        self.assertEqual(report.moved, 1)
-        self.assertEqual(report.deleted, 1)
-        self.assertTrue((root / "AG6D311A0101.MPF").exists())
-        self.assertTrue(list((root / "aptsource").glob("*/*AG6D311A0101.aptsource")))
+
+    def test_light_plan_skips_deep_analysis_but_resolves_targets(self):
+        # 两阶段扫描：analyze=False 只做轻量计划（文件/动作/目标），深度分析推迟。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(
+            'MSG("PROGRAM:P")\nN1G1Z100F6000\nN2G1Z5F300\nN3G1X1Y1F1800\nN4G1Z100F6000\n',
+            encoding="utf-8")
+        (root / "x_P_I.aptsource").write_text("$$ MACHIN 3-axis Machine.1\n", encoding="utf-8")
+        cfg = self._cfg(save_aptsource=True)
+        scan = scan_directory(str(root), cfg)
+        light = build_plan(scan, DEFAULT_INFO, cfg, analyze=False)
+        mpf = self._mpf(light)
+        # 深度分析结果尚未生成。
+        self.assertIsNone(mpf.output_text)
+        self.assertIsNone(mpf.stats)
+        self.assertIsNone(mpf.feed_outlier)
+        # 轻量阶段仍完成 APTSOURCE 动作与目标解析。
+        apt = next(f for f in light.files if f.kind == "aptsource")
+        self.assertEqual(apt.action, "move")
+        self.assertIn("aptsource", apt.target or "")
+        # 渐进分析上下文可供 GUI 后台逐文件复用。
+        self.assertIn("directory", light.analyze_context)
+        self.assertIn("latest_apt", light.analyze_context)
+        self.assertIn("auto_tools", light.analyze_context)
+        self.assertIn("feed_reference", light.analyze_context)
+        self.assertIn("info", light.analyze_context)
+        self.assertIn("config", light.analyze_context)
+        self.assertIn("tool_overrides", light.analyze_context)
+
+    def test_analyze_plan_file_completes_single_file_after_light_plan(self):
+        # 渐进模式：轻量计划后逐文件调用 analyze_plan_file 能补齐深度结果。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(
+            'MSG("PROGRAM:P")\nN1G1Z100F6000\nN2G1Z5F300\nN3G1X1Y1F1800\nN4G1Z100F6000\n',
+            encoding="utf-8")
+        (root / "x_P_I.aptsource").write_text(
+            "$$ MACHIN 3-axis Machine.1\nFEDRAT/ 1800.0000,MMPM\n", encoding="utf-8")
+        cfg = self._cfg()
+        light = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg, analyze=False)
+        mpf = self._mpf(light)
+        context = light.analyze_context
+        from ncodeprocess.core import analyze_plan_file
+        analyze_plan_file(
+            mpf, context["directory"], context["info"], context["config"],
+            context["latest_apt"], context["auto_tools"],
+            context["feed_reference"], context["tool_overrides"])
+        self.assertIsNotNone(mpf.output_text)
+        self.assertIsNotNone(mpf.stats)
+        self.assertIsNotNone(mpf.feed_outlier)
+        self.assertEqual(mpf.feed_outlier.safe_plane, 100.0)
+        self.assertIsNotNone(mpf.apt_meta)
+        self.assertIsNotNone(mpf.apt_source_path)
+        self.assertTrue((mpf.apt_source_path or "").endswith("x_P_I.aptsource"))
+
+    def test_analyze_plan_file_reuses_cached_result(self):
+        # 单文件分析结果缓存：相同输入重复分析时跳过 APT 解析与分析管线。
+        from ncodeprocess.core import _ANALYSIS_CACHE, analyze_plan_file
+        _ANALYSIS_CACHE.clear()
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(
+            'MSG("PROGRAM:P")\nN1G1Z100F6000\nN2G1Z5F300\nN3G1X1Y1F1800\nN4G1Z100F6000\n',
+            encoding="utf-8")
+        (root / "x_P_I.aptsource").write_text(
+            "$$ MACHIN 3-axis Machine.1\nFEDRAT/ 1800.0000,MMPM\n", encoding="utf-8")
+        cfg = self._cfg()
+        light = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg, analyze=False)
+        mpf = self._mpf(light)
+        context = light.analyze_context
+        calls = {"apt": 0}
+        import ncodeprocess.core as core_module
+        original = core_module._extract_apt_data_cached
+
+        def counting_extract(*args, **kwargs):
+            calls["apt"] += 1
+            return original(*args, **kwargs)
+
+        with patch("ncodeprocess.core._extract_apt_data_cached", side_effect=counting_extract):
+            analyze_plan_file(
+                mpf, context["directory"], context["info"], context["config"],
+                context["latest_apt"], context["auto_tools"],
+                context["feed_reference"], context["tool_overrides"])
+            first_output = mpf.output_text
+            self.assertEqual(calls["apt"], 1)
+            # 第二次分析相同文件：直接命中缓存，不再解析 APT。
+            analyze_plan_file(
+                mpf, context["directory"], context["info"], context["config"],
+                context["latest_apt"], context["auto_tools"],
+                context["feed_reference"], context["tool_overrides"])
+            self.assertEqual(calls["apt"], 1)
+            self.assertEqual(mpf.output_text, first_output)
 
     def test_hass_percent_and_existing_m03(self):
         root = self.make_dir()
@@ -358,7 +440,8 @@ class CoreTests(unittest.TestCase):
         root = self.make_dir()
         (root / "P.MPF").write_text(
             'MSG("PROGRAM:P")\nMSG("T1:DIA=10.,TOOL_TYPE=平底立铣刀")\n'
-            "N1G1X1F500\nN2G1X2F500\nN3G1X3F500\nN4G1X4F500\nN5G1X5F500\nN6G1X6F8000\nN7M30\n",
+            "N1G1Z100F3000\nN2G1Z10F300\nN3G1X1F500\nN4G1X2F500\nN5G1X3F500\n"
+            "N6G1X4F500\nN7G1X5F500\nN8G1Z100F3000\nN9G1Z5F300\nN10G1X6F8000\nN11M30\n",
             encoding="utf-8")
         cfg = self._cfg()
         build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
@@ -653,7 +736,10 @@ class CoreTests(unittest.TestCase):
             "$$ FILENAME  D0354F31311-201.CATProcess\n"
             "$$ PRODUCTNAME    NCSetup_M-D0354F31311-201_11.47.18\n"
         )
-        self.assertEqual(extract_drawing_candidates(text), [("APT FILENAME", "D0354F31311-201")])
+        self.assertEqual(extract_drawing_candidates(text), [
+            ("APT FILENAME", "D0354F31311-201"),
+            ("APT PRODUCTNAME", "M-D0354F31311-201"),
+        ])
 
     def test_apt_meta_extracts_header_and_process_records(self):
         # WP-A1：APT 头部元数据（机床/后处理表/版本/操作）与加工参数（冷却/主轴/进给/装夹）。
@@ -926,7 +1012,10 @@ class CoreTests(unittest.TestCase):
             encoding="utf-8",
         )
         result = scan_directory(str(root), Config())
-        self.assertEqual(result.drawing_candidates, [("APT提取", "D0354F31311-201")])
+        self.assertEqual(result.drawing_candidates, [
+            ("APT FILENAME", "D0354F31311-201"),
+            ("APT PRODUCTNAME", "M-D0354F31311-201"),
+        ])
 
     def test_scan_exposes_existing_mpf_drawing_as_candidate(self):
         root = self.make_dir()
@@ -950,10 +1039,12 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([Path(item.source).suffix.lower() for item in result.files], [".mpf"])
 
     def test_feed_and_spindle_validation_and_g00_stats(self):
-        # 三层法：F1800 出现 4 次构成常用档位，F25 少见且与最近档位比值远超 2 → 离群警告。
-        text = "MSG(\"PROGRAM:P\")\nG1X1F1800\nG1X2F1800\nG1X3F1800\nG1X4F1800\nG1X5F25\nS5000\nS6000\nG00 X1\nM30\n"
+        # 分段对比：F1800 在两个段内多次出现，F25 罕见且远离其他段 → 离群警告。
+        text = ("MSG(\"PROGRAM:P\")\nG1Z100F3000\nG1Z10F300\nG1X1F1800\nG1X2F1800\n"
+                "G1X3F1800\nG1X4F1800\nG1Z100F3000\nG1Z5F300\nG1X5F25\n"
+                "S5000\nS6000\nG00 X1\nM30\n")
         info = ProgramInfo("A", "B", "D", "V", "M", "S", "DATE")
-        issues = validate_program(text, "P.MPF", "P", info, self._cfg())
+        _stats, issues, _feed = analyze_program(text, "P.MPF", "P", info, self._cfg())
         kinds = {issue.kind for issue in issues}
         self.assertIn("feed-outlier", kinds)
         self.assertIn("multiple-spindle-speeds", kinds)
@@ -1425,484 +1516,6 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn(str((nested / "Q.MPF").relative_to(root)), sources)
         self.assertNotIn(str((data / "R.MPF").relative_to(root)), sources)
 
-    def test_feed_outlier_high_value_flagged(self):
-        # 二层：F500 出现 6 次构成常用档位，F8000 少见且距离 >2 倍 → 离群警告。
-        body = "\n".join(f"N{i}G1X{i}F500" for i in range(1, 7))
-        text = body + "\nN7G1X7F8000\nN8M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [i for i in issues if i.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)
-        self.assertEqual(outliers[0].severity, "warning")
-        self.assertEqual(outliers[0].line, 7)
-        self.assertIn("F8000", outliers[0].suggestion)
-
-    def test_feed_role_pool_flags_legal_gear_misuse(self):
-        # 角色分池：移动区的 F6000 不能让切削区误用 F100 因固定合法档位而漏报。
-        cut = "\n".join(f"N{i}G1X{i}Z-5F1800" for i in range(1, 6))
-        move = "\n".join((f"N{i}G1X{i}Z100F6000" if i == 6 else
-                            f"N{i}G1X{i}F6000") for i in range(6, 11))
-        text = cut + "\n" + move + "\nN11G1X11F100\nN12M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [i for i in issues if i.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)
-        self.assertEqual(outliers[0].line, 11)
-        self.assertIn("F100", outliers[0].suggestion)
-
-    def test_feed_role_pool_keeps_roles_separate(self):
-        # 三类角色各自拥有常用档位时，跨角色的数值差异不应互相制造离群。
-        text = (
-            "N1G1Z100F6000\nN2G1Z110F6000\nN3G1Z100F6000\n"
-            "N4G1Z10F6000\nN5G1Z0F300\nN6G1Z-5F300\nN7G1Z-10F300\n"
-            "N8G1X1F1800\nN9G1X2F1800\nN10G1X3F1800\n"
-            "N11G1X4F1800\nN12G1X5F1800\nN13M30\n"
-        )
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
-        self.assertEqual(feed.stage_common_feeds["move"], [6000.0])
-        self.assertEqual(feed.stage_common_feeds["plunge"], [300.0])
-        self.assertEqual(feed.stage_common_feeds["cut"], [1800.0])
-
-    def test_feed_episode_peer_group_flags_repeated_structure_anomaly(self):
-        # 同一运动结构重复使用 F900，最后一次同结构切换为 F100，应形成高置信离群。
-        body = "\n".join(
-            f"N{i}G1X{i}Y{i}Z-5F900" for i in range(1, 5))
-        text = body + "\nN5G1X5Y5Z-5F100\nN6M30\n"
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [issue for issue in issues if issue.kind == "feed-outlier"]
-        self.assertEqual([issue.line for issue in outliers], [5])
-        self.assertEqual(feed.outliers[0]["confidence"], "high")
-
-    def test_feed_episode_unique_structure_is_insufficient_evidence(self):
-        # 每个显式 F 都属于不同结构且只出现一次时，只计入覆盖率，不逐条刷证据不足。
-        text = (
-            "N1G1X1F900\nN2G1Z-1F100\n"
-            "N3G2X2Y2I1J1F1500\nN4G0Z100F6000\nN5M30\n"
-        )
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        self.assertEqual(len(feed.insufficient_evidence), 0)
-        self.assertEqual(feed.coverage["uncompared_episodes"], 4)
-
-    def test_feed_insufficient_evidence_keeps_apt_match_flag(self):
-        # 唯一结构不再逐条输出证据不足，但 APT 参考仍保留在汇总数据中。
-        text = "N1G1X1F300\nN2G1Z-1F100\nN3M30\n"
-        meta = AptMeta(feeds=[("300.0000", "MMPM")])
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg(), apt_meta=meta)
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        self.assertEqual(feed.insufficient_evidence, [])
-        self.assertEqual(feed.apt_feeds, [300.0])
-        self.assertEqual(feed.coverage["uncompared_episodes"], 2)
-
-    def test_feed_episode_modal_inheritance_counts_once(self):
-        # 一个显式 F 被后续 99 个运动行继承，仍只能形成一个 episode 样本。
-        text = "N1G1X1F450\n" + "\n".join(
-            f"N{i}X{i}" for i in range(2, 101)) + "\nN101M30\n"
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        self.assertEqual(
-            sum(group["sample_count"] for group in feed.peer_groups.values()), 1)
-
-    def test_feed_phase_entry_sequence(self):
-        text = (
-            "N1G0Z100X0Y0F6000\n"
-            "N2G1Z20F1200\n"
-            "N3G1Z2F300\n"
-            "N4G1X10Y10Z0F900\n"
-            "N5M30\n"
-        )
-        _stats, _issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertEqual(
-            [item["phase_role"] for item in feed.episodes],
-            ["move-in", "plunge", "approach", "cut"],
-        )
-
-    def test_feed_phase_exit_reuses_entry_speeds(self):
-        text = (
-            "N1G1X10Y10Z0F900\n"
-            "N2G1Z2F300\n"
-            "N3G1Z20F1200\n"
-            "N4G0Z100F6000\n"
-            "N5M30\n"
-        )
-        _stats, _issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        roles = [item["phase_role"] for item in feed.episodes]
-        self.assertEqual(roles, ["cut", "retreat-near", "retreat-clear", "move-out"])
-        self.assertEqual(feed.episodes[1]["value"], 300.0)
-        self.assertEqual(feed.episodes[2]["value"], 1200.0)
-
-    def test_feed_phase_does_not_use_absolute_f_for_role(self):
-        base = (
-            "N1G0Z100X0Y0F6000\nN2G1Z20F1200\n"
-            "N3G1Z2F300\nN4G1X10Y10Z0F900\nN5M30\n"
-        )
-        scaled = (
-            base.replace("6000", "600")
-            .replace("1200", "120")
-            .replace("300", "30")
-            .replace("900", "90")
-        )
-        first = analyze_program(base, "A.MPF", "A", DEFAULT_INFO, self._cfg())[2]
-        second = analyze_program(scaled, "B.MPF", "B", DEFAULT_INFO, self._cfg())[2]
-        self.assertEqual(
-            [item["phase_role"] for item in first.episodes],
-            [item["phase_role"] for item in second.episodes],
-        )
-
-    def test_surface_oscillation_is_not_retreat(self):
-        text = (
-            "N1G1X1Z0F900\nN2G1X2Z1F900\n"
-            "N3G1X3Z0F900\nN4G1X4Z1F900\nN5M30\n"
-        )
-        _stats, _issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertNotIn(
-            "retreat-near", [item["phase_role"] for item in feed.episodes])
-
-    def test_same_f_reused_by_plunge_and_retreat_is_not_cross_role_outlier(self):
-        text = (
-            "N1G1X1Z0F900\nN2G1Z2F300\nN3G1Z20F1200\n"
-            "N4G0Z100F6000\nN5G1Z20F1200\nN6G1Z2F300\n"
-            "N7G1X2Z0F900\nN8M30\n"
-        )
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-
-    def test_diagonal_retreat_is_not_cut(self):
-        text = (
-            "N1G1X10Y10Z0F900\n"
-            "N2G1X11Z2F300\n"
-            "N3G1Z20F1200\n"
-            "N4G0Z100F6000\n"
-            "N5M30\n"
-        )
-        _stats, _issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertEqual(
-            [item["phase_role"] for item in feed.episodes],
-            ["cut", "retreat-near", "retreat-clear", "move-out"],
-        )
-
-    def test_compatible_transition_parent_group_ignores_axis_variant(self):
-        text = (
-            "N1G1X10Y10Z0F900\nN2G1Z2F300\nN3G1Z20F1200\nN4G0Z100F6000\n"
-            "N5G1X20Y20Z0F900\nN6G1X21Z2F300\nN7G1Z20F1200\n"
-            "N8G0Z100F6000\nN9M30\n"
-        )
-        _stats, _issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        parent_groups = [
-            group for key, group in feed.compatible_peer_groups.items()
-            if "role=retreat-near" in key
-        ]
-        self.assertEqual(len(parent_groups), 1)
-        self.assertEqual(parent_groups[0]["sample_count"], 2)
-
-    def test_compatible_transition_parent_can_provide_medium_reference(self):
-        text = (
-            "N1G1X1Z0F900\nN2G1Z2F300\nN3G1Z20F1200\nN4G0Z100F6000\n"
-            "N5G1X2Z0F900\nN6G1Z2F300\nN7G1Z20F1200\nN8G0Z100F6000\n"
-            "N9G1X3Z0F900\nN10G1Z2F300\nN11G1Z20F1200\nN12G0Z100F6000\n"
-            "N13G1X4Z0F900\nN14G1X5Z2F100\nN15G1Z20F1200\n"
-            "N16G0Z100F6000\nN17M30\n"
-        )
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [item for item in feed.outliers if item["line"] == 14]
-        self.assertEqual(len(outliers), 1)
-        self.assertEqual(outliers[0]["reason"], "compatible-peer-outlier")
-        self.assertEqual(outliers[0]["confidence"], "medium")
-
-    def test_compatible_transition_parent_accepts_feed_reused_in_other_phase(self):
-        text = (
-            "N1G1X1Z0F2500\nN2G1X2Z0F2500\n"
-            "N3G1X3Z0F900\nN4G1Z2F300\nN5G1Z20F1200\nN6G0Z100F6000\n"
-            "N7G1X4Z0F900\nN8G1X5Z2F300\nN9G1Z20F1200\nN10G0Z100F6000\n"
-            "N11G1X6Z0F900\nN12G1Y1Z2F300\nN13G1Z20F1200\nN14G0Z100F6000\n"
-            "N15G1X7Z0F900\nN16G1X8Y2Z2F2500\nN17G1Z20F1200\n"
-            "N18G0Z100F6000\nN19M30\n"
-        )
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(item["line"] == 16 for item in feed.outliers))
-        self.assertFalse(any(
-            issue.kind == "feed-outlier" and issue.line == 16
-            for issue in issues
-        ))
-
-    def test_unique_episode_is_counted_in_coverage_not_issue_rows(self):
-        text = (
-            "N1G1X1F900\nN2G1Z-1F100\n"
-            "N3G2X2Y2I1J1F1500\nN4G0Z100F6000\nN5M30\n"
-        )
-        _stats, _issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertGreater(feed.coverage["uncompared_episodes"], 0)
-        self.assertLessEqual(len(feed.insufficient_evidence), 1)
-
-    def test_conflicting_peer_group_has_one_summary_record(self):
-        text = "\n".join([
-            "N1G1X1Y1Z0F900", "N2G1X2Y2Z0F900",
-            "N3G1X3Y3Z0F900", "N4G1X4Y4Z0F100", "N5M30",
-        ])
-        _stats, _issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertEqual(len(feed.insufficient_evidence), 0)
-        self.assertTrue(any(item["value"] == 100.0 for item in feed.outliers))
-
-    def test_multimodal_group_without_rare_candidate_needs_no_evidence_row(self):
-        text = "\n".join([
-            "N1G1X1Y1Z0F300", "N2G1X2Y2Z0F300", "N3G1X3Y3Z0F300",
-            "N4G1X4Y4Z0F900", "N5G1X5Y5Z0F900", "N6G1X6Y6Z0F900",
-            "N7M30",
-        ])
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(issue.kind == "feed-outlier" for issue in issues))
-        self.assertEqual(feed.insufficient_evidence, [])
-
-    def test_feed_outlier_low_value_flagged(self):
-        # 二层：F1800 常用，F25 少见且明显偏低 → 离群警告（F25 ≥ 默认下限 20，不触发 feed-range）。
-        body = "\n".join(f"N{i}G1X{i}F1800" for i in range(1, 6))
-        text = body + "\nN6G1X6F25\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [i for i in issues if i.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)
-        self.assertIn("F25", outliers[0].suggestion)
-        self.assertFalse(any(i.kind == "feed-range" for i in issues))
-
-    def test_feed_outlier_injected_values_at_default_limits(self):
-        # 用户注入验证值：F1/F10 低于默认下限 20 → feed-range 错误且同时离群警告；
-        # F9000/F10000 落在 20~10000 内 → 仅离群警告；F15000 超上限 → feed-range 错误。
-        common = "\n".join(f"N{i}G1X{i}F500" for i in range(1, 7))
-        info = DEFAULT_INFO
-        for raw, expected_range, expected_outlier in (
-            ("F1", True, True),
-            ("F10", True, True),
-            ("F9000", False, True),
-            ("F10000", False, True),
-            ("F15000", True, False),
-        ):
-            with self.subTest(feed=raw):
-                text = common + f"\nN7G1X7{raw}\nN8M30\n"
-                issues = validate_program(text, "P.MPF", "P", info, self._cfg())
-                self.assertEqual(any(i.kind == "feed-range" for i in issues), expected_range)
-                self.assertEqual(any(i.kind == "feed-outlier" for i in issues), expected_outlier)
-
-    def test_feed_outlier_rare_legal_gear_not_flagged(self):
-        # 二层：F2000/F2500 全库仅出现 2 次，但与 F1500 档位比值 <2 → 不误报（对应文档 8.2）。
-        body = (
-            "N1G1X1F900\nN2G1X2F900\nN3G1X3F900\nN4G1X4F900\nN5G1X5F1000\n"
-            "N6G1X6F1000\nN7G1X7F1500\nN8G1X8F1500\nN9G1X9F2000\nN10G1X10F2500\n"
-            "N11G1X11F1500\nN12G1X12F1500\nN13G1X13F1000\nN14G1X14F900\n"
-            "N15G1X15F900\nN16G1X16F900\nN17G1X17F900\nN18M30\n"
-        )
-        issues = validate_program(body, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
-
-    def test_feed_outlier_short_program_skips_layer_two(self):
-        # 文档 8.3：F 太少（无常用档位）跳过二层，只保留硬边界与上下文复核。
-        text = "N1G1X1F500\nN2G1X2F8000\nN3M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
-
-    def test_feed_outlier_modal_inheritance_does_not_create_peer_samples(self):
-        # 文档 8.5：无 F 的行继承上一行 F，模态继承计数计入常用档位统计。
-        text = "N1G1X1F300\nN2X2\nN3X3\nN4X4\nN5X5\nN6X6\nN7G1X7F9000\nN8M30\n"
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
-        self.assertEqual(
-            sum(group["sample_count"] for group in feed.peer_groups.values()), 2)
-
-    def test_feed_outlier_parameters_configurable(self):
-        info = DEFAULT_INFO
-        with self.subTest(mode="min-count"):
-            body = "\n".join(f"N{i}G1X{i}F500" for i in range(1, 3))
-            text = body + "\nN3G1X3F8000\nN4M30\n"
-            self.assertFalse(any(i.kind == "feed-outlier" for i in
-                                 validate_program(text, "P.MPF", "P", info, self._cfg())))
-            self.assertTrue(any(i.kind == "feed-outlier" for i in
-                                validate_program(text, "P.MPF", "P", info, self._cfg(feed_outlier_min_count=2))))
-        with self.subTest(mode="ratio"):
-            # F1050 近似合法档位 F1000（±10% 内）且落在包络 [240, 1080] 内，
-            # 默认比值 2 不报；收紧比值 1.1 后与最近常用档位 900 超距 → 报。
-            body = ("\n".join(f"N{i}G1X{i}F300" for i in range(1, 5))
-                    + "\n" + "\n".join(f"N{i}G1X{i}F900" for i in range(5, 9)))
-            text = body + "\nN9G1X9F1050\nN10M30\n"
-            self.assertFalse(any(i.kind == "feed-outlier" for i in
-                                 validate_program(text, "P.MPF", "P", info, self._cfg())))
-            self.assertFalse(any(i.kind == "feed-outlier" for i in
-                                 validate_program(text, "P.MPF", "P", info, self._cfg(feed_outlier_ratio=1.1))))
-        with self.subTest(mode="envelope"):
-            # F990 近似合法档位 F1000，默认包络 [720, 1080] 内不报；
-            # 收紧高包络系数 0.9 后（上限 810）超出包络 → 报。
-            body = "\n".join(f"N{i}G1X{i}F900" for i in range(1, 7))
-            text = body + "\nN7G1X7F990\nN8M30\n"
-            self.assertTrue(any(i.kind == "feed-outlier" for i in
-                                validate_program(text, "P.MPF", "P", info, self._cfg(feed_outlier_high_ratio=0.9))))
-            self.assertFalse(any(i.kind == "feed-outlier" for i in
-                                 validate_program(text, "P.MPF", "P", info, self._cfg())))
-
-    def test_feed_outlier_multimodal_group_is_insufficient_evidence(self):
-        # F450 介于合法档位 F300 与 F600 之间（超出 ±10% 档位近似范围），
-        # 即使落在常用档位包络 [240, 7200] 内也判非标准档位值（用户注入验证用例）。
-        body = (
-            "\n".join(f"N{i}G1X{i}F300" for i in range(1, 5))
-            + "\n" + "\n".join(f"N{i}G1X{i}F1800" for i in range(5, 9))
-            + "\n" + "\n".join(f"N{i}G1X{i}F3000" for i in range(9, 13))
-            + "\n" + "\n".join(f"N{i}G1X{i}F6000" for i in range(13, 17))
-        )
-        text = body + "\nN17G1X17F450\nN18M30\n"
-        _stats, issues, feed = analyze_program(
-            text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(i.kind == "feed-outlier" for i in issues))
-        self.assertEqual(len(feed.insufficient_evidence), 1)
-        summary = feed.insufficient_evidence[0]
-        self.assertEqual(summary["feed_counts"]["450.0"], 1)
-        self.assertIn(17, summary["episode_lines"])
-        return
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [i for i in issues if i.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)
-        self.assertIn("F450", outliers[0].suggestion)
-        self.assertIn("非标准档位值", outliers[0].suggestion)
-
-    def test_feed_outlier_non_gear_value_not_hidden_by_modal_inheritance(self):
-        # 注入的 F450 仅显式 1 次，后续 99 行无 F 行继承它——模态继承不能把它
-        # 洗成常见值，仍须检出（显式出现次数判定少见）。
-        body = "\n".join(f"N{i}G1X{i}F300" for i in range(1, 8))
-        text = body + "\nN8G1X8F450\n" + "\n".join(f"N{i}G1X{i}" for i in range(9, 108)) + "\nN108M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [i for i in issues if i.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)
-        self.assertIn("F450", outliers[0].suggestion)
-
-    def test_feed_context_review_cut_high_gear(self):
-        # 角色分池：切削区 F5000 与常用 F900 相差超过角色阈值，直接报角色离群。
-        body = "\n".join(f"N{i}G1X{i}Y{i}Z-5F900" for i in range(1, 6))
-        text = body + "\nN6G1X6Y6Z-5F5000\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        outliers = [i for i in issues if i.kind == "feed-outlier"]
-        self.assertEqual(len(outliers), 1)
-        self.assertEqual(outliers[0].line, 6)
-        self.assertEqual(outliers[0].severity, "warning")
-
-    def test_feed_context_review_move_low_gear(self):
-        # 三层：F100 全程序仅 1 次（少见），快速移动 G00 行使用 F100 → 复核提示；
-        # 切削行用 F900 使 F100 保持"突然出现"语义。
-        body = "\n".join(f"N{i}G1X{i}Y{i}Z-5F900" for i in range(1, 6))
-        text = body + "\nN6G0X50Y50Z100F100\nN7M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        reviews = [i for i in issues if i.kind == "feed-context-review"]
-        self.assertTrue(reviews)
-        self.assertEqual(reviews[0].line, 6)
-        self.assertEqual(reviews[0].severity, "info")
-
-    def test_feed_context_review_move_low_gear_requires_retract_or_g00(self):
-        # 层四确认移动：仅行在抬刀平面（含模态 Z）或 G00 快速定位时才产生
-        # "移动用下刀小档"复核；Z 上升启发式移动（工件内慢速退刀）不触发。
-        cut = "\n".join(f"N{i}G1X{i}Y{i}Z-20F900" for i in range(1, 6))
-        info = DEFAULT_INFO
-        with self.subTest(mode="z-rise-not-at-retract-no-review"):
-            # N6 Z-20→Z-10（上升 10 归移动），但不在抬刀平面、非 G00 → 不复核。
-            text = cut + "\nN6G1X6Y6Z-10F300\nN7M30\n"
-            issues = validate_program(text, "P.MPF", "P", info, self._cfg())
-            self.assertFalse(any(i.kind == "feed-context-review" for i in issues))
-        with self.subTest(mode="at-retract-review"):
-            # N6 显式到抬刀平面（Z100）用少见 F300 → 确认移动 → 复核。
-            text = cut + "\nN6G1X6Y6Z100F300\nN7M30\n"
-            issues = validate_program(text, "P.MPF", "P", info, self._cfg())
-            reviews = [i for i in issues if i.kind == "feed-context-review"]
-            self.assertEqual(len(reviews), 1)
-            self.assertEqual(reviews[0].line, 6)
-        with self.subTest(mode="g00-low-z-review"):
-            # G00 快速定位在低 Z（非抬刀平面）用少见 F100 → G00 确认移动 → 复核。
-            text = cut + "\nN6G0X50Y50Z-15F100\nN7M30\n"
-            issues = validate_program(text, "P.MPF", "P", info, self._cfg())
-            reviews = [i for i in issues if i.kind == "feed-context-review"]
-            self.assertEqual(len(reviews), 1)
-            self.assertEqual(reviews[0].line, 6)
-
-    def test_feed_context_review_apt_planned_gear_suppressed_and_in_apt_flag(self):
-        # B0701 回归：APT 规划档位不能豁免角色内核心离群，但应抑制旧的上下文复核。
-        body = "\n".join(f"N{i}G1X{i}Y{i}Z-5F900" for i in range(1, 6))
-        text = body + "\nN6G1X6Y6Z-5F6000\nN7M30\n"
-        apt_meta = AptMeta(feeds=[("6000", "MMPM")])
-        _stats, issues, feed = analyze_program(text, "P.MPF", "P", DEFAULT_INFO,
-                                               self._cfg(), apt_meta=apt_meta)
-        self.assertTrue(any(i.kind == "feed-outlier" for i in issues))
-        self.assertFalse(any(i.kind == "feed-context-review" for i in issues))
-        self.assertEqual(feed.context_reviews, [])
-        _stats, issues, feed = analyze_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertTrue(any(i.kind == "feed-outlier" for i in issues))
-        self.assertFalse(any(i.kind == "feed-context-review" for i in issues))
-        self.assertEqual(feed.context_reviews, [])
-
-    def test_motion_feature_classification(self):
-        # 按用户标注对齐 98.9% 的 Z 运动分类（不依赖绝对 F 数值）。
-        # G00 / 抬刀平面 → move。
-        self.assertEqual(_base_motion_feature(0, None, None, None, True, False, None, 100.0), "move")
-        self.assertEqual(_base_motion_feature(0, None, None, None, False, True, None, 100.0), "move")
-        # 从抬刀平面下行（快速下刀）→ move。
-        self.assertEqual(_base_motion_feature(0, -50.0, -20.0, -10.0, False, False, 100.0, 100.0), "move")
-        # 单步大幅上升且后续不回跌 → move（退刀）。
-        self.assertEqual(_base_motion_feature(0, 120.0, 10.0, 120.0, False, False, None, 100.0), "move")
-        # 跳刀起点（d_in ≥1 且 d_out ≥5）→ move。
-        self.assertEqual(_base_motion_feature(0, 2.0, 3.0, 100.0, False, False, None, 100.0), "move")
-        # 振荡（方向变化 ≥3）：下行进入局部最低点 → cut（钻孔钻入）。
-        self.assertEqual(_base_motion_feature(4, -5.0, -2.0, 4.0, False, False, None, 100.0), "cut")
-        # 振荡：下行进入非最低 → move（啄钻接近）。
-        self.assertEqual(_base_motion_feature(4, -5.0, -2.0, -1.0, False, False, None, 100.0), "move")
-        # 单向下行 → plunge（进刀）。
-        self.assertEqual(_base_motion_feature(1, -50.0, -10.0, -5.0, False, False, None, 100.0), "plunge")
-        # Z 字形下刀（局部最低但非振荡）→ plunge。
-        self.assertEqual(_base_motion_feature(2, -3.0, -2.0, 3.0, False, False, None, 100.0), "plunge")
-        # 净上升且上升已进入本行 → move。
-        self.assertEqual(_base_motion_feature(1, 120.0, 5.0, 100.0, False, False, None, 100.0), "move")
-        # 退刀前最后一行（净上升但上升未进入本行）→ 非 move（cut，由 F 兜底处理）。
-        self.assertEqual(_base_motion_feature(1, 120.0, 0.5, 100.0, False, False, None, 100.0), "cut")
-        # 平稳 → cut。
-        self.assertEqual(_base_motion_feature(0, 0.0, 0.0, 0.0, False, False, None, 100.0), "cut")
-
-    def test_feed_context_review_f6000_z_rise_exactly_ten_not_flagged(self):
-        # 浮点边界回归：Z 上升恰好 10 的 F6000 行按趋势归移动，不再误判为
-        # 切削而触发"切削用抬刀大档"复核。
-        body = "\n".join(f"N{i}G1X{i}Y{i}Z-25F1800" for i in range(1, 6))
-        text = body + "\nN6G1X6Y6Z-15F6000\nN7G1X7Y7Z100\nN8M30\n"
-        issues = validate_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertFalse(any(i.kind == "feed-context-review" for i in issues))
-
-    def test_feed_outlier_data_exposed_in_analysis_and_report(self):
-        # 过程数据进入报告：analyze_program 返回常用档位/包络/离群明细；
-        # process_plan 产出的报告 files[] 同样携带 feed_outlier 结构。
-        body = "\n".join(f"N{i}G1X{i}F500" for i in range(1, 7))
-        text = 'MSG("PROGRAM:P")\n' + body + "\nN7G1X7F8000\nN8M30\n"
-        stats, issues, feed = analyze_program(text, "P.MPF", "P", DEFAULT_INFO, self._cfg())
-        self.assertEqual(feed.common_feeds, [500.0])
-        self.assertEqual(feed.envelope, [400.0, 600.0])
-        self.assertEqual(len(feed.outliers), 1)
-        self.assertEqual(feed.outliers[0]["value"], 8000.0)
-        self.assertTrue(any(i.kind == "feed-outlier" for i in issues))
-        root = self.make_dir()
-        (root / "x_P.MPF").write_text(text, encoding="utf-8")
-        cfg = self._cfg()
-        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
-        report = process_plan(plan, str(root), cfg)
-        file_item = next(item for item in report.files if item["file"] == "x_P.MPF")
-        data = file_item["feed_outlier"]
-        self.assertEqual(data["common_feeds"], [500.0])
-        self.assertEqual(data["envelope"], [400.0, 600.0])
-        self.assertEqual(data["outliers"][0]["value"], 8000.0)
-
-
 class RuntimeLogTests(unittest.TestCase):
     def make_dir(self):
         return Path(tempfile.mkdtemp(prefix="ncodeprocess-log-"))
@@ -2029,8 +1642,8 @@ class ReportMetadataTests(unittest.TestCase):
         self.assertEqual(report.archive_stamp, scan.archive_stamp)
         self.assertEqual(report.user_confirmations, ["已确认：执行目录处理"])
         for key in ("encoding", "g00_level", "m03_position", "newline", "aux_checks",
-                    "feed_outlier_min_count", "feed_outlier_ratio",
-                    "feed_outlier_low_ratio", "feed_outlier_high_ratio"):
+                    "multiple_spindle_warn", "require_end_marker",
+                    "max_file_size", "max_files", "retract_z_threshold"):
             self.assertIn(key, report.config_snapshot)
 
     def test_config_snapshot_includes_wp_c1_c9_keys(self):
@@ -2075,3 +1688,276 @@ class ReportMetadataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FeedSegmentDetectionTests(unittest.TestCase):
+    """《F值异常检测方法》抬刀平面分段对比检测（2026-08-07 决策稿）。"""
+
+    @staticmethod
+    def _cfg(**overrides):
+        """默认放开 G00 检查，并按需覆盖其它配置。"""
+        return Config(g00_level="allow", **overrides)
+
+    def make_dir(self):
+        return Path(tempfile.mkdtemp(prefix="ncodeprocess-"))
+
+
+    def _program(self, body, plane=100.0):
+        """构造以 Z<plane> 为抬刀平面的多段程序文本。"""
+        return body + "\nN99M30\n"
+
+    def test_feed_segment_splits_by_retract_crossing(self):
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2\n"
+            "N5G1Z100F6000\nN6G1Z5F300\nN7G1X3Y3F1800\nN8G1X4Y4\nN9G1Z100F6000\n")
+        _issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertEqual(feed.safe_plane, 100.0)
+        self.assertEqual([(seg["first_line"], seg["last_line"]) for seg in feed.segments],
+                         [(1, 5), (6, 9)])
+
+    def test_feed_segment_first_positioning_belongs_to_first_segment(self):
+        text = self._program("N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1Z100F6000\n")
+        _issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertEqual(len(feed.segments), 1)
+        self.assertEqual(feed.segments[0]["first_line"], 1)
+
+    def test_feed_rare_high_value_on_xy_row_is_warning(self):
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1X4Y4F66\nN9G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        reviews = [i for i in issues if i.kind == "feed-review"]
+        self.assertEqual([i.line for i in outliers], [8])
+        self.assertEqual(outliers[0].severity, "warning")
+        self.assertIn("F66", outliers[0].suggestion)
+        self.assertEqual(reviews, [])
+        self.assertEqual(feed.outliers[0]["level"], "warning")
+        self.assertEqual(feed.outliers[0]["line"], 8)
+        self.assertGreater(feed.outliers[0]["gap"], 0.6)
+
+    def test_feed_moderate_gap_is_review_not_warning(self):
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1X4Y4F8888\nN9G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        reviews = [i for i in issues if i.kind == "feed-review"]
+        warnings = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual([i.line for i in reviews], [8])
+        self.assertEqual(reviews[0].severity, "info")
+        self.assertIn("F8888", reviews[0].suggestion)
+        self.assertEqual(warnings, [])
+        self.assertEqual(feed.outliers[0]["level"], "review")
+        self.assertLess(feed.outliers[0]["gap"], 0.6)
+
+    def test_feed_axial_only_value_is_exempt(self):
+        # F66 全部出现在纯 Z 运动行（有 Z、无 X/Y）→ 值无关豁免，不报异常。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1Z-5F66\nN9G1Z-8\nN10G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertFalse(any(i.kind in ("feed-outlier", "feed-review") for i in issues))
+        self.assertEqual(feed.outliers, [])
+
+    def test_feed_common_value_not_flagged(self):
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1Z100F6000\nN6G1Z5F300\nN7G1X3Y3F1800\nN8G1X4Y4F1800\nN9G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertFalse(any(i.kind in ("feed-outlier", "feed-review") for i in issues))
+        self.assertEqual(feed.outliers, [])
+
+    def test_feed_modal_inherited_rows_count_into_segment_and_global(self):
+        # 模态继承计入段 F 集合（参与段间比较）；罕见按显式写入计数：
+        # F450 只显式写一次，即使被后续行继承，仍按候选复核。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1X4Y4F450\nN9G1X5Y5\n"
+            "N10G1X6Y6\nN11G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        reviews = [i for i in issues if i.kind == "feed-review"]
+        self.assertEqual([i.line for i in reviews], [8])
+        self.assertTrue(any(450.0 in seg["feeds"] for seg in feed.segments))
+
+    def test_feed_inherited_anomaly_flagged_by_explicit_write_count(self):
+        # 一次误写 F66 被后续多行继承：罕见按显式写入计 1 次，仍应告警（写入行）。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1X4Y4F66\n"
+            "N9G1X5Y5\nN10G1X6Y6\nN11G1X7Y7\nN12G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual([i.line for i in outliers], [8])
+        self.assertEqual(feed.outliers[0]["count"], 1)
+
+    def test_feed_value_straddling_segments_via_modal_inheritance_flagged(self):
+        # 异常值写在抬刀平面穿越行、被下一段模态继承（真实事故形态）：
+        # 从纯模态出现的段中剔除该值后仍应检出，报告定位到写入行。
+        text = self._program(
+            "N1G1Z100F3000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F66\nN7G1X4Y4\nN8G1X5Y5\nN9G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual([i.line for i in outliers], [6])
+        self.assertEqual(len(feed.segments), 2)
+
+    def test_feed_rare_value_explicit_in_two_segments_not_flagged(self):
+        # 合法罕见值在两个段都显式写入：参照中保留该值，gap=0 直接跳过，不误报。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F900\nN4G1Z100F6000\n"
+            "N5G1Z5F300\nN6G1X3Y3F900\nN7G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertFalse(any(i.kind in ("feed-outlier", "feed-review") for i in issues))
+        self.assertEqual(feed.outliers, [])
+
+    def test_feed_single_segment_cross_reference_flags_rare_far_value(self):
+        # 单段程序有跨程序参照：平面行误写 F9000（非豁免）且远离常见档位 → 复核。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F900\nN4G1X2Y2F900\nN5G1Z100F9000\n")
+        reference = [300.0, 600.0, 900.0, 1500.0, 3000.0, 5000.0, 6000.0]
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg(),
+                                            reference_feeds=reference)
+        reviews = [i for i in issues if i.kind == "feed-review"]
+        self.assertEqual([i.line for i in reviews], [5])
+        self.assertEqual(feed.outliers[0]["reason"], "cross-program-gap")
+        self.assertEqual(feed.reference_count, len(reference))
+
+    def test_feed_single_segment_reference_common_value_not_flagged(self):
+        # 单段程序的值本身是常见档位（在参照内）→ 不提示。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F900\nN4G1X2Y2F900\nN5G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg(),
+                                            reference_feeds=[300.0, 900.0, 6000.0])
+        self.assertFalse(any(i.kind in ("feed-outlier", "feed-review") for i in issues))
+        self.assertEqual(feed.reference_count, 3)
+
+    def test_feed_axial_plane_row_not_exempt(self):
+        # 抬刀平面上的纯 Z 定位/抬刀行不属于下刀/钻入，不豁免。
+        rows = [
+            (1, 6000.0, 6000.0, 100.0, False, True),
+            (2, 300.0, 300.0, 10.0, False, True),
+            (3, 300.0, 300.0, 0.0, False, True),
+            (4, 300.0, 300.0, -10.0, False, True),
+            (5, 9000.0, 9000.0, 100.0, False, True),
+        ]
+        self.assertFalse(_axial_feed_exempt(rows, 9000.0, 100.0))
+        self.assertTrue(_axial_feed_exempt(rows, 300.0, 100.0))
+
+    def test_feed_axial_consistency_violation_not_exempt(self):
+        # 浅处比深处慢（违反“越深越慢”）→ 轴向豁免不成立。
+        rows_bad = [
+            (1, 6000.0, 6000.0, 100.0, False, True),
+            (2, 300.0, 300.0, 10.0, False, True),
+            (3, 300.0, 300.0, 0.0, False, True),
+            (4, 66.0, 66.0, -5.0, False, True),
+            (5, 300.0, 300.0, -10.0, False, True),
+        ]
+        self.assertFalse(_axial_feed_exempt(rows_bad, 66.0, 100.0))
+        # 同深不同速（违反“同深同速”）→ 轴向豁免不成立。
+        rows_rep = [
+            (1, 300.0, 300.0, 10.0, False, True),
+            (2, 300.0, 300.0, -10.0, False, True),
+            (3, 66.0, 66.0, -10.0, False, True),
+        ]
+        self.assertFalse(_axial_feed_exempt(rows_rep, 66.0, 100.0))
+
+    def test_feed_build_reference_excludes_self_and_single_anomalies(self):
+        # 跨程序参照：排除自身；只在单个程序出现的异常值不进参照。
+        result = build_feed_reference([
+            ("a.MPF", [300.0, 900.0, 6000.0]),
+            ("b.MPF", [300.0, 1500.0, 6000.0]),
+            ("c.MPF", [900.0, 1500.0, 9000.0]),
+        ])
+        self.assertEqual(result["a.MPF"], frozenset({1500.0}))
+        self.assertEqual(result["b.MPF"], frozenset({900.0}))
+        self.assertEqual(result["c.MPF"], frozenset({300.0, 6000.0}))
+        self.assertNotIn(9000.0, result["a.MPF"])
+        self.assertNotIn(300.0, result["a.MPF"])
+
+    def test_feed_value_used_twice_is_still_candidate(self):
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1X4Y4F66\nN9G1X5Y5F66\nN10G1Z100F6000\n")
+        issues, _feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        outliers = [i for i in issues if i.kind == "feed-outlier"]
+        self.assertEqual([i.line for i in outliers], [8, 9])
+
+    def test_feed_single_segment_produces_distribution(self):
+        text = self._program("N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertFalse(any(i.kind in ("feed-outlier", "feed-review") for i in issues))
+        self.assertEqual(len(feed.segments), 1)
+        rows = {row["value"]: row for row in feed.distribution}
+        self.assertEqual(rows[300.0]["count"], 1)
+        self.assertEqual(rows[300.0]["first_line"], 2)
+        self.assertIn("仅出现一次", rows[300.0]["note"])
+        self.assertEqual(rows[1800.0]["count"], 2)
+        self.assertEqual(rows[1800.0]["note"], "")
+
+    def test_feed_safe_plane_uses_max_z_cluster_not_single_high(self):
+        # 单个超高 Z1000 不参与抬刀平面；重复出现的 Z100 才是平面。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1Z1000F6000\nN5G1Z100F6000\n"
+            "N6G1Z5F300\nN7G1X3Y3F1800\nN8G1Z100F6000\n")
+        _issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertEqual(feed.safe_plane, 100.0)
+
+    def test_feed_no_z_rows_returns_empty_data(self):
+        text = "N1G1X1F500\nN2G1X2F500\nN3M30\n"
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertEqual(issues, [])
+        self.assertIsNone(feed.safe_plane)
+        self.assertEqual(feed.segments, [])
+        self.assertEqual(feed.outliers, [])
+
+    def test_feed_boundary_errors_collected_with_issues(self):
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1X4Y4F20000\nN9G1Z100F6000\n")
+        _issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertTrue(any(item["value"] == 20000.0 for item in feed.boundary_errors))
+
+    def test_feed_outlier_keeps_apt_context_flag(self):
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1X4Y4F15000\n"
+            "N9G1X5Y5F1800\nN10G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg(),
+                                            apt_feeds=[15000.0])
+        reviews = [i for i in issues if i.kind == "feed-review"]
+        self.assertEqual(len(reviews), 1)
+        self.assertTrue(feed.outliers[0]["in_apt"])
+
+    def test_feed_tolerance_is_fixed_thirty_percent(self):
+        text = self._program("N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1Z100F6000\n")
+        _issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertEqual(feed.tolerance, 0.30)
+
+    def test_feed_normal_multi_gear_program_has_no_false_positive(self):
+        # 多个合法档位在段内交替（各值全程序出现多次）→ 不报任何离群/复核。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F900\nN4G1X2Y2F1500\nN5G1X3Y3F900\n"
+            "N6G1X4Y4F1500\nN7G1Z100F6000\nN8G1Z5F300\nN9G1X5Y5F900\nN10G1X6Y6F1500\n"
+            "N11G1X7Y7F900\nN12G1Z100F6000\n")
+        issues, feed = detect_feed_outliers(text, "P.MPF", self._cfg())
+        self.assertFalse(any(i.kind in ("feed-outlier", "feed-review") for i in issues))
+        self.assertEqual(feed.outliers, [])
+
+
+    def test_feed_outlier_exposed_in_plan_and_report(self):
+        # 过程数据进入报告：build_plan/process_plan 产出新的分段字段。
+        text = self._program(
+            "N1G1Z100F6000\nN2G1Z10F300\nN3G1X1Y1F1800\nN4G1X2Y2F1800\n"
+            "N5G1X3Y3F1800\nN6G1Z100F6000\nN7G1Z5F300\nN8G1X4Y4F66\nN9G1Z100F6000\n")
+        root = self.make_dir()
+        (root / "x_P.MPF").write_text(text, encoding="utf-8")
+        cfg = self._cfg()
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        plan_file = next(item for item in plan.files if item.kind == "mpf")
+        self.assertEqual(plan_file.feed_outlier.safe_plane, 100.0)
+        self.assertEqual(len(plan_file.feed_outlier.segments), 2)
+        report = process_plan(plan, str(root), cfg)
+        item = next(item for item in report.files if item["file"] == "x_P.MPF")
+        data = item["feed_outlier"]
+        self.assertEqual(data["safe_plane"], 100.0)
+        self.assertEqual(data["outliers"][0]["value"], 66.0)

@@ -30,10 +30,6 @@
     spindle_min/spindle_max S 上下限          ""
     newline                 换行策略          "auto"
     aux_m03/m05/m08/m09_before_*  辅助指令顺序  "1"
-    feed_outlier_min_count  同结构重复参照门槛 "3"
-    feed_outlier_ratio      相对离群倍率      "2"
-    feed_outlier_low_ratio  参照低侧容差      "0.8"
-    feed_outlier_high_ratio 参照高侧容差      "1.2"
     multiple_spindle_warn   多 S 值警告       "1"
     storage_backend         保存位置          "registry"
 
@@ -87,10 +83,6 @@ REGISTRY_DEFAULTS = {
     "aux_m05_before_end": "1",
     "aux_m08_before_cut": "1",
     "aux_m09_before_end": "1",
-    "feed_outlier_min_count": "3",
-    "feed_outlier_ratio": "2",
-    "feed_outlier_low_ratio": "0.8",
-    "feed_outlier_high_ratio": "1.2",
     "multiple_spindle_warn": "1",
     # WP-C1：单文件大小上限（字节）与单次扫描文件数上限（留空 = 不限制）。
     "max_file_size": "",
