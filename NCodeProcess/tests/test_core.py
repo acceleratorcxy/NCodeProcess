@@ -5,24 +5,28 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _axial_feed_exempt, _decode, _extract_apt_meta_cached, _extract_apt_toolpath_cached, add_initial_tool_change, add_m03, align_lines, analyze_program, apply_header, build_plan, build_feed_reference, calculate_stats, code_part, crosscheck_apt, detect_feed_outliers, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _axial_feed_exempt, _decode, _extract_apt_data_cached, add_initial_tool_change, add_m03, align_lines, analyze_program, apply_header, build_plan, build_feed_reference, calculate_stats, code_part, crosscheck_apt, detect_feed_outliers, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
 
 
-class CoreTests(unittest.TestCase):
-    def setUp(self):
-        # 隔离运行日志：避免跨用例的事件累积污染断言（WP-F2）。
-        reset_runtime_log()
+class CoreTestBase(unittest.TestCase):
+    """各主题测试类共用的临时目录与配置 fixture（去重：make_dir/_cfg 曾四处重复）。"""
 
-    def make_dir(self):
-        return Path(tempfile.mkdtemp(prefix="ncodeprocess-"))
+    def make_dir(self, prefix="ncodeprocess-"):
+        return Path(tempfile.mkdtemp(prefix=prefix))
 
     @staticmethod
     def _cfg(**overrides):
         """默认放开 G00 检查，并按需覆盖其它配置。"""
         return Config(g00_level="allow", **overrides)
+
+
+class CoreTests(CoreTestBase):
+    def setUp(self):
+        # 隔离运行日志：避免跨用例的事件累积污染断言（WP-F2）。
+        reset_runtime_log()
 
     @staticmethod
     def _mpf(plan):
@@ -891,14 +895,15 @@ class CoreTests(unittest.TestCase):
 
     def test_apt_toolpath_cached_by_mtime(self):
         # WP-A2：轨迹统计按 (mtime, size, encoding) 缓存，文件变化后重新解析。
+        # 缓存入口为合并单遍解析 _extract_apt_data_cached（元数据/轨迹/刀具共用）。
         apt = self.make_dir() / "c.aptsource"
         apt.write_text("GOTO / 0,0,10\nGOTO / 0,0,20\n", encoding="utf-8")
-        first = _extract_apt_toolpath_cached(apt)
-        second = _extract_apt_toolpath_cached(apt)
+        first = _extract_apt_data_cached(apt)
+        second = _extract_apt_data_cached(apt)
         self.assertIs(first, second)
         apt.write_text("GOTO / 0,0,10\n", encoding="utf-8")
-        third = _extract_apt_toolpath_cached(apt)
-        self.assertEqual(third.goto_count, 1)
+        third = _extract_apt_data_cached(apt)
+        self.assertEqual(third[1].goto_count, 1)
 
     def test_build_plan_attaches_apt_toolpath(self):
         # WP-A2：build_plan 把最新 APT 的元数据/轨迹/源路径挂到对应 MPF 计划。
@@ -1024,15 +1029,16 @@ class CoreTests(unittest.TestCase):
 
     def test_apt_meta_cached_by_mtime(self):
         # WP-A1：元数据按 (mtime, size, encoding) 缓存，文件变化后重新解析。
+        # 缓存入口为合并单遍解析 _extract_apt_data_cached（元数据/轨迹/刀具共用）。
         root = self.make_dir()
         apt = root / "c.aptsource"
         apt.write_text("$$ MACHIN  A\n", encoding="utf-8")
-        first = _extract_apt_meta_cached(apt)
-        second = _extract_apt_meta_cached(apt)
+        first = _extract_apt_data_cached(apt)
+        second = _extract_apt_data_cached(apt)
         self.assertIs(first, second)
         apt.write_text("$$ MACHIN  B\n", encoding="utf-8")
-        third = _extract_apt_meta_cached(apt)
-        self.assertEqual(third.machine, "B")
+        third = _extract_apt_data_cached(apt)
+        self.assertEqual(third[0].machine, "B")
 
     def test_scan_exposes_apt_drawing_candidates_without_applying(self):
         root = self.make_dir()
@@ -1545,10 +1551,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn(str((nested / "Q.MPF").relative_to(root)), sources)
         self.assertNotIn(str((data / "R.MPF").relative_to(root)), sources)
 
-class RuntimeLogTests(unittest.TestCase):
-    def make_dir(self):
-        return Path(tempfile.mkdtemp(prefix="ncodeprocess-log-"))
-
+class RuntimeLogTests(CoreTestBase):
     def test_emit_records_event_with_level_event_and_message(self):
         reset_runtime_log()
         emit_event("info", "scan_start", "开始扫描目录：测试目录")
@@ -1649,11 +1652,8 @@ class RuntimeLogTests(unittest.TestCase):
         self.assertFalse((root / "logs").exists())
 
 
-class ReportMetadataTests(unittest.TestCase):
+class ReportMetadataTests(CoreTestBase):
     """报告内容规范第 12 节建议新增字段（顶层元数据 + files[].target/program_name_source）。"""
-
-    def make_dir(self):
-        return Path(tempfile.mkdtemp(prefix="ncodeprocess-meta-"))
 
     def test_report_includes_section12_metadata(self):
         reset_runtime_log()
@@ -1714,22 +1714,65 @@ class ReportMetadataTests(unittest.TestCase):
         self.assertEqual(mpf.program, "Z99")
         self.assertEqual(mpf.program_name_source, "PPRINT")
 
+    def test_report_includes_environment_and_scan_stats(self):
+        # 2026-08-08 报告完善：运行环境与扫描分类统计进入顶层。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_bytes('MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        (root / "P.aptsource").write_text("APT", encoding="utf-8")
+        (root / "x.LOG").write_text("log", encoding="utf-8")
+        cfg = Config(g00_level="allow")
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg)
+        self.assertIn("platform", report.environment)
+        self.assertIn("python_version", report.environment)
+        self.assertIn("machine", report.environment)
+        self.assertEqual(report.scan_stats["mpf"], 1)
+        self.assertEqual(report.scan_stats["aptsource"], 1)
+        self.assertEqual(report.scan_stats["intermediate"], 1)
+        self.assertEqual(report.scan_stats["total"], 3)
+
+    def test_config_snapshot_includes_file_type_and_overwrite_keys(self):
+        # 2026-08-08 报告完善：config_snapshot 补齐文件类型/覆盖/命名规则等缺失键。
+        root = self.make_dir()
+        (root / "P.MPF").write_bytes('MSG("PROGRAM:P")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow", overwrite_existing=True,
+                     delete_extensions={".log", ".tmp"},
+                     program_extensions={".mpf", ".nc"},
+                     program_output_extension=".NC",
+                     aptsource_dir="archive",
+                     allowed_name_pattern=r"^[A-Za-z0-9]+$")
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg)
+        snapshot = report.config_snapshot
+        self.assertTrue(snapshot["overwrite_existing"])
+        self.assertEqual(snapshot["delete_extensions"], [".log", ".tmp"])
+        self.assertEqual(snapshot["program_extensions"], [".mpf", ".nc"])
+        self.assertEqual(snapshot["program_output_extension"], ".NC")
+        self.assertEqual(snapshot["aptsource_dir"], "archive")
+        self.assertEqual(snapshot["allowed_name_pattern"], r"^[A-Za-z0-9]+$")
+
+    def test_report_files_include_header_and_decision_fields(self):
+        # 2026-08-08 报告完善：files[] 含处理后 MSG 头部快照与换刀/重复裁决信息。
+        root = self.make_dir()
+        (root / "x_P.MPF").write_bytes(
+            'MSG("PROGRAM:P")\nMSG("DRAWING NUMBER:D-1")\nN1G1X1F100\nN2M30\n'.encode("utf-8"))
+        cfg = Config(g00_level="allow")
+        plan = build_plan(scan_directory(str(root), cfg), DEFAULT_INFO, cfg)
+        report = process_plan(plan, str(root), cfg)
+        item = report.files[0]
+        self.assertEqual(item["header"].get("PROGRAM"), "P")
+        self.assertEqual(item["header"].get("DRAWING NUMBER"), "D-1")
+        self.assertEqual(item["auto_tool_change_skipped"], "")
+        self.assertEqual(item["duplicate_winner"], "")
+        self.assertEqual(item["duplicate_target"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
 
 
-class FeedSegmentDetectionTests(unittest.TestCase):
+class FeedSegmentDetectionTests(CoreTestBase):
     """《F值异常检测方法》抬刀平面分段对比检测（2026-08-07 决策稿）。"""
-
-    @staticmethod
-    def _cfg(**overrides):
-        """默认放开 G00 检查，并按需覆盖其它配置。"""
-        return Config(g00_level="allow", **overrides)
-
-    def make_dir(self):
-        return Path(tempfile.mkdtemp(prefix="ncodeprocess-"))
-
 
     def _program(self, body, plane=100.0):
         """构造以 Z<plane> 为抬刀平面的多段程序文本。"""

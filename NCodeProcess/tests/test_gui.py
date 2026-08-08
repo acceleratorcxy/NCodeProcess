@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import ncodeprocess.gui as gui
-from ncodeprocess.core import FIELD_ORDER, FeedOutlierData, FilePlan, Issue, ProcessReport, ProgramInfo, ScanResult, ToolpathStats, calculate_stats, emit_event, reset_runtime_log, runtime_log
+from ncodeprocess.core import FIELD_ORDER, FeedOutlierData, FilePlan, Issue, ProcessReport, ProgramInfo, ScanResult, ToolpathStats, calculate_stats, reset_runtime_log, runtime_log
 from ncodeprocess.gui import (
     App,
     centered_position,
@@ -37,6 +37,14 @@ def _sync_thread(thread_class):
 
 class LayoutWidgetMixin:
     """布局/交互/生命周期测试共用的窗口构造、遍历与等待 helper（不含 test_ 用例）。"""
+
+    def setUp(self):
+        # 每个用例前后清理测试注册表键，避免用例间设置残留
+        # （替代原先散落在各测试 finally 中的重复 clear_all）。
+        clear_all(TEST_SETTINGS_KEY)
+
+    def tearDown(self):
+        clear_all(TEST_SETTINGS_KEY)
 
     def _build_app(self, width, height):
         root = tk.Tk()
@@ -973,7 +981,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
     def test_settings_dialog_confirm_applies_and_persists(self):
         root, app = self._build_app(1286, 668)
         try:
-            app.settings_registry_key = TEST_SETTINGS_KEY
             with patch.object(App, "scan") as scan_mock:
                 app.open_settings()
                 app.encoding_var.set("gb18030")
@@ -994,7 +1001,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertEqual(saved["encoding"], "gb18030")
             self.assertEqual(saved["program_extensions"], ".mpf,.nc")
         finally:
-            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_settings_dialog_cancel_discards(self):
@@ -1023,22 +1029,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
                 app._confirm_settings()
                 err_mock.assert_called_once()
             self.assertIsNotNone(app.settings_window)
-        finally:
-            root.destroy()
-
-    def test_finish_scan_applies_configured_name_pattern(self):
-        root, app = self._build_app(1286, 668)
-        try:
-            app.allowed_name_pattern_var.set(r"^[A-Za-z0-9]+$")
-            plan = FilePlan("程序_x.MPF", "mpf", None, None, "keep")
-            result = ScanResult("root", [plan])
-            with patch("ncodeprocess.gui.simpledialog.askstring", return_value="程序名"):
-                app.finish_scan(result)
-            self.assertIsNone(plan.program)  # 中文名被收紧后的模式拒绝
-            plan.issues = []
-            with patch("ncodeprocess.gui.simpledialog.askstring", return_value="PROG1"):
-                app.finish_scan(result)
-            self.assertEqual(plan.program, "PROG1")
         finally:
             root.destroy()
 
@@ -1140,7 +1130,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             # 未持久化的项使用默认值
             self.assertEqual(app.delete_extensions_var.get(), ".log, .moaptindexes")
         finally:
-            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_settings_feed_limits_blank_stored_value_falls_back_to_default(self):
@@ -1157,7 +1146,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertEqual(app.spindle_min_var.get(), "500")
             self.assertEqual(app.spindle_max_var.get(), "12000")
         finally:
-            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_feed_limits_restore_button_resets_values(self):
@@ -1190,7 +1178,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
     def test_restore_defaults_resets_and_persists(self):
         root, app = self._build_app(1286, 668)
         try:
-            app.settings_registry_key = TEST_SETTINGS_KEY
             save_all({"encoding": "gb18030", "require_m06": "1", "bianzhi": "张工"}, TEST_SETTINGS_KEY)
             with patch.object(App, "scan") as scan_mock:
                 app.open_settings()
@@ -1207,7 +1194,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertEqual(saved["storage_backend"], "registry")
             scan_mock.assert_called_once_with()
         finally:
-            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_config_injects_vars_and_required_fields(self):
@@ -1242,7 +1228,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
     def test_settings_dialog_toggles_required_field(self):
         root, app = self._build_app(1286, 668)
         try:
-            app.settings_registry_key = TEST_SETTINGS_KEY
             with patch.object(App, "scan") as scan_mock:
                 app.open_settings()
                 app.required_shenhe_var.set(False)
@@ -1256,7 +1241,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertIn("NC MACHINE", config.required_fields)
             self.assertIn("CONTROL SYSTEM", config.required_fields)
         finally:
-            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_batch2_var_defaults_and_roundtrip(self):
@@ -1307,7 +1291,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
     def test_settings_dialog_toggles_aux_rule(self):
         root, app = self._build_app(1286, 668)
         try:
-            app.settings_registry_key = TEST_SETTINGS_KEY
             with patch.object(App, "scan") as scan_mock:
                 app.open_settings()
                 app.aux_m08_before_cut_var.set(False)
@@ -1316,7 +1299,6 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertNotIn("m08-before-cut", app.config().aux_checks)
             self.assertIn("m03-before-motion", app.config().aux_checks)
         finally:
-            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_settings_dialog_pages_switch_and_controls_visible(self):
@@ -1427,13 +1409,11 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
                     self.assertEqual(app.storage_backend_var.get(), "appdata")
                 finally:
                     root.destroy()
-                clear_all(TEST_SETTINGS_KEY)
 
     def test_confirm_settings_saves_batch2_values(self):
         # WP-11：确定保存后，Batch 2 设置写入选定后端。
         root, app = self._build_app(1286, 668)
         try:
-            app.settings_registry_key = TEST_SETTINGS_KEY
             app.open_settings()
             app.feed_min_var.set("150")
             app.required_drawing_var.set(False)
@@ -1444,28 +1424,7 @@ class SettingsDialogTests(unittest.TestCase, LayoutWidgetMixin):
             self.assertEqual(loaded.get("required_drawing"), "0")
             self.assertEqual(loaded.get("storage_backend"), "registry")
         finally:
-            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
-    def test_single_instance_mutex_name_is_stable_and_path_specific(self):
-        # WP-12：同一路径生成相同互斥体名，不同路径互不相同。
-        first = gui.single_instance_mutex_name(r"C:\dir\NCodeProcess.exe")
-        second = gui.single_instance_mutex_name(r"C:\dir\NCodeProcess.exe")
-        other = gui.single_instance_mutex_name(r"C:\other\NCodeProcess.exe")
-        self.assertEqual(first, second)
-        self.assertNotEqual(first, other)
-        self.assertTrue(first.startswith("NCodeProcess_"))
-        # WP-S1：FNV-1a 64 位输出格式（16 位十六进制），锁定格式防止回归。
-        self.assertRegex(first, r"^NCodeProcess_[0-9a-f]{16}$")
-
-    @unittest.skipUnless(sys.platform == "win32", "命名互斥体仅存在于 Windows")
-    def test_acquire_single_instance_second_call_fails(self):
-        # WP-12：同目录第二个实例获取互斥体失败。
-        self.assertTrue(gui.acquire_single_instance(r"C:\dir\NCodeProcess.exe"))
-        try:
-            self.assertFalse(gui.acquire_single_instance(r"C:\dir\NCodeProcess.exe"))
-        finally:
-            gui.release_single_instance()
-
     def test_required_field_checkbuttons_have_equal_spacing(self):
         # 必填 MSG 字段的 4 个勾选项位于同一容器内等间距排列。
         root, app = self._build_app(1286, 668)
@@ -2329,21 +2288,45 @@ class ScanLifecycleTests(unittest.TestCase, LayoutWidgetMixin):
         finally:
             root.destroy()
 
+    def test_finish_scan_applies_configured_name_pattern(self):
+        root, app = self._build_app(1286, 668)
+        try:
+            app.allowed_name_pattern_var.set(r"^[A-Za-z0-9]+$")
+            plan = FilePlan("程序_x.MPF", "mpf", None, None, "keep")
+            result = ScanResult("root", [plan])
+            with patch("ncodeprocess.gui.simpledialog.askstring", return_value="程序名"):
+                app.finish_scan(result)
+            self.assertIsNone(plan.program)  # 中文名被收紧后的模式拒绝
+            plan.issues = []
+            with patch("ncodeprocess.gui.simpledialog.askstring", return_value="PROG1"):
+                app.finish_scan(result)
+            self.assertEqual(plan.program, "PROG1")
+        finally:
+            root.destroy()
 
-class RuntimeEventTests(unittest.TestCase):
+    def test_single_instance_mutex_name_is_stable_and_path_specific(self):
+        # WP-12：同一路径生成相同互斥体名，不同路径互不相同。
+        first = gui.single_instance_mutex_name(r"C:\dir\NCodeProcess.exe")
+        second = gui.single_instance_mutex_name(r"C:\dir\NCodeProcess.exe")
+        other = gui.single_instance_mutex_name(r"C:\other\NCodeProcess.exe")
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, other)
+        self.assertTrue(first.startswith("NCodeProcess_"))
+        # WP-S1：FNV-1a 64 位输出格式（16 位十六进制），锁定格式防止回归。
+        self.assertRegex(first, r"^NCodeProcess_[0-9a-f]{16}$")
+
+    @unittest.skipUnless(sys.platform == "win32", "命名互斥体仅存在于 Windows")
+    def test_acquire_single_instance_second_call_fails(self):
+        # WP-12：同目录第二个实例获取互斥体失败。
+        self.assertTrue(gui.acquire_single_instance(r"C:\dir\NCodeProcess.exe"))
+        try:
+            self.assertFalse(gui.acquire_single_instance(r"C:\dir\NCodeProcess.exe"))
+        finally:
+            gui.release_single_instance()
+
+
+class RuntimeEventTests(unittest.TestCase, LayoutWidgetMixin):
     """WP-C6：GUI 事件埋点（settings_loaded / settings_saved）。"""
-
-    def _build_app(self, width, height):
-        root = tk.Tk()
-        root.withdraw()
-        with patch.object(App, "scan", lambda _self: None):
-            app = App(root, settings_registry_key=TEST_SETTINGS_KEY)
-        root.geometry(f"{width}x{height}")
-        root.deiconify()
-        root.update_idletasks()
-        root.update()
-        root.update_idletasks()
-        return root, app
 
     def test_app_start_emits_settings_loaded_event(self):
         reset_runtime_log()
@@ -2364,7 +2347,6 @@ class RuntimeEventTests(unittest.TestCase):
             events = [entry["event"] for entry in runtime_log().snapshot()]
             self.assertIn("settings_saved", events)
         finally:
-            clear_all(TEST_SETTINGS_KEY)
             root.destroy()
 
     def test_save_fields_emits_settings_saved_without_names(self):

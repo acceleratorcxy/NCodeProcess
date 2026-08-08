@@ -639,6 +639,89 @@ class ReportViewerLayoutTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_overview_shows_environment_and_config_snapshot(self):
+        # 2026-08-08 报告完善：概览展示运行环境与处理配置快照。
+        root, app = self._build_viewer(1290, 720)
+        try:
+            app.report_data = {
+                "environment": {"platform": "win32", "python_version": "3.8.19", "machine": "64"},
+                "config_snapshot": {
+                    "encoding": "auto", "recursive": False, "save_aptsource": False,
+                    "overwrite_existing": True, "delete_extensions": [".log", ".moaptindexes"],
+                    "program_extensions": [".mpf"], "program_output_extension": ".MPF",
+                    "aptsource_dir": "aptsource", "allowed_name_pattern": "^[A-Za-z0-9_一-鿿-]+$",
+                    "g00_level": "error", "auto_m03": True, "auto_tool_change": False,
+                    "m03_position": "after-s", "feed_min": 20.0, "feed_max": 10000.0,
+                    "spindle_min": 500.0, "spindle_max": 12000.0, "newline": "auto",
+                    "required_fields": ["BIANZHI"], "aux_checks": ["m03-before-motion"],
+                    "multiple_spindle_warn": True, "require_end_marker": True,
+                    "require_m06": False, "require_spindle_speed": False,
+                    "max_file_size": 0, "max_files": 0, "retract_z_threshold": 20.0,
+                    "ask_backup": True,
+                },
+                "files": [],
+            }
+            app.file_items = []
+            app._update_views()
+            meta = app.meta_text.get()
+            self.assertIn("运行环境：win32 / Python 3.8.19 / 64 位", meta)
+            rows = app.config_table.get_children()
+            labels = {app.config_table.item(iid, "values")[0]: app.config_table.item(iid, "values")[1]
+                      for iid in rows}
+            self.assertEqual(labels.get("文件编码"), "auto")
+            self.assertEqual(labels.get("允许覆盖目标"), "是")
+            self.assertEqual(labels.get("待删除扩展名"), ".log、.moaptindexes")
+            self.assertEqual(labels.get("必填 MSG 字段"), "BIANZHI")
+            # 配置项列按内容缩窄不伸展，宽度留给值列（可手动拖拽调整）。
+            self.assertFalse(app.config_table.column("key", "stretch"))
+            self.assertTrue(app.config_table.column("value", "stretch"))
+        finally:
+            root.destroy()
+
+    def test_file_table_shows_failure_reason(self):
+        # 2026-08-08 报告完善：文件明细展示失败原因（error_kind + runtime_error）。
+        root, app = self._build_viewer(1290, 720)
+        try:
+            app.report_data = {
+                "files": [
+                    {"file": "P.MPF", "program": "P", "status": "success", "issues": []},
+                    {"file": "Q.MPF", "program": "Q", "status": "failed",
+                     "error_kind": "io", "runtime_error": "无法写入文件", "issues": []},
+                ],
+            }
+            app.file_items = app.report_data["files"]
+            app._populate_files()
+            failure = app.file_table.item("1", "values")[4]
+            self.assertIn("io: 无法写入文件", failure)
+            self.assertEqual(app.file_table.item("0", "values")[4], "")
+        finally:
+            root.destroy()
+
+    def test_changes_page_shows_decision_summary(self):
+        # 2026-08-08 报告完善：摘要并入换刀跳过/重复关系，重复裁决文件（无 changes/diff）也进入摘要。
+        root, app = self._build_viewer(1290, 720)
+        try:
+            app.report_data = {
+                "files": [
+                    {"file": "P.MPF", "program": "P", "status": "success", "issues": [],
+                     "changes": ["补全头部"],
+                     "auto_tool_change_skipped": "程序包含多把刀具，已跳过自动换刀",
+                     "duplicate_winner": "", "duplicate_target": ""},
+                    {"file": "Q.MPF", "program": "Q", "status": "duplicate-removed", "issues": [],
+                     "changes": [],
+                     "duplicate_winner": "P.MPF", "duplicate_target": "D:\\NC\\Q.MPF"},
+                ],
+            }
+            app.file_items = app.report_data["files"]
+            app._populate_files()   # 选中首行触发 _update_views → _fill_changes
+            summary_row = app.change_summary_table.item("0", "values")[1]
+            self.assertIn("换刀跳过：程序包含多把刀具", summary_row)
+            self.assertEqual(len(app.change_summary_table.get_children()), 2)
+            duplicate_row = app.change_summary_table.item("1", "values")[1]
+            self.assertIn("重复：采用 P.MPF", duplicate_row)
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

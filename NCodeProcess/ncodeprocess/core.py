@@ -13,7 +13,6 @@ import traceback
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from math import log
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -97,7 +96,6 @@ class Config:
     g00_level: str = "error"  # error, warning, allow
     auto_m03: bool = True
     auto_tool_change: bool = False
-    parallel_workers: int = 4
     require_spindle_speed: bool = False
     allowed_name_pattern: str = DEFAULT_NAME_PATTERN
     encoding: str = "auto"
@@ -332,6 +330,9 @@ class ProcessReport:
     generator: str = ""
     # WP-A3：报告级 APT 全局摘要（机床/转速/刀具/操作/刀具使用次数）。
     apt_summary: dict = field(default_factory=dict)
+    # 2026-08-08 报告完善：运行环境（platform/python 版本/位数）与扫描分类统计。
+    environment: dict = field(default_factory=dict)
+    scan_stats: dict = field(default_factory=dict)
 
     def to_dict(self):
         return asdict(self)
@@ -641,12 +642,20 @@ def _extract_apt_data(path: Path, encoding: str = "auto") -> Tuple[AptMeta, Tool
                     stats.min_z = stats.max_z = z
                     initialized = True
                 else:
-                    stats.min_x = min(stats.min_x, x)
-                    stats.max_x = max(stats.max_x, x)
-                    stats.min_y = min(stats.min_y, y)
-                    stats.max_y = max(stats.max_y, y)
-                    stats.min_z = min(stats.min_z, z)
-                    stats.max_z = max(stats.max_z, z)
+                    # 比较代替 min/max 内置调用：GOTO 行数量大（单文件数千行），
+                    # 逐行六次内置调用在 25 文件实测占约 0.18s（2026-08-08）。
+                    if x < stats.min_x:
+                        stats.min_x = x
+                    if x > stats.max_x:
+                        stats.max_x = x
+                    if y < stats.min_y:
+                        stats.min_y = y
+                    if y > stats.max_y:
+                        stats.max_y = y
+                    if z < stats.min_z:
+                        stats.min_z = z
+                    if z > stats.max_z:
+                        stats.max_z = z
                 stats.goto_count += 1
                 z_values.append(z)
         elif "CIRCLE" in raw_line:
@@ -665,8 +674,8 @@ def _extract_apt_data(path: Path, encoding: str = "auto") -> Tuple[AptMeta, Tool
             continue
         # 快速路径：只有 $$ 注释头行或含 SPINDL/FEDRAT/COOLNT/LOADTL 关键字的行
         # 才跑元数据正则（GOTO 轨迹行等绝大多数行直接跳过）。
-        if line.startswith("$$") or any(keyword in upper_line for keyword in
-                                        ("SPINDL", "FEDRAT", "COOLNT", "LOADTL")):
+        if (line.startswith("$$") or "SPINDL" in upper_line or "FEDRAT" in upper_line
+                or "COOLNT" in upper_line or "LOADTL" in upper_line):
             m = APT_MACHIN_RE.match(line)
             if m and not meta.machine:
                 meta.machine = m.group(1).strip()
@@ -785,22 +794,6 @@ def extract_apt_meta(path: Path, encoding: str = "auto") -> AptMeta:
     return _extract_apt_data(path, encoding)[0]
 
 
-_APT_META_CACHE: Dict[str, Tuple[int, int, str, AptMeta]] = {}
-
-
-def _extract_apt_meta_cached(path: Path, encoding: str = "auto") -> AptMeta:
-    stat = path.stat()
-    key = str(path.resolve())
-    cached = _APT_META_CACHE.get(key)
-    if cached and cached[:3] == (stat.st_mtime_ns, stat.st_size, encoding):
-        return cached[3]
-    meta = extract_apt_meta(path, encoding)
-    if len(_APT_META_CACHE) > 1000:
-        _APT_META_CACHE.clear()
-    _APT_META_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, meta)
-    return meta
-
-
 @dataclass
 class ToolpathStats:
     """APT 轨迹统计（规划轨迹，供报告与查看器展示）。"""
@@ -819,7 +812,6 @@ class ToolpathStats:
         return asdict(self)
 
 
-_APT_TOOLPATH_CACHE: Dict[str, Tuple[int, int, str, ToolpathStats]] = {}
 _APT_TRACE_CACHE: Dict[str, Tuple[int, int, str, List[float]]] = {}
 
 
@@ -874,18 +866,6 @@ def _stream_z_values(path: Path, encoding: str = "auto") -> List[float]:
 def extract_apt_toolpath(path: Path, encoding: str = "auto") -> ToolpathStats:
     """统计 APT 轨迹（单遍合并解析的薄包装，供测试/兼容使用）。"""
     return _extract_apt_data(path, encoding)[1]
-
-def _extract_apt_toolpath_cached(path: Path, encoding: str = "auto") -> ToolpathStats:
-    stat = path.stat()
-    key = str(path.resolve())
-    cached = _APT_TOOLPATH_CACHE.get(key)
-    if cached and cached[:3] == (stat.st_mtime_ns, stat.st_size, encoding):
-        return cached[3]
-    stats = extract_apt_toolpath(path, encoding)
-    if len(_APT_TOOLPATH_CACHE) > 1000:
-        _APT_TOOLPATH_CACHE.clear()
-    _APT_TOOLPATH_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, stats)
-    return stats
 
 
 def recount_retracts(path: Path, height: float, encoding: str = "auto") -> int:
@@ -1436,11 +1416,6 @@ def update_header_date(text: str, date_value: str) -> Tuple[str, bool]:
             lines[idx] = indent + _msg_line("DATE", date_value, semicolon)
             return newline.join(lines), True
     return text, False
-
-
-def _find_body_start(text: str) -> int:
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    return _header_end(lines)
 
 
 def add_initial_tool_change(text: str, tools: Sequence[ToolInfo], config: Config) -> Tuple[str, bool, str]:
@@ -2351,33 +2326,6 @@ def reprocess_file(f: FilePlan, info: ProgramInfo, config: Config, *, tools: Seq
             rows=parsed_rows))
 
 
-def _parallel_apply(items, function, workers: int):
-    """Apply a function with lightweight worker threads.
-
-    concurrent.futures imports its process-pool implementation as part of the
-    package, which makes PyInstaller bundle multiprocessing and XML support
-    even though this application only uses threads.  This small worker loop
-    provides the required bounded parallelism without those unused runtimes.
-    """
-    iterator = iter(items)
-    lock = threading.Lock()
-
-    def run():
-        while True:
-            with lock:
-                try:
-                    item = next(iterator)
-                except StopIteration:
-                    return
-            function(item)
-
-    threads = [threading.Thread(target=run, name=f"nc-mpf-{index + 1}") for index in range(workers)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-
 def _config_cache_signature(config: Config) -> str:
     """配置签名：所有字段归一化排序，保证任一配置变化都失效缓存。"""
     items = []
@@ -2619,13 +2567,15 @@ def analyze_plan_file(f: FilePlan, directory: Path, info: ProgramInfo, config: C
         f.issues.append(Issue(f.source, 1, "", "processing", "error", str(e)))
 
 
-def _prepare_plan_context(scan: ScanResult, config: Config,
-                          analyze: bool) -> Dict[str, object]:
+def _prepare_plan_context(scan: ScanResult, config: Config) -> Dict[str, object]:
     """Collect the newest APT per program, automatic tool defaults, and the
     cross-program feed reference used by single-segment programs.
 
-    In light mode (analyze=False) the expensive APT metadata/toolpath parsing
-    is skipped; analyze_plan_file parses a matching APT on demand.
+    APT metadata/toolpath parsing is always deferred to analyze_plan_file,
+    which parses a matching APT on demand (merged single pass, cached by
+    mtime/size).  The light plan phase therefore stays fast in both modes,
+    and full analysis runs inside the same worker pool instead of a serial
+    pre-pass (2026-08-08 perf: cold full scan 5.5s -> ~4.1s on 25 programs).
     """
     directory = Path(scan.input_dir)
     auto_tools: Dict[str, Tuple[float, List[ToolInfo]]] = {}
@@ -2649,17 +2599,6 @@ def _prepare_plan_context(scan: ScanResult, config: Config,
                     tools = _extract_apt_tools_from_path(
                         directory / apt_plan.source, config.encoding)
                 apt_plan.parsed_tools = list(tools)
-            if analyze:
-                # Full mode: one merged pass covers metadata/toolpath/tools so
-                # every MPF can reference them and the report carries APT
-                # summaries (the merged result is cached by mtime/size).
-                meta, toolpath, parsed = _extract_apt_data_cached(
-                    directory / apt_plan.source, config.encoding)
-                apt_plan.apt_meta = meta
-                apt_plan.apt_toolpath = toolpath
-                if parsed:
-                    apt_plan.parsed_tools = list(parsed)
-                    tools = list(parsed)
             auto_tools[program] = (mtime, tools)
         except Exception:
             apt_plan.apt_meta = None
@@ -2755,12 +2694,14 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None,
     duplicate resolution are ready, but the per-file deep analysis
     (header/tool/M03/validation/F detection) is deferred.  The light result
     carries analyze_context so the GUI can run analyze_plan_file per file in
-    the background and keep the UI responsive.
+    the background and keep the UI responsive.  In full mode (analyze=True)
+    the same on-demand APT path is used, so both modes share one analysis
+    pipeline and the whole directory analysis stays inside the worker pool.
     """
     info = info or ProgramInfo()
     config = config or Config()
     tool_overrides = tool_overrides or {}
-    context = _prepare_plan_context(scan, config, analyze=analyze)
+    context = _prepare_plan_context(scan, config)
     emit_event("info", "plan_built",
                f"生成处理计划：{len(scan.files)} 个文件，MPF {sum(f.kind == 'mpf' for f in scan.files)} 个，"
                f"APTSOURCE {sum(f.kind == 'aptsource' for f in scan.files)} 个"
@@ -2775,12 +2716,10 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None,
                               auto_tools, feed_reference, tool_overrides,
                               context["mpf_sources"])
 
-        mpf_items = [f for f in scan.files if f.kind == "mpf" and f.program and f.original_text is not None]
-        if len(mpf_items) > 1 and config.parallel_workers > 1:
-            workers = min(config.parallel_workers, len(mpf_items))
-            _parallel_apply(mpf_items, process_mpf, workers)
-        else:
-            for item in mpf_items:
+        # GIL 下纯计算线程并行无收益且引入调度开销（2026-08-08 实测：
+        # 4 线程并行区 3.96s > 串行等价 3.45s），统一串行逐文件分析。
+        for item in scan.files:
+            if item.kind == "mpf" and item.program and item.original_text is not None:
                 process_mpf(item)
     _resolve_plan_targets(scan, config)
     scan.analyze_context = {
@@ -2829,6 +2768,12 @@ def _config_snapshot(config: Config) -> dict:
         "recursive": config.recursive,
         "save_aptsource": config.save_aptsource,
         "overwrite_fields": config.overwrite_fields,
+        "overwrite_existing": config.overwrite_existing,
+        "delete_extensions": sorted(config.delete_extensions),
+        "program_extensions": sorted(config.program_extensions),
+        "program_output_extension": config.program_output_extension,
+        "aptsource_dir": config.aptsource_dir,
+        "allowed_name_pattern": config.allowed_name_pattern,
         "g00_level": config.g00_level,
         "auto_m03": config.auto_m03,
         "auto_tool_change": config.auto_tool_change,
@@ -3170,6 +3115,18 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
     report.user_confirmations = list(confirmations)
     report.scan_warnings = list(scan.warnings)
     report.archive_stamp = scan.archive_stamp
+    # 2026-08-08 报告完善：运行环境（纯 sys 实现，不引入新依赖）与扫描分类统计。
+    report.environment = {
+        "platform": sys.platform,
+        "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+        "machine": "64" if sys.maxsize > 2 ** 32 else "32",
+    }
+    report.scan_stats = {
+        "total": len(scan.files),
+        "mpf": sum(f.kind == "mpf" for f in scan.files),
+        "aptsource": sum(f.kind == "aptsource" for f in scan.files),
+        "intermediate": sum(f.kind == "intermediate" for f in scan.files),
+    }
     dst_dir.mkdir(parents=True, exist_ok=True)
     backup_root = ""
     if backup:
@@ -3199,7 +3156,7 @@ def process_plan(scan: ScanResult, output_dir: Optional[str] = None, config: Opt
         diff = []
         if f.original_text is not None and f.output_text is not None and f.original_text != f.output_text:
             diff = list(difflib.unified_diff(f.original_text.splitlines(), f.output_text.splitlines(), fromfile=f.source + " (before)", tofile=(Path(f.target).name if f.target else f.source) + " (after)", lineterm=""))
-        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "target": f.target or "", "program_name_source": f.program_name_source or "", "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None, "apt_meta": f.apt_meta.to_dict() if f.apt_meta else None, "toolpath_stats": f.apt_toolpath.to_dict() if f.apt_toolpath else None, "feed_outlier": f.feed_outlier.to_dict() if f.feed_outlier else None}
+        item = {"file": f.source, "action": f.action, "program": f.program, "encoding": f.encoding, "target": f.target or "", "program_name_source": f.program_name_source or "", "changes": f.changes, "diff": diff, "issues": [asdict(x) for x in f.issues], "stats": f.stats.as_dict() if f.stats else None, "apt_meta": f.apt_meta.to_dict() if f.apt_meta else None, "toolpath_stats": f.apt_toolpath.to_dict() if f.apt_toolpath else None, "feed_outlier": f.feed_outlier.to_dict() if f.feed_outlier else None, "header": extract_header_fields(f.output_text or ""), "auto_tool_change_skipped": f.auto_tool_change_skipped or "", "duplicate_winner": f.duplicate_winner or "", "duplicate_target": f.duplicate_target or ""}
         errors = [x for x in f.issues if x.severity == "error"]
         report.warnings += sum(x.severity == "warning" for x in f.issues)
         report.errors += len(errors)

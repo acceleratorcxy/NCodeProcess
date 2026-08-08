@@ -18,6 +18,49 @@ DATA_DIR_NAMES = ("NCodeProcessData", "NCPostProcessData")
 PARAMETERS = ("F", "S", "X", "Y", "Z")
 # 鼠标悬停在单元格上多久后弹出内容提示（毫秒）。
 CELL_TOOLTIP_DELAY_MS = 1500
+# 2026-08-08 报告完善：config_snapshot 键 → 中文标签（顺序即报告输出顺序）。
+CONFIG_SNAPSHOT_LABELS = (
+    ("encoding", "文件编码"),
+    ("recursive", "递归扫描"),
+    ("save_aptsource", "保存 APTSOURCE"),
+    ("overwrite_fields", "覆盖已有字段"),
+    ("overwrite_existing", "允许覆盖目标"),
+    ("delete_extensions", "待删除扩展名"),
+    ("program_extensions", "主程序扩展名"),
+    ("program_output_extension", "输出扩展名"),
+    ("aptsource_dir", "APTSOURCE 归档目录"),
+    ("allowed_name_pattern", "程序名允许字符"),
+    ("g00_level", "G00 级别"),
+    ("auto_m03", "自动补写 M03"),
+    ("auto_tool_change", "自动添加换刀"),
+    ("m03_position", "M03 补写位置"),
+    ("feed_min", "F 下限"),
+    ("feed_max", "F 上限"),
+    ("spindle_min", "S 下限"),
+    ("spindle_max", "S 上限"),
+    ("newline", "换行策略"),
+    ("required_fields", "必填 MSG 字段"),
+    ("aux_checks", "辅助指令顺序"),
+    ("multiple_spindle_warn", "多 S 值警告"),
+    ("require_end_marker", "要求结束标记"),
+    ("require_m06", "要求 M06"),
+    ("require_spindle_speed", "要求 S 转速"),
+    ("max_file_size", "单文件大小上限"),
+    ("max_files", "扫描文件数量上限"),
+    ("retract_z_threshold", "抬刀高度阈值"),
+    ("ask_backup", "处理前询问备份"),
+)
+
+
+def _config_value_text(value) -> str:
+    """配置值展示：布尔转是/否，列表转顿号分隔，空值显示为空。"""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (list, tuple)):
+        return "、".join(str(item) for item in value) if value else ""
+    return str(value)
 
 
 class CellTooltip:
@@ -603,12 +646,14 @@ class ReportViewer(ttk.Frame):
         issue_width = self._treeview_font.measure("999 错 / 999 警") + 20
         # 程序/文件列按真实数据中最长单元格（未配对中间文件完整源文件名，约 43 字符）实测宽度。
         program_width = self._treeview_font.measure("D0354F31311-201_AG6D311A0101_I.MOAPTIndexes") + 24
-        self.file_table = self._table(self.files_page, ("program", "action", "issue", "target"), ("程序/文件", "动作", "校验", "目标"), (program_width, action_width, issue_width, 700))
+        # 2026-08-08 报告完善：失败原因列（error_kind: runtime_error，仅失败文件非空）。
+        self.file_table = self._table(self.files_page, ("program", "action", "issue", "target", "failure"), ("程序/文件", "动作", "校验", "目标", "失败原因"), (program_width, action_width, issue_width, 700, 260))
         self.file_table.column("program", width=program_width, minwidth=140, stretch=False)
         self.file_table.column("action", width=action_width, minwidth=action_width, stretch=False)
         self.file_table.column("issue", width=issue_width, minwidth=issue_width, stretch=False)
         # 目标列固定且总和超过可视区：横向滚动条初始即激活，可直接滚动查看长路径。
         self.file_table.column("target", width=700, minwidth=200, stretch=False)
+        self.file_table.column("failure", width=260, minwidth=120, stretch=False)
         self.file_table._container.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
         self.file_table.bind("<<TreeviewSelect>>", self._on_file_selected)
 
@@ -642,6 +687,18 @@ class ReportViewer(ttk.Frame):
         chart_frame.grid(row=2, column=0, sticky="nsew")
         chart_frame.columnconfigure(0, weight=1)
         chart_frame.columnconfigure(1, weight=1)
+        # 2026-08-08 报告完善：处理配置快照（config_snapshot）中文标签键值表格。
+        config_box = ttk.LabelFrame(self.overview_page, text="处理配置")
+        config_box.grid(row=3, column=0, sticky="ew", padx=6, pady=(8, 0))
+        config_box.columnconfigure(0, weight=1)
+        # 配置项列按最长中文标签实测宽度缩窄，其余宽度留给值列；列宽可手动拖拽调整。
+        key_width = max(self._treeview_font.measure(label) for _key, label in CONFIG_SNAPSHOT_LABELS) + 24
+        self.config_table = self._table(config_box, ("key", "value"), ("配置项", "值"), (key_width, 900))
+        self.config_table.column("key", width=key_width, minwidth=key_width, stretch=False)
+        self.config_table.column("value", width=900, minwidth=200, stretch=True)
+        self.config_table.configure(height=9)
+        self._bind_cell_tooltip(self.config_table)
+        self.config_table._container.pack(fill="both", expand=True, padx=4, pady=4)
         chart_frame.rowconfigure(0, weight=1)
         self.result_canvas = tk.Canvas(chart_frame, background="white", highlightthickness=1, highlightbackground="#d0d7de")
         self.result_canvas.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
@@ -1248,7 +1305,7 @@ class ReportViewer(ttk.Frame):
         if not self.file_items:
             return
         if program_filter == "__all__":
-            self.file_table.insert("", "end", iid="all", values=("全部文件", "汇总", "", ""))
+            self.file_table.insert("", "end", iid="all", values=("全部文件", "汇总", "", "", ""))
         for index, item in enumerate(self.file_items):
             if not self._matches_filter(item, program_filter):
                 continue
@@ -1258,7 +1315,9 @@ class ReportViewer(ttk.Frame):
             source = item.get("program_name_source") or ""
             program_cell = f"{display_program}（{source}）" if source else display_program
             target = item.get("target") or ""
-            self.file_table.insert("", "end", iid=str(index), values=(program_cell, item.get("status") or item.get("action") or "", issue_text, target), tags=(("error",) if errors else (("warning",) if warnings else ())))
+            runtime_error = item.get("runtime_error") or ""
+            failure = f"{item.get('error_kind') or 'error'}: {runtime_error}" if runtime_error else ""
+            self.file_table.insert("", "end", iid=str(index), values=(program_cell, item.get("status") or item.get("action") or "", issue_text, target, failure), tags=(("error",) if errors else (("warning",) if warnings else ())))
         self.file_table.tag_configure("error", foreground="#b42318", font=("Microsoft YaHei UI", 9, "bold"))
         self.file_table.tag_configure("warning", foreground="#b54708", font=("Microsoft YaHei UI", 9, "bold"))
         children = self.file_table.get_children()
@@ -1317,7 +1376,15 @@ class ReportViewer(ttk.Frame):
         warnings = [str(item) for item in (data.get("scan_warnings") or [])]
         if warnings:
             meta_parts.append("扫描警告：" + "；".join(warnings))
+        env = data.get("environment") or {}
+        if env:
+            meta_parts.append("运行环境：{platform} / Python {python_version} / {machine} 位".format(
+                platform=env.get("platform", ""),
+                python_version=env.get("python_version", ""),
+                machine=env.get("machine", ""),
+            ))
         self.meta_text.set("\n".join(meta_parts))
+        self._fill_config_snapshot(data.get("config_snapshot"))
         self._draw_charts()
         self._fill_apt(selected)
         self._fill_stats(selected)
@@ -1402,11 +1469,22 @@ class ReportViewer(ttk.Frame):
                 continue
             changes = file_item.get("changes") or []
             diff = file_item.get("diff") or []
-            if not changes and not diff:
+            # 重复文件通常无 changes/diff，但裁决关系（duplicate_winner）仍应进入摘要。
+            if not changes and not diff and not file_item.get("duplicate_winner"):
                 continue
             summary = "、".join(str(change) for change in changes[:8])
             if len(changes) > 8:
                 summary += "…"
+            # 2026-08-08 报告完善：摘要并入换刀跳过原因与重复目标裁决关系。
+            extra = []
+            skipped = file_item.get("auto_tool_change_skipped") or ""
+            if skipped:
+                extra.append("换刀跳过：" + str(skipped))
+            winner = file_item.get("duplicate_winner") or ""
+            if winner:
+                extra.append("重复：采用 " + str(winner))
+            if extra:
+                summary = (summary + "；" if summary else "") + "；".join(extra)
             iid = str(idx)
             self.change_summary_table.insert(
                 "", "end", iid=iid,
@@ -1477,6 +1555,20 @@ class ReportViewer(ttk.Frame):
         self.file_items = []
         self.report_label.set(message)
 
+    def _fill_config_snapshot(self, snapshot):
+        """概览页处理配置表：config_snapshot 键值按中文标签逐行展示（缺失键回退）。"""
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        for item in self.config_table.get_children():
+            self.config_table.delete(item)
+        for key, label in CONFIG_SNAPSHOT_LABELS:
+            if key not in snapshot:
+                continue
+            value = _config_value_text(snapshot.get(key))
+            self.config_table.insert("", "end", values=(label, value))
+        if not self.config_table.get_children():
+            self.config_table.insert("", "end", values=("配置快照", "当前报告无配置快照"))
+
     def _draw_charts(self):
         data = self.report_data
         self._draw_bar_chart(self.result_canvas, "文件处理结果", [("成功", data.get("success", 0)), ("失败", data.get("failed", 0)), ("跳过", data.get("skipped", 0)), ("移动", data.get("moved", 0)), ("删除", data.get("deleted", 0))] if data else [], ["#2da44e", "#cf222e", "#8c959f", "#0969da", "#8250df"])
@@ -1504,8 +1596,28 @@ class ReportViewer(ttk.Frame):
         canvas.create_line(24, base_y, width - 20, base_y, fill="#8c959f")
 
 
+def _set_window_icon(root):
+    """Set the Tk window icon (title bar/taskbar) from the bundled .ico.
+
+    PyInstaller extracts datas under sys._MEIPASS; in development the icon
+    lives next to the package (../assets).  Failures are ignored so a missing
+    icon never prevents the app from starting.
+    """
+    try:
+        if getattr(sys, "frozen", False):
+            base = Path(sys._MEIPASS)
+        else:
+            base = Path(__file__).resolve().parent.parent
+        icon_path = base / "assets" / "NCodeProcessReportViewer_icon.ico"
+        if icon_path.exists():
+            root.iconbitmap(str(icon_path))
+    except (tk.TclError, OSError):
+        pass
+
+
 def main():
     root = tk.Tk()
+    _set_window_icon(root)
     try:
         style = ttk.Style()
         style.theme_use("vista")
