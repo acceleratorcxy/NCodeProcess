@@ -38,6 +38,12 @@ NCodeProcess/docs/项目更改测试发布流程.md
 NCodeProcessReportViewer/docs/更改记录.md
 NCodeProcessReportViewer/docs/项目更改测试发布流程.md
 
+# ── 带图用户手册（仅本地留存，GitHub 版为无图版） ────────
+NCodeProcess/docs/用户手册-带图版.md
+NCodeProcessReportViewer/docs/用户手册-带图版.md
+NCodeProcess/docs/screenshots/
+NCodeProcessReportViewer/docs/screenshots/
+
 # ── 样例数据与测试部署目录（不入库） ────────────────────
 NCodeProcess/样例文件/
 NCodeProcess/测试/
