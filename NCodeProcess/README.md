@@ -6,7 +6,7 @@
 
 将单个 `NCodeProcess.exe` 复制到需要处理的 CATIA 后处理文件目录，双击后程序会自动扫描 EXE 所在目录，不需要选择输入目录。MPF、APTSOURCE、待删除文件使用三个独立表格。APTSOURCE 默认不保存；只有手动勾选“保存 APTSOURCE（按时间归档）”后，才会归档到 `aptsource/YYYYMMDD_HHMMSS/`。选择 MPF 后，右侧以表格展示已有/计划写入的 MSG 信息、校验问题以及 F/S/X/Y/Z 参数统计，并可按程序新增、修改或删除刀具以及添加自定义刀具类型。
 
-无 MSG 头部的程序默认按 HASS 处理，机床为 `HASS`；已有 MSG 头部的程序默认机床为 `2500B`；控制系统均固定为 `SIE840D`。程序信息填写后必须点击“应用设置”才会进入预览和处理，未点击时按默认规则处理。生成的 MSG 头部与第一条 NC 正文之间不额外添加空行。
+无 MSG 头部的程序默认按 HASS 处理，机床为 `HASS`；已有 MSG 头部的程序默认机床为 `2500B`；控制系统缺省为 `SIE840D`（已有非空值保留）。程序信息填写后必须点击“应用设置”才会进入预览和处理，未点击时按默认规则处理。生成的 MSG 头部与第一条 NC 正文之间不额外添加空行。
 
 图号和版次为必填项，未填写或未点击“应用设置”时会放弃修改。图号默认保持为空，界面提供当前目录以及向上三层目录的选择框，点击读取按钮后才填入所选文件夹名。新增的特殊刀具类型和按程序修改的刀具信息保存在 `NCodeProcessData/special_tools.json`。处理报告默认不输出；点击“导出报告”后，无需选择路径，带时间的 JSON 报告会自动保存到当前目录的 `NCodeProcessData` 文件夹，并只保留最新三份。程序启动与扫描阶段不会自动生成 `NCodeProcessData` 目录或任何日志文件；导出报告时仅生成**单个 JSON 报告文件**，运行日志完整内嵌其 `runtime_log` 字段，并记录工具版本、报告来源、用户确认项、处理配置快照以及每文件目标路径与程序名来源。默认刀具类型还包括钻头和中心钻，刀具 MSG 始终位于程序头信息最后。
 
@@ -45,7 +45,7 @@
 python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe GAOWEI --drawing-number D0354F31311-201 --part-version A --nc-machine 2500B --control-system SIE840D
 ```
 
-预览不会修改文件；确认执行时追加 `--yes`。命令行如需保存 APTSOURCE，应追加 `--save-aptsource`。此外支持 `--output` 指定独立输出目录、`--overwrite`、`--overwrite-fields`、`--g00-level`、`--no-m03`、`--tool number,dia,tool_coner,tool_type` 和 JSON/CSV 报告导出。校验与处理策略参数与 GUI 设置一致：`--m03-position`、`--newline`、`--feed-min/--feed-max/--spindle-min/--spindle-max`、`--aux-m03/--aux-m05/--aux-m08/--aux-m09`（及 `--no-` 前缀禁用）、`--feed-outlier-min-count/--feed-outlier-ratio/--feed-outlier-low/--feed-outlier-high`、`--multiple-spindle/--no-multiple-spindle`、`--max-file-size/--max-files`、`--retract-z-threshold`；未显式传参的项自动读取 GUI 持久化偏好（注册表/AppData/用户主目录）。
+预览不会修改文件；确认执行时追加 `--yes`。命令行如需保存 APTSOURCE，应追加 `--save-aptsource`。此外支持 `--output` 指定独立输出目录、`--overwrite`、`--overwrite-fields`、`--g00-level`、`--no-m03`、`--tool number,dia,tool_coner,tool_type,tool_angle` 和 JSON/CSV 报告导出。校验与处理策略参数与 GUI 设置一致：`--m03-position`、`--newline`、`--feed-min/--feed-max/--spindle-min/--spindle-max`、`--require-m06`、`--require-spindle-speed`、`--allow-no-end`（缺省读持久化偏好）、`--aux-m03/--aux-m05/--aux-m08/--aux-m09`（及 `--no-` 前缀禁用）、`--multiple-spindle/--no-multiple-spindle`、`--max-file-size/--max-files`、`--retract-z-threshold`（F 离群的容差 30% 与罕见次数 ≤2 为固定常量，无 CLI 参数）；未显式传参的项自动读取 GUI 持久化偏好（注册表/AppData/用户主目录）。
 
 ## 处理内容
 
@@ -63,7 +63,7 @@ python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe
 
 ## 便携打包
 
-> F 离群设置的当前口径（2026-08-07）：采用《F值异常检测方法》的抬刀平面分段对比——程序以抬刀平面（最大 Z 簇）切分为多个“来回”段，每段统计运动行的有效 F（含模态继承）；全程序出现 ≤2 次的 F 值与其他段所有 F 的相对差距都超过 30% 时输出提示，>60% 为警告、30%~60% 为复核；所有出现行均为纯 Z 运动的轴向切入值按规则豁免（值无关）；单段程序只输出 F 分布表。容差固定 30%，不随刀具尺寸放大；APT 仅作上下文辅助。
+> F 离群设置的当前口径（2026-08-07）：采用《F值异常检测方法》的抬刀平面分段对比——程序以抬刀平面（最大 Z 簇）切分为多个“来回”段，每段统计运动行的有效 F（含模态继承）；全程序出现 ≤2 次的 F 值与其他段所有 F 的相对差距都超过 30% 时输出提示，>60% 为警告、30%~60% 为复核；所有出现行均为纯 Z 运动的轴向切入值按规则豁免（值无关）；单段程序优先使用同目录跨程序常见档位参照，无参照时输出 F 分布表。容差固定 30%，不随刀具尺寸放大；APT 仅作上下文辅助。
 
 在 Windows 上准备 Python 3.8 环境，并安装 PyInstaller 后运行：
 
