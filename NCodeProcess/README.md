@@ -42,7 +42,7 @@
 也可以使用命令行预览：
 
 ```text
-python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi CHENXINYU --shenhe GAOWEI --drawing-number D0354F31311-201 --part-version A --nc-machine 2500B --control-system SIE840D
+python -m ncodeprocess -i "D:\\CATIA\\输出目录" --bianzhi 编制人 --shenhe 审核人 --drawing-number D0354F31311-201 --part-version A --nc-machine 2500B --control-system SIE840D
 ```
 
 预览不会修改文件；确认执行时追加 `--yes`。命令行如需保存 APTSOURCE，应追加 `--save-aptsource`。此外支持 `--output` 指定独立输出目录、`--overwrite`、`--overwrite-fields`、`--g00-level`、`--no-m03`、`--tool number,dia,tool_coner,tool_type,tool_angle` 和 JSON/CSV 报告导出。校验与处理策略参数与 GUI 设置一致：`--m03-position`、`--newline`、`--feed-min/--feed-max/--spindle-min/--spindle-max`、`--require-m06`、`--require-spindle-speed`、`--allow-no-end`（缺省读持久化偏好）、`--aux-m03/--aux-m05/--aux-m08/--aux-m09`（及 `--no-` 前缀禁用）、`--multiple-spindle/--no-multiple-spindle`、`--max-file-size/--max-files`、`--retract-z-threshold`（F 离群的容差 30% 与罕见次数 ≤2 为固定常量，无 CLI 参数）；未显式传参的项自动读取 GUI 持久化偏好（注册表/AppData/用户主目录）。
