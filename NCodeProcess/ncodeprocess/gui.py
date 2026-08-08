@@ -472,7 +472,6 @@ class App(ttk.Frame):
         self.program_compare_left_gutter = None
         self.program_compare_right_gutter = None
         self.keep_table_menu = None
-        self._syncing_keep_selection = False
         self._startup_after_ids = set()
         self._column_profile_states = []
         self.cell_tooltip = CellTooltip(self.master)
@@ -480,6 +479,8 @@ class App(ttk.Frame):
         self._cell_tip_after = None
         self._cell_tip_text = ""
         self.bind("<Destroy>", self._cancel_startup_callbacks, add="+")
+        # WP：处理/扫描进行中关闭窗口会中断写盘——主窗口加关闭守卫，确认后才退出。
+        self.master.protocol("WM_DELETE_WINDOW", self._on_close)
         self.tool_types = list(DEFAULT_TOOL_TYPES)
         self._configure_typography()
         self._build()
@@ -582,6 +583,17 @@ class App(ttk.Frame):
         after_id = self.after(delay, run)
         self._startup_after_ids.add(after_id)
 
+    def _on_close(self):
+        """主窗口关闭守卫：处理/扫描进行中先确认，避免中断写盘或后台分析。"""
+        if self._processing or self._scan_running:
+            if not messagebox.askyesno(
+                    "正在处理中",
+                    "处理或扫描仍在进行，关闭窗口将中断操作，可能留下未完成的文件改动。\n"
+                    "确定要退出吗？",
+                    parent=self.master):
+                return
+        self.master.destroy()
+
     def _cancel_startup_callbacks(self, event):
         """Cancel pending startup work when this frame is destroyed."""
         if event.widget is not self:
@@ -601,6 +613,14 @@ class App(ttk.Frame):
             except tk.TclError:
                 pass
             state["after_id"] = None
+        # 悬停提示的 after 一并取消（不调 hide()：销毁过程中 Toplevel 可能已不存在）。
+        if self._cell_tip_after is not None:
+            try:
+                self.master.after_cancel(self._cell_tip_after)
+            except tk.TclError:
+                pass
+            self._cell_tip_after = None
+            self._cell_tip_key = None
 
     def _bind_column_profile(self, table, specs, available_width_callback):
         """Keep a Treeview's declared column profile fitted to its viewport."""
@@ -1181,7 +1201,6 @@ class App(ttk.Frame):
         ybar.grid(row=0, column=2, sticky="ns")
         xbar.grid(row=1, column=0, columnspan=2, sticky="ew")
         main._keep_ybar = ybar
-        main._keep_xbar = xbar
         self._bind_column_profile(
             main,
             self.keep_column_specs,
@@ -1211,7 +1230,6 @@ class App(ttk.Frame):
             tree.bind("<Button-4>", lambda _event: (move_y("scroll", -1, "units"), "break")[1])
             tree.bind("<Button-5>", lambda _event: (move_y("scroll", 1, "units"), "break")[1])
         main._keep_frame = frame
-        issue._keep_frame = frame
         return main, issue
 
 
@@ -1329,8 +1347,12 @@ class App(ttk.Frame):
             },
         }
         temp = self.special_tools_path.with_suffix(".tmp")
-        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(self.special_tools_path)
+        try:
+            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.replace(self.special_tools_path)
+        finally:
+            if temp.exists():
+                temp.unlink()
 
     def use_folder_as_drawing(self):
         selected = self.folder_choice_var.get()
@@ -1770,10 +1792,19 @@ class App(ttk.Frame):
         self.status.set("正在应用程序信息并生成预览……")
 
         def work():
-            applied = reprocess_plans(plans, info, preview_config, self.program_tools)
+            try:
+                applied = reprocess_plans(plans, info, preview_config, self.program_tools)
+            except Exception as exc:
+                self._safe_after(0, lambda: self._finish_apply_error(exc))
+                return
             self._safe_after(0, lambda: self._finish_apply_info(applied, generation))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _finish_apply_error(self, exc):
+        """后台重处理异常：恢复状态栏并提示（只读重处理，无写盘风险）。"""
+        self.status.set("应用设置失败，请重试。")
+        messagebox.showerror("应用设置失败", f"重处理预览时发生错误：\n{exc}", parent=self.master)
 
     def _finish_apply_info(self, applied_plans, generation):
         """后台重处理完成后回到主线程刷新预览（代际防护：旧结果不覆盖新状态）。"""
@@ -2055,6 +2086,10 @@ class App(ttk.Frame):
         self.scan_progress.grid_remove()
         self.apply_all_button.configure(state="normal")
         self.apply_selected_button.configure(state="normal")
+        if self.scan_result is not None:
+            # 上一份有效计划仍在：处理/统计按钮可继续使用。
+            self.process_button.configure(state="normal")
+            self.all_stats_button.configure(state="normal")
         self.status.set("扫描失败，请重试。")
 
     def finish_scan(self, result, generation=None):
@@ -3040,9 +3075,25 @@ class App(ttk.Frame):
             def report(done, total, name):
                 with self._process_progress_lock:
                     self._process_progress = (done, total, name)
-            result = process_plan(self.scan_result, str(self.workdir), cfg, confirm_cleanup=True, progress_callback=report, backup=backup, generator="gui", confirmations=confirmations)
+            try:
+                result = process_plan(self.scan_result, str(self.workdir), cfg, confirm_cleanup=True, progress_callback=report, backup=backup, generator="gui", confirmations=confirmations)
+            except Exception as exc:
+                # 异常必须回到主线程恢复界面：否则 _poll_process_progress 永不终止、
+                # process 按钮会话级禁用。
+                self._safe_after(0, lambda: self._finish_process_error(exc))
+                return
             self._safe_after(0, lambda: self.finish_process(result))
         threading.Thread(target=work, daemon=True).start()
+
+    def _finish_process_error(self, exc):
+        """处理线程异常：停止轮询、恢复按钮，避免会话级禁用与状态残留。"""
+        self._processing = False
+        with self._process_progress_lock:
+            self._process_progress = None
+        if self.scan_result is not None:
+            self.process_button.configure(state="normal")
+        self.status.set("处理失败，请重试。")
+        messagebox.showerror("处理失败", f"处理过程中发生错误：\n{exc}", parent=self.master)
 
     def _backup_requested(self):
         """Ask the operator whether to snapshot files before processing."""

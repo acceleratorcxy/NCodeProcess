@@ -115,7 +115,15 @@ def discover_reports(directory: Path) -> List[Path]:
         if folder.is_dir():
             for pattern in REPORT_PATTERNS:
                 candidates.update(path.resolve() for path in folder.glob(pattern) if path.is_file())
-    return sorted(candidates, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+    # glob 与 stat 之间文件可能被删除/移动：不可读路径跳过，不让刷新崩溃。
+    result = []
+    for path in candidates:
+        try:
+            result.append((path.stat().st_mtime, path.name, path))
+        except OSError:
+            continue
+    result.sort(reverse=True)
+    return [path for _mtime, _name, path in result]
 
 
 def load_report(path: Path) -> dict:
@@ -478,6 +486,7 @@ class ReportViewer(ttk.Frame):
         self._cell_tip_text = ""
         self._treeview_font = tkfont.Font(root=self.master, family="Microsoft YaHei UI", size=9)
         self._build()
+        self.bind("<Destroy>", self._on_destroy, add="+")
         self.refresh_reports()
 
     def _configure_window(self):
@@ -1198,10 +1207,17 @@ class ReportViewer(ttk.Frame):
 
     def refresh_reports(self):
         self.report_paths = discover_reports(self.base_dir)
+        valid = []
+        for path in self.report_paths:
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:
+                continue
+            valid.append((path, stamp))
+        self.report_paths = [path for path, _stamp in valid]
         for item in self.report_table.get_children():
             self.report_table.delete(item)
-        for index, path in enumerate(self.report_paths):
-            stamp = path.stat().st_mtime
+        for index, (path, stamp) in enumerate(valid):
             time_text = datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S")
             self.report_table.insert("", "end", iid=str(index), values=(time_text, path.name))
         if self.report_paths:
@@ -1210,6 +1226,18 @@ class ReportViewer(ttk.Frame):
             self._load_report(self.report_paths[0])
         else:
             self._clear_view("未找到报告。请将报告放入当前目录、NCodeProcessData 或兼容的旧版数据目录，或点击“打开报告文件”。")
+
+    def _on_destroy(self, event):
+        """窗口销毁时取消悬停提示的 after，避免回调作用于已销毁控件。"""
+        if event.widget is not self:
+            return
+        if self._cell_tip_after is not None:
+            try:
+                self.master.after_cancel(self._cell_tip_after)
+            except tk.TclError:
+                pass
+            self._cell_tip_after = None
+            self._cell_tip_key = None
 
     def open_report(self):
         path = filedialog.askopenfilename(

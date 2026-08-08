@@ -145,8 +145,12 @@ def _write_settings_file(values: Dict[str, str], key: str) -> Path:
         try:
             candidate.parent.mkdir(parents=True, exist_ok=True)
             temp = candidate.with_name(candidate.name + ".tmp")
-            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp.replace(candidate)
+            try:
+                temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                temp.replace(candidate)
+            finally:
+                if temp.exists():
+                    temp.unlink()
             return candidate
         except OSError:
             continue
@@ -161,8 +165,12 @@ def _write_settings_file_exact(values: Dict[str, str], path: Path) -> None:
             data[name] = str(values[name])
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(path)
+    try:
+        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(path)
+    finally:
+        if temp.exists():
+            temp.unlink()
 
 
 def _load_registry(key: str) -> Dict[str, str]:

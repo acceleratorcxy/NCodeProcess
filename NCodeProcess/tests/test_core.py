@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _axial_feed_exempt, _decode, _extract_apt_data_cached, add_initial_tool_change, add_m03, align_lines, analyze_program, apply_header, build_plan, build_feed_reference, calculate_stats, code_part, crosscheck_apt, detect_feed_outliers, emit_event, extract_apt_meta, extract_apt_toolpath, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
+from ncodeprocess.core import AptMeta, Config, FIELD_ORDER, FilePlan, ProcessReport, ProgramInfo, RuntimeLog, ToolInfo, _axial_feed_exempt, _decode, _extract_apt_data_cached, add_initial_tool_change, add_m03, align_lines, analyze_program, apply_header, build_plan, build_feed_reference, calculate_stats, code_part, crosscheck_apt, detect_feed_outliers, emit_event, extract_drawing_candidates, extract_header_fields, extract_tools, format_nc_date, process_plan, program_defaults, recount_retracts, reprocess_file, reset_runtime_log, runtime_log, save_timestamped_report, scan_directory, validate_program
 
 # 绝大多数测试共用的编制/审核/图号/版次/机床/控制系统/日期默认值。
 DEFAULT_INFO = ProgramInfo("A", "B", "D", "V", "M", "C", "DATE")
@@ -73,8 +73,6 @@ class CoreTests(CoreTestBase):
         self.assertIn("latest_apt", light.analyze_context)
         self.assertIn("auto_tools", light.analyze_context)
         self.assertIn("feed_reference", light.analyze_context)
-        self.assertIn("info", light.analyze_context)
-        self.assertIn("config", light.analyze_context)
         self.assertIn("tool_overrides", light.analyze_context)
 
     def test_analyze_plan_file_completes_single_file_after_light_plan(self):
@@ -91,7 +89,7 @@ class CoreTests(CoreTestBase):
         context = light.analyze_context
         from ncodeprocess.core import analyze_plan_file
         analyze_plan_file(
-            mpf, context["directory"], context["info"], context["config"],
+            mpf, context["directory"], DEFAULT_INFO, cfg,
             context["latest_apt"], context["auto_tools"],
             context["feed_reference"], context["tool_overrides"])
         self.assertIsNotNone(mpf.output_text)
@@ -126,14 +124,14 @@ class CoreTests(CoreTestBase):
 
         with patch("ncodeprocess.core._extract_apt_data_cached", side_effect=counting_extract):
             analyze_plan_file(
-                mpf, context["directory"], context["info"], context["config"],
+                mpf, context["directory"], DEFAULT_INFO, cfg,
                 context["latest_apt"], context["auto_tools"],
                 context["feed_reference"], context["tool_overrides"])
             first_output = mpf.output_text
             self.assertEqual(calls["apt"], 1)
             # 第二次分析相同文件：直接命中缓存，不再解析 APT。
             analyze_plan_file(
-                mpf, context["directory"], context["info"], context["config"],
+                mpf, context["directory"], DEFAULT_INFO, cfg,
                 context["latest_apt"], context["auto_tools"],
                 context["feed_reference"], context["tool_overrides"])
             self.assertEqual(calls["apt"], 1)
@@ -797,7 +795,7 @@ class CoreTests(CoreTestBase):
             "FEDRAT/ 6000.0000,MMPM\n",
             encoding="utf-8",
         )
-        meta = extract_apt_meta(apt)
+        meta = _extract_apt_data_cached(apt)[0]
         self.assertEqual(meta.machine, "3-axis Machine.1")
         self.assertEqual(meta.pp_table, "HPM1150U.PPTable")
         self.assertEqual(meta.catia_version, "1.0")
@@ -814,7 +812,7 @@ class CoreTests(CoreTestBase):
         text = "$$    -0.99863    -0.05232     0.00137 18984.32985\n"
         apt = self.make_dir() / "m.aptsource"
         apt.write_text(text, encoding="utf-8")
-        meta = extract_apt_meta(apt)
+        meta = _extract_apt_data_cached(apt)[0]
         self.assertEqual(len(meta.transform or []), 4)
         self.assertAlmostEqual(meta.transform[3], 18984.32985)
 
@@ -831,7 +829,7 @@ class CoreTests(CoreTestBase):
             "SPINDL/ 8000.0000,RPM,CLW\n",
             encoding="utf-8",
         )
-        meta = extract_apt_meta(apt)
+        meta = _extract_apt_data_cached(apt)[0]
         self.assertEqual(meta.program_name, "AG6D311A0101")
         self.assertEqual(meta.operation_feeds["Roughing.3"], [("3000.0000", "MMPM"), ("6000.0000", "MMPM")])
         self.assertEqual(meta.operation_spindles["Finishing.1"], [("8000.0000", "RPM", "CLW")])
@@ -848,7 +846,7 @@ class CoreTests(CoreTestBase):
             "TLON,GOFWD/ (CIRCLE/ 1.0, 2.0, 3.0,$\n",
             encoding="utf-8",
         )
-        stats = extract_apt_toolpath(apt)
+        stats = _extract_apt_data_cached(apt)[1]
         self.assertEqual(stats.goto_count, 5)
         self.assertAlmostEqual(stats.min_x, 0.0)
         self.assertAlmostEqual(stats.max_x, 4.0)
@@ -867,7 +865,7 @@ class CoreTests(CoreTestBase):
             "GOTO / 0,0,0\n" * 4,
             encoding="utf-8",
         )
-        stats = extract_apt_toolpath(apt)
+        stats = _extract_apt_data_cached(apt)[1]
         self.assertAlmostEqual(stats.retract_plane, 100.0)
 
     def test_toolpath_native_rapid_priority(self):
@@ -878,7 +876,7 @@ class CoreTests(CoreTestBase):
             "RAPID\nGOTO / 1,1,100\nGOHOME\n",
             encoding="utf-8",
         )
-        stats = extract_apt_toolpath(apt)
+        stats = _extract_apt_data_cached(apt)[1]
         self.assertEqual(stats.retract_count, 3)
 
     def test_recount_retracts_custom_height(self):
@@ -1460,7 +1458,7 @@ class CoreTests(CoreTestBase):
         self.assertIn("A.MPF,3,N3,feed-zero,error,修正 F0", lines[1])
 
     def test_extract_program_name_priority_and_suffix_rules(self):
-        from ncodeprocess.core import extract_program_name
+        from ncodeprocess.core import _program_name_and_source
         root = self.make_dir()
         cases = (
             ('MSG("PROGRAM:FROM_MSG")\n', "from-msg.MPF", "FROM_MSG"),
@@ -1472,7 +1470,7 @@ class CoreTests(CoreTestBase):
             with self.subTest(name=name):
                 path = root / name
                 path.write_text(text, encoding="utf-8")
-                self.assertEqual(extract_program_name(path, text), expected)
+                self.assertEqual(_program_name_and_source(path, text)[0], expected)
 
     def test_program_field_updates_when_overwrite_enabled(self):
         # WP-B2：PROGRAM 不保护，勾选覆盖时头部 PROGRAM 与程序名对齐。

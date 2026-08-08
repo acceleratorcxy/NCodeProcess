@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import traceback
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -39,10 +39,14 @@ DEFAULT_NAME_PATTERN = r"^[A-Za-z0-9_一-鿿-]+$"
 SAFE_PLANE_TOL = 1.0
 FEED_RARE_MAX = 2
 FEED_BASE_TOL = 0.30
+# 英文月份常量（头部 DATE 格式与解析共用，避免重复定义）。
+_MONTHS_EN = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 MSG_RE = re.compile(r'^\s*MSG\s*\(\s*["\'](.*?)["\']\s*\)\s*;?\s*$', re.I)
 PPRINT_RE = re.compile(r"\bPPRINT\s+PROGNAME\s+([A-Za-z0-9_-]+)", re.I)
 NUM = r"[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[Ee][+-]?\d+)?"
-ADDR_RE = re.compile(r"(?<![A-Za-z])([A-Z])\s*(" + NUM + r")", re.I)
+# 地址解析只保留统计/校验实际消费的 F/S/X/Y/Z（validate 的统计与检查、
+# crosscheck 的 S 仅读这四键）；G/T/M 地址不再解析，省去无用的 float 与存储。
+ADDR_RE = re.compile(r"(?<![A-Za-z])([FSXYZ])\s*(" + NUM + r")", re.I)
 N_RE = re.compile(r"^\s*N(\d+)", re.I)
 G00_RE = re.compile(r"(?<![A-Z])G0{1,2}(?=\s|[XYZFIJKS]|;|$)", re.I)
 END_LINE_RE = re.compile(r"^%\s*;?$", re.I)
@@ -67,16 +71,35 @@ TOOL_CALL_RE = re.compile(r"(?<![A-Z])T(\d+)(?!\d)", re.I)
 MOTION_RE = re.compile(r"(?<![A-Z])G0*([0-3])(?!\d)", re.I)
 INVALID_ADDR_RE = re.compile(r"(?<![A-Za-z])([GTMFSXYZIJ])\s*(?=$|[;\s])", re.I)
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-_SCAN_TEXT_CACHE: Dict[str, Tuple[int, int, str, Tuple[str, str, str]]] = {}
-_APT_TOOL_CACHE: Dict[str, Tuple[int, int, str, List[ToolInfo]]] = {}
+_SCAN_TEXT_CACHE: "OrderedDict[str, Tuple[int, int, str, Tuple[str, str, str]]]" = OrderedDict()
+_APT_TOOL_CACHE: "OrderedDict[str, Tuple[int, int, str, List[ToolInfo]]]" = OrderedDict()
 # 按 (路径, mtime, size, 编码) 缓存逐行解析记录，供 analyze_program 的
 # 校验/F 检测/APT 交叉校验共享；文件变化后自动失效。
-_ROWS_CACHE: Dict[str, Tuple[int, int, str, List[dict]]] = {}
+_ROWS_CACHE: "OrderedDict[str, Tuple[int, int, str, List[dict]]]" = OrderedDict()
 
 # 单文件分析结果缓存：键覆盖源文件内容、程序名、头部信息、配置、配对 APT、
 # 跨程序参照与刀具覆盖；命中时跳过整条分析管线（重复扫描接近瞬时）。
-_ANALYSIS_CACHE: Dict[str, dict] = {}
+_ANALYSIS_CACHE: "OrderedDict[str, dict]" = OrderedDict()
 _ANALYSIS_CACHE_MAX = 4000
+
+
+def _cache_get(cache: OrderedDict, key: str):
+    """LRU 读：命中时移到末尾（保持插入序 = 最近使用序）。"""
+    value = cache.get(key)
+    if value is not None:
+        cache.move_to_end(key)
+    return value
+
+
+def _cache_put(cache: OrderedDict, key: str, value, max_entries: int) -> None:
+    """LRU 写：超限逐出最久未使用条目，不再整表清空（清空会让全部缓存值同时失效）。"""
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > max_entries:
+        try:
+            cache.popitem(last=False)
+        except KeyError:
+            break
 
 
 @dataclass
@@ -161,8 +184,7 @@ class ProgramInfo:
 def format_nc_date(now: Optional[datetime] = None) -> str:
     """Format NC header time with locale-independent English month names."""
     value = now or datetime.now()
-    months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-    return f"{months[value.month - 1]} {value.day:02d} {value:%H:%M:%S %Y}"
+    return f"{_MONTHS_EN[value.month - 1]} {value.day:02d} {value:%H:%M:%S %Y}"
 
 
 @dataclass
@@ -284,8 +306,6 @@ class FilePlan:
     apt_encoding: str = ""
     # WP-A9 修订：F 离群检测过程数据（报告 files[].feed_outlier）。
     feed_outlier: Optional[FeedOutlierData] = None
-    # 跨程序常见档位参照（仅单段程序对比时使用；由 build_plan 统一计算）。
-    _feed_reference: Sequence[float] = ()
 
 
 @dataclass
@@ -423,12 +443,6 @@ class RuntimeLog:
                 self._reported_dropped = self._dropped
             return entries
 
-    def clear(self) -> None:
-        with self._lock:
-            self._events.clear()
-            self._dropped = 0
-            self._reported_dropped = 0
-
 
 # 模块级共享事件源：core 内部埋点直接调用 emit_event；GUI/CLI 启动时 attach 磁盘日志。
 _runtime_log = RuntimeLog()
@@ -439,7 +453,7 @@ def runtime_log() -> RuntimeLog:
 
 
 def reset_runtime_log() -> RuntimeLog:
-    """清空并替换共享事件源（测试隔离与程序启动时调用）。"""
+    """清空并替换共享事件源（测试隔离用；GUI/CLI 启动时模块级实例本就是新的）。"""
     global _runtime_log
     _runtime_log = RuntimeLog()
     return _runtime_log
@@ -512,13 +526,11 @@ def _read_text_cached(path: Path, encoding: str = "auto") -> Tuple[str, str, str
     stat = path.stat()
     key = str(path.resolve())
     signature = (stat.st_mtime_ns, stat.st_size, encoding)
-    cached = _SCAN_TEXT_CACHE.get(key)
+    cached = _cache_get(_SCAN_TEXT_CACHE, key)
     if cached and cached[:3] == signature:
         return cached[3]
     result = read_text(path, encoding)
-    if len(_SCAN_TEXT_CACHE) > 1000:
-        _SCAN_TEXT_CACHE.clear()
-    _SCAN_TEXT_CACHE[key] = signature + (result,)
+    _cache_put(_SCAN_TEXT_CACHE, key, signature + (result,), 1000)
     return result
 
 
@@ -539,7 +551,7 @@ def _extract_apt_tools_from_path(path: Path, encoding: str = "auto") -> List[Too
     """Stream an APT file and retain only cutter/tool definition records."""
     stat = path.stat()
     key = str(path.resolve())
-    cached = _APT_TOOL_CACHE.get(key)
+    cached = _cache_get(_APT_TOOL_CACHE, key)
     if cached and cached[:3] == (stat.st_mtime_ns, stat.st_size, encoding):
         return list(cached[3])
     selected = []
@@ -557,9 +569,7 @@ def _extract_apt_tools_from_path(path: Path, encoding: str = "auto") -> List[Too
     except UnicodeDecodeError:
         text = data.decode("utf-8", errors="ignore")
     tools = extract_tools(text)
-    if len(_APT_TOOL_CACHE) > 1000:
-        _APT_TOOL_CACHE.clear()
-    _APT_TOOL_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, list(tools))
+    _cache_put(_APT_TOOL_CACHE, key, (stat.st_mtime_ns, stat.st_size, encoding, list(tools)), 1000)
     return tools
 
 
@@ -602,7 +612,7 @@ APT_LOADTL_RE = re.compile(r"LOADTL\s*/\s*(\d+)(?:\s*,\s*(\d+))?", re.I)
 APT_PROGNAME_DOLLAR_RE = re.compile(r"^\$\$\s+([A-Za-z][A-Za-z0-9_-]*)\s*$")
 
 
-_APT_DATA_CACHE: Dict[str, Tuple[int, int, str, Tuple[AptMeta, ToolpathStats, List[ToolInfo]]]] = {}
+_APT_DATA_CACHE: "OrderedDict[str, Tuple[int, int, str, Tuple[AptMeta, ToolpathStats, List[ToolInfo]]]]" = OrderedDict()
 
 
 def _extract_apt_data(path: Path, encoding: str = "auto") -> Tuple[AptMeta, ToolpathStats, List[ToolInfo]]:
@@ -756,9 +766,8 @@ def _extract_apt_data(path: Path, encoding: str = "auto") -> Tuple[AptMeta, Tool
             stats.retract_count = _retract_runs(z_values, plane, max(5.0, plane * 0.05))
     try:
         stat = path.stat()
-        _APT_TRACE_CACHE[str(path.resolve())] = (stat.st_mtime_ns, stat.st_size, encoding, z_values)
-        if len(_APT_TRACE_CACHE) > 1000:
-            _APT_TRACE_CACHE.clear()
+        _cache_put(_APT_TRACE_CACHE, str(path.resolve()),
+                   (stat.st_mtime_ns, stat.st_size, encoding, z_values), 1000)
     except OSError:
         pass
     if transform:
@@ -779,19 +788,12 @@ def _extract_apt_data(path: Path, encoding: str = "auto") -> Tuple[AptMeta, Tool
 def _extract_apt_data_cached(path: Path, encoding: str = "auto") -> Tuple[AptMeta, ToolpathStats, List[ToolInfo]]:
     stat = path.stat()
     key = str(path.resolve())
-    cached = _APT_DATA_CACHE.get(key)
+    cached = _cache_get(_APT_DATA_CACHE, key)
     if cached and cached[:3] == (stat.st_mtime_ns, stat.st_size, encoding):
         return cached[3]
     result = _extract_apt_data(path, encoding)
-    if len(_APT_DATA_CACHE) > 1000:
-        _APT_DATA_CACHE.clear()
-    _APT_DATA_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, result)
+    _cache_put(_APT_DATA_CACHE, key, (stat.st_mtime_ns, stat.st_size, encoding, result), 1000)
     return result
-
-
-def extract_apt_meta(path: Path, encoding: str = "auto") -> AptMeta:
-    """解析 APT 头部元数据（单遍合并解析的薄包装，供测试/兼容使用）。"""
-    return _extract_apt_data(path, encoding)[0]
 
 
 @dataclass
@@ -812,7 +814,7 @@ class ToolpathStats:
         return asdict(self)
 
 
-_APT_TRACE_CACHE: Dict[str, Tuple[int, int, str, List[float]]] = {}
+_APT_TRACE_CACHE: "OrderedDict[str, Tuple[int, int, str, List[float]]]" = OrderedDict()
 
 
 def _retract_runs(z_values: Sequence[float], plane: float, tolerance: float) -> int:
@@ -863,19 +865,15 @@ def _stream_z_values(path: Path, encoding: str = "auto") -> List[float]:
     return z_values
 
 
-def extract_apt_toolpath(path: Path, encoding: str = "auto") -> ToolpathStats:
-    """统计 APT 轨迹（单遍合并解析的薄包装，供测试/兼容使用）。"""
-    return _extract_apt_data(path, encoding)[1]
-
-
 def recount_retracts(path: Path, height: float, encoding: str = "auto") -> int:
     """按指定抬刀高度重算抬刀次数（优先使用轨迹缓存；无缓存时重新流式读取）。"""
     stat = path.stat()
     key = str(path.resolve())
-    cached = _APT_TRACE_CACHE.get(key)
+    cached = _cache_get(_APT_TRACE_CACHE, key)
     if not cached or cached[:3] != (stat.st_mtime_ns, stat.st_size, encoding):
         z_values = _stream_z_values(path, encoding)
-        _APT_TRACE_CACHE[key] = (stat.st_mtime_ns, stat.st_size, encoding, z_values)
+        _cache_put(_APT_TRACE_CACHE, key,
+                   (stat.st_mtime_ns, stat.st_size, encoding, z_values), 1000)
     else:
         z_values = cached[3]
     return _retract_runs(z_values, height, max(5.0, height * 0.05))
@@ -928,11 +926,6 @@ def _program_name_and_source(path: Path, text: Optional[str] = None, pattern: st
     if _safe_name(stem, pattern):
         return stem, "文件名"
     return None, ""
-
-
-def extract_program_name(path: Path, text: Optional[str] = None, pattern: str = DEFAULT_NAME_PATTERN) -> Optional[str]:
-    name, _source = _program_name_and_source(path, text, pattern)
-    return name
 
 
 def _iter_files(directory: Path, recursive: bool) -> Iterable[Path]:
@@ -1628,40 +1621,6 @@ def _new_stats() -> Stats:
 
 # --- F 离群检测：《F值异常检测方法》抬刀平面分段对比（2026-08-07 决策稿）---
 
-def _feed_rows(text: str, start: int) -> List[Tuple[int, Optional[float], Optional[float], Optional[float], bool, bool]]:
-    """逐行解析正文：返回 (行号, 有效F, 显式F, 显式Z, 有XY, 是否运动行)。
-
-    模态 F 继承：无显式 F 的行沿用上一行 F；只有运动行计入段内统计。
-    """
-    rows = []
-    modal_feed = None
-    lines = text.replace("\r\n", "\n").split("\n")
-    for i, raw_line in enumerate(lines[start:], start=start + 1):
-        code = code_part(raw_line)
-        if not code.strip():
-            continue
-        z_value = None
-        has_xy = False
-        explicit_f = None
-        for parameter in ADDR_RE.finditer(code):
-            key = parameter.group(1).upper()
-            try:
-                value = float(parameter.group(2))
-            except ValueError:
-                continue
-            if key == "Z":
-                z_value = value
-            elif key in "XY":
-                has_xy = True
-            elif key == "F":
-                explicit_f = value
-        if explicit_f is not None:
-            modal_feed = explicit_f
-        is_motion = bool(has_xy or z_value is not None or MOTION_ANY_RE.search(code))
-        rows.append((i, modal_feed, explicit_f, z_value, has_xy, is_motion))
-    return rows
-
-
 def _feed_safe_plane(rows) -> Optional[float]:
     """抬刀平面：程序自身最大 Z 簇（单个超高点不参与，避免干扰切段）。"""
     z_values = [z for _ln, _f, _ef, z, _xy, _m in rows if z is not None]
@@ -1767,16 +1726,18 @@ def _violates_repeat_consistency(runs, value: float, depth_tol: float = 0.5) -> 
     return False
 
 
-def _axial_feed_exempt(rows, value: float, plane: float) -> bool:
+def _axial_feed_exempt(rows, value: float, plane: float, runs=None) -> bool:
     """轴向豁免（值无关）：罕见值的所有出现行都是纯 Z 运动且位于抬刀平面以下
     （下刀/钻入类；平面上的定位/抬刀行不豁免），并通过「越深越慢」「同深同速」
-    一致性校验。任何一条不满足都不豁免。"""
+    一致性校验。任何一条不满足都不豁免。runs 由调用方缓存（_feed_z_runs 全行
+    扫描，多个罕见值时只算一遍）。"""
     occurrences = [(z, has_xy) for _ln, feed, _ef, z, has_xy, is_motion in rows
                    if is_motion and feed == value]
     if not occurrences or not all(z is not None and not has_xy and z < plane
                                   for z, has_xy in occurrences):
         return False
-    runs = _feed_z_runs(rows)
+    if runs is None:
+        runs = _feed_z_runs(rows)
     if _violates_axial_order(runs, value) or _violates_repeat_consistency(runs, value):
         return False
     return True
@@ -1800,6 +1761,26 @@ def _explicit_feed_set(text: str) -> frozenset:
             except ValueError:
                 pass
     return frozenset(feeds)
+
+
+# 显式 F 集按 (path, mtime, size, encoding) 缓存：跨程序参照在每次扫描都会
+# 重建（在单文件分析缓存命中之前），直接重解析全部 MPF 正文是热扫描的主要开销
+# （2026-08-08 实测热扫描 0.19s 中占 0.15s）；文件变化后按 stat 自动失效。
+_FEED_SET_CACHE: "OrderedDict[str, Tuple[int, int, str, frozenset]]" = OrderedDict()
+
+
+def _explicit_feed_set_cached(path: Path, encoding: str = "auto") -> frozenset:
+    """按 (path, mtime, size, encoding) 缓存显式 F 集，复用 _read_text_cached 的文本缓存。"""
+    text, used_encoding, _ = _read_text_cached(path, encoding)
+    stat = path.stat()
+    key = str(path.resolve())
+    cached = _cache_get(_FEED_SET_CACHE, key)
+    if cached and cached[:3] == (stat.st_mtime_ns, stat.st_size, used_encoding):
+        return cached[3]
+    result = _explicit_feed_set(text)
+    _cache_put(_FEED_SET_CACHE, key,
+               (stat.st_mtime_ns, stat.st_size, used_encoding, result), 1000)
+    return result
 
 
 def build_feed_reference(feed_sets: Sequence[Tuple[str, Sequence[float]]],
@@ -1839,11 +1820,12 @@ def detect_feed_outliers(text: str, filename: str, config: Config,
     lines = text.replace("\r\n", "\n").split("\n")
     start = _header_end(lines)
     if rows is None:
-        rows = _feed_rows(text, start)
-    else:
-        # 共享解析器（_parse_code_rows）的行记录转成 feed 检测使用的元组格式。
-        rows = [(rec["line"], rec["feed"], rec["explicit_f"], rec["z"], rec["xy"], rec["motion"])
-                for rec in rows]
+        # 测试直接调用时无共享行记录，用共享解析器构建；生产路径 analyze_program
+        # 总是传入 rows（解析只做一遍，复用跨校验/F 检测/交叉校验）。
+        rows = _parse_code_rows(text, start)
+    # 共享解析器（_parse_code_rows）的行记录转成 feed 检测使用的元组格式。
+    rows = [(rec["line"], rec["feed"], rec["explicit_f"], rec["z"], rec["xy"], rec["motion"])
+            for rec in rows]
     if not rows:
         return issues, feed_outlier
     safe_plane = _feed_safe_plane(rows)
@@ -1878,6 +1860,13 @@ def detect_feed_outliers(text: str, filename: str, config: Config,
     # 不稀释罕见判定——一次误写被后续多行继承（真实事故形态）仍应被识别。
     explicit_counts = Counter(
         explicit_f for _ln, _f, explicit_f, _z, _xy, _m in rows if explicit_f is not None)
+    # _feed_z_runs 是全行扫描：懒计算一次，多个罕见候选值共用（豁免检查复用）。
+    z_runs_cache = []
+
+    def axial_exempt(value: float) -> bool:
+        if not z_runs_cache:
+            z_runs_cache.append(_feed_z_runs(rows))
+        return _axial_feed_exempt(rows, value, safe_plane, runs=z_runs_cache[0])
 
     def matches_apt_feed(value: float) -> bool:
         return any(abs(value - apt) <= max(apt * 0.10, 1.0) for apt in feed_outlier.apt_feeds)
@@ -1923,7 +1912,7 @@ def detect_feed_outliers(text: str, filename: str, config: Config,
                 count = explicit_counts[value]
                 if count > FEED_RARE_MAX:
                     continue
-                if _axial_feed_exempt(rows, value, safe_plane):
+                if axial_exempt(value):
                     continue
                 others = set()
                 for other_index, other_set in enumerate(segment_sets):
@@ -1949,7 +1938,7 @@ def detect_feed_outliers(text: str, filename: str, config: Config,
                 count = explicit_counts[value]
                 if count > FEED_RARE_MAX:
                     continue
-                if _axial_feed_exempt(rows, value, safe_plane):
+                if axial_exempt(value):
                     continue
                 gaps = [_feed_gap(value, other) for other in reference]
                 if not gaps or not all(gap > FEED_BASE_TOL for gap in gaps):
@@ -2040,14 +2029,13 @@ def _parse_code_rows_cached(path: Path, encoding: str = "auto") -> List[dict]:
     text, used_encoding, _ = _read_text_cached(path, encoding)
     stat = path.stat()
     key = str(path.resolve())
-    cached = _ROWS_CACHE.get(key)
+    cached = _cache_get(_ROWS_CACHE, key)
     if cached and cached[:3] == (stat.st_mtime_ns, stat.st_size, used_encoding):
         return cached[3]
     start = _header_end(text.replace("\r\n", "\n").split("\n"))
     rows = _parse_code_rows(text, start)
-    if len(_ROWS_CACHE) > 1000:
-        _ROWS_CACHE.clear()
-    _ROWS_CACHE[key] = (stat.st_mtime_ns, stat.st_size, used_encoding, rows)
+    _cache_put(_ROWS_CACHE, key,
+               (stat.st_mtime_ns, stat.st_size, used_encoding, rows), 1000)
     return rows
 
 
@@ -2317,7 +2305,7 @@ def reprocess_file(f: FilePlan, info: ProgramInfo, config: Config, *, tools: Seq
         f.output_text, _header_end(f.output_text.replace("\r\n", "\n").split("\n")))
     f.stats, validation_issues, f.feed_outlier = analyze_program(
         f.output_text, f.source, f.program, effective, config, apt_meta=f.apt_meta,
-        feed_reference=getattr(f, "_feed_reference", ()) or (), rows=parsed_rows)
+        rows=parsed_rows)
     f.issues = header_issues + validation_issues
     # WP-A4：APT 规划 ↔ MPF 执行交叉校验。
     if f.apt_meta is not None:
@@ -2425,14 +2413,19 @@ def analyze_plan_file(f: FilePlan, directory: Path, info: ProgramInfo, config: C
         # light plan defers this so the file list appears immediately.
         sources = mpf_sources or []
         if len(sources) > 1:
+            def feed_set_for(item):
+                try:
+                    return _explicit_feed_set_cached(directory / item.source, config.encoding)
+                except OSError:
+                    # 计划可能来自内存构造（如测试/手动计划），源文件不存在：用原文兜底。
+                    return _explicit_feed_set(item.original_text)
             feed_reference.update(build_feed_reference([
-                (item.source, _explicit_feed_set(item.original_text))
-                for item in sources
+                (item.source, feed_set_for(item)) for item in sources
             ]))
         feed_reference["__ready__"] = True
     cache_key = _analysis_cache_key(directory, f, info, config, latest_apt, auto_tools,
                                     feed_reference, tool_overrides)
-    cached = _ANALYSIS_CACHE.get(cache_key)
+    cached = _cache_get(_ANALYSIS_CACHE, cache_key)
     if cached is not None:
         _restore_cached_analysis(f, cached)
         return
@@ -2546,7 +2539,7 @@ def analyze_plan_file(f: FilePlan, directory: Path, info: ProgramInfo, config: C
             emit_event("warning" if error_issues else "info", "issues_found",
                        f"识别异常与错误：{f.source}（错误 {len(error_issues)} 条、警告 {len(warning_issues)} 条）",
                        detail="、".join(kind_list))
-        _ANALYSIS_CACHE[cache_key] = {
+        _cache_put(_ANALYSIS_CACHE, cache_key, {
             "output_text": f.output_text,
             "changes": list(f.changes),
             "stats": f.stats,
@@ -2559,9 +2552,7 @@ def analyze_plan_file(f: FilePlan, directory: Path, info: ProgramInfo, config: C
             "apt_toolpath": f.apt_toolpath,
             "apt_source_path": f.apt_source_path,
             "apt_encoding": f.apt_encoding,
-        }
-        if len(_ANALYSIS_CACHE) > _ANALYSIS_CACHE_MAX:
-            _ANALYSIS_CACHE.clear()
+        }, _ANALYSIS_CACHE_MAX)
     except Exception as e:
         emit_event("error", "error", f"处理文件失败：{f.source}", detail=traceback.format_exc())
         f.issues.append(Issue(f.source, 1, "", "processing", "error", str(e)))
@@ -2613,7 +2604,6 @@ def _prepare_plan_context(scan: ScanResult, config: Config) -> Dict[str, object]
         "latest_apt": latest_apt,
         "auto_tools": auto_tools,
         "feed_reference": feed_reference,
-        "feed_reference_ready": False,
         "mpf_sources": [f for f in scan.files
                         if f.kind == "mpf" and f.original_text is not None],
     }
@@ -2723,8 +2713,6 @@ def build_plan(scan: ScanResult, info: Optional[ProgramInfo] = None,
                 process_mpf(item)
     _resolve_plan_targets(scan, config)
     scan.analyze_context = {
-        "info": info,
-        "config": config,
         "tool_overrides": tool_overrides,
     }
     scan.analyze_context.update(context)
@@ -2809,9 +2797,6 @@ def _plan_process_summary(f: FilePlan) -> str:
     if f.stats is not None:
         parts.append(f"统计 F={f.stats.counts.get('F', 0)} 次、S={f.stats.counts.get('S', 0)} 次")
     return "；".join(parts)
-
-
-_MONTHS_EN = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 def parse_nc_date(text: str) -> Optional[datetime]:

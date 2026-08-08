@@ -74,8 +74,12 @@ def build_parser():
     p.add_argument("--g00-level", choices=["error", "warning", "allow"], default="error")
     p.add_argument("--no-m03", action="store_true", help="不自动补写 M03")
     p.add_argument("--auto-tool-change", action="store_true", help="自动添加换刀指令 TnM6，并统一已有刀具号")
-    p.add_argument("--require-m06", action="store_true")
-    p.add_argument("--allow-no-end", action="store_true")
+    p.add_argument("--require-m06", action="store_true", default=None,
+                   help="必填 M06；缺省读持久化偏好")
+    p.add_argument("--allow-no-end", action="store_true", default=None,
+                   help="允许缺少结束标记；缺省读持久化偏好")
+    p.add_argument("--require-spindle-speed", action="store_true", default=None,
+                   help="必填 S 转速；缺省读持久化偏好")
     p.add_argument("--encoding", default="auto", help="auto、utf-8、gb18030 等")
     p.add_argument("--bianzhi", default="")
     p.add_argument("--shenhe", default="")
@@ -132,8 +136,11 @@ def _config_from_args(args) -> Config:
         g00_level=args.g00_level,
         auto_m03=not args.no_m03,
         auto_tool_change=args.auto_tool_change,
-        require_m06=args.require_m06,
-        require_end_marker=not args.allow_no_end,
+        require_m06=args.require_m06 if args.require_m06 is not None else _pref_bool(prefs, "require_m06", False),
+        require_spindle_speed=args.require_spindle_speed if args.require_spindle_speed is not None
+        else _pref_bool(prefs, "require_spindle_speed", False),
+        require_end_marker=(not args.allow_no_end) if args.allow_no_end is not None
+        else _pref_bool(prefs, "require_end_marker", True),
         encoding=args.encoding,
         m03_position=args.m03_position or prefs.get("m03_position", "after-s"),
         newline=args.newline or prefs.get("newline", "auto"),
